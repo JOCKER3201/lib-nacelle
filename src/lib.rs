@@ -11,6 +11,12 @@
 //!   widget that owns them must agree on before either has drawn.
 //! * [`flex`] — the responsive layout engine (the algorithm web pages
 //!   use), recomputed from the actual window size every frame.
+//! * [`focus`] — keyboard focus: the per-world chain controls register
+//!   into, Tab/arrow navigation, neutral key events and the shortcut
+//!   registry.
+//! * [`clipboard`] — the clipboard seam: the trait the application's
+//!   backend implements, and the process-local fallback that keeps
+//!   copy/paste alive without one.
 //! * [`object`] — reusable on-screen objects: windows and dialogs,
 //!   buttons, sliders, drop-downs, checkboxes, and the frame put
 //!   around windows the application does not own.
@@ -34,10 +40,12 @@
 
 pub mod assets;
 pub mod base;
+pub mod clipboard;
 pub mod deco;
 pub mod draw;
 pub mod layout;
 pub use layout::flex;
+pub mod focus;
 pub mod font;
 pub mod geometry;
 pub mod object;

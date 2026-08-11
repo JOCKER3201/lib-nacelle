@@ -1,6 +1,8 @@
 //! Checkbox object: an outlined box with a filled square when checked,
 //! plus a label. The whole row is the click target.
 
+use super::focus_ring;
+use crate::focus::{Caps, FocusId};
 use crate::font::FONT_UI;
 use crate::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
 use crate::{Ctx, Rect};
@@ -68,4 +70,24 @@ pub fn draw(ctx: &mut Ctx, row: Rect, label: &str, checked: bool, hover: bool) {
         col(style.text),
         px * t.px(tok(&TRACKING, "type.body.tracking")),
     );
+}
+
+/// [`draw`], joined to the world's focus chain: the whole row registers
+/// — it is already the click target, and the ring wraps the same rect
+/// the pointer hits. A checkbox eats no keys (toggling is the router's
+/// Space/Enter), and focus never feeds `hover` — the ring is the only
+/// focus signal.
+pub fn draw_focusable(
+    ctx: &mut Ctx,
+    row: Rect,
+    label: &str,
+    checked: bool,
+    hover: bool,
+    id: FocusId,
+) {
+    let f = ctx.focus.as_deref_mut().map(|fc| fc.register(id, row, Caps::NONE));
+    draw(ctx, row, label, checked, hover);
+    if f.map_or(false, |f| f.ring) {
+        focus_ring::draw(ctx, row);
+    }
 }

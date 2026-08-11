@@ -87,6 +87,18 @@ space = oklab
 focus = @palette.accent_alt   # the flat focus colour for anything too small to carry a gradient
                               # (5.8 names exactly this value for family B)
 
+# The KEYBOARD focus ring (5.21 focus.ring.*, drawn by controls since the
+# F1 chain went live): explicitly ON — family B's focused thing is FOUND by
+# its lit frame, which is the reference's whole navigation story. The ring
+# wears the flat violet above (a control is too small to carry the
+# gradient; the gradient stays the container frame's, elev.focused), one
+# step heavier than the master's thin default for the same reason
+# elev.focused draws its edge at @stroke.regular: focus is the one weight
+# this family exaggerates. The halo it wears is [glow] focus_ring below.
+[focus]
+ring.enabled = true
+ring.width   = @stroke.regular
+
 # The night ribbons. Image 10 is image 8 after dark: "cooler, stronger
 # violet and magenta in the ribbon waves". The master samples the spectrum
 # from the data ramp, which for a cyan `palette.data` skews green.

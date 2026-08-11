@@ -1,0 +1,1053 @@
+//! Context menu (F1 §4): a retained model drawn immediate — the
+//! dropdown's idiom grown up. Items, separators, shortcut hints and one
+//! open submenu level per node (arbitrary depth by nesting — each level
+//! is a [`MenuState`]).
+//!
+//! Division of labour with the application:
+//!
+//! * The application owns the OPEN menu as its top layer: while one is
+//!   up, keys and clicks reach [`MenuState::key`] / [`MenuState::click`]
+//!   before anything else, and a click that lands outside every level
+//!   answers [`MenuOut::Close`] *and is consumed* (no click-through —
+//!   deliberate).
+//! * [`MenuState::draw`] runs LAST in the frame: the draw list is
+//!   immediate and draw order is z-order, so anything drawn after the
+//!   menu would sit on top of it.
+//! * Hints are the application's [`crate::focus::ShortcutMap::hint`]
+//!   strings — never hand-written, or the day a binding changes the
+//!   menu lies.
+//!
+//! Everything visual comes from `[menu]` / `component.menu.*` /
+//! class `menu.item` tokens and the `motion.menu_unfold` clock; the
+//! module holds no literal of its own.
+
+use crate::draw::{Corner, CornerStyle};
+use crate::focus::{Key, KeyEv, Mods};
+use crate::font::FONT_UI;
+use crate::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
+use crate::{ui, Ctx, Rect};
+use std::sync::OnceLock;
+
+fn tok(cell: &'static OnceLock<TokenId>, name: &'static str) -> TokenId {
+    *cell.get_or_init(|| theme::id(name).unwrap_or(TokenId::MISSING))
+}
+
+/// The engine's colour, in the draw list's clothes.
+fn col(c: theme::ThemeColor) -> Color {
+    Color { r: c.r, g: c.g, b: c.b, a: c.a }
+}
+
+// ---------------------------------------------------------------------
+// Model
+// ---------------------------------------------------------------------
+
+/// One selectable row.
+#[derive(Clone)]
+pub struct MenuItem {
+    pub label: String,
+    /// Application command id — the F1 §1 registry's namespace, so a
+    /// picked row and a pressed shortcut land in the same dispatcher.
+    pub cmd: u32,
+    /// `"Ctrl+Shift+C"` — from `ShortcutMap::hint`, or None for a row
+    /// with no binding.
+    pub hint: Option<String>,
+    pub disabled: bool,
+    /// The next level, opened at this row's right edge.
+    pub submenu: Option<Vec<MenuItem>>,
+}
+
+impl MenuItem {
+    pub fn new(label: &str, cmd: u32) -> MenuItem {
+        MenuItem {
+            label: label.to_string(),
+            cmd,
+            hint: None,
+            disabled: false,
+            submenu: None,
+        }
+    }
+
+    pub fn with_hint(mut self, hint: Option<String>) -> MenuItem {
+        self.hint = hint;
+        self
+    }
+
+    pub fn with_disabled(mut self, disabled: bool) -> MenuItem {
+        self.disabled = disabled;
+        self
+    }
+
+    pub fn with_submenu(mut self, items: Vec<MenuItem>) -> MenuItem {
+        self.submenu = Some(items);
+        self
+    }
+}
+
+/// A row of the menu: an item, or the separator rule between groups.
+#[derive(Clone)]
+pub enum MenuEntry {
+    Item(MenuItem),
+    Rule,
+}
+
+/// What [`MenuState::key`] / [`MenuState::click`] answer the router.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MenuOut {
+    /// Consumed inside the menu; nothing for the application yet.
+    None,
+    /// Dismiss the whole menu. For a click this also means the press
+    /// landed outside every level — the router consumes it anyway.
+    Close,
+    /// A row was picked: dismiss and run the command.
+    Pick(u32),
+}
+
+/// What [`MenuState::draw`] answers: where this level landed and what
+/// the pointer is on (the deepest open level reports through its own
+/// return — the application rarely needs either, clicks and keys route
+/// through the state itself).
+pub struct MenuHit {
+    /// The level's placed box, at its full unfolded size.
+    pub rect: Rect,
+    /// The entry index under the pointer, if any.
+    pub hover: Option<usize>,
+}
+
+/// One open menu level. The application keeps the root; submenus hang
+/// off their parent's `sub`.
+pub struct MenuState {
+    entries: Vec<MenuEntry>,
+    /// Opening point (cursor, control corner). Preferred growth is
+    /// right+down from here; [`place`] flips when out of room.
+    at: (f32, f32),
+    /// The `motion.menu_unfold` clock: the moment this level opened.
+    /// Non-finite = not stamped yet; the first draw stamps it (a
+    /// submenu is opened by key/click handlers that hold no clock).
+    opened_t: f64,
+    /// Keyboard/hover highlight, an index into `entries`.
+    hi: Option<usize>,
+    /// The highlight came from the keyboard: draw the SELECTED rung,
+    /// not hover — keyboard never produces hover.
+    hi_kbd: bool,
+    /// Keyboard motion suppresses pointer-hover until the pointer
+    /// actually moves again (the small dance every toolkit does).
+    kbd_hold: bool,
+    /// The one open submenu level: (parent row index, its state).
+    sub: Option<(usize, Box<MenuState>)>,
+    // ---- view bookkeeping, filled by draw ---------------------------
+    /// Placed by the parent's draw: the row rect a submenu anchors to.
+    anchor_row: Option<Rect>,
+    /// This level's box at full size, once placed.
+    rect: Rect,
+    /// Row rects index-aligned with `entries`, at full size, plus
+    /// whether the row is fully unfolded (a mid-unfold row is not
+    /// clickable, exactly the dropdown's rule).
+    rows: Vec<(Rect, bool)>,
+    /// The first draw happened; before it, clicks are consumed rather
+    /// than judged against zeroed geometry.
+    placed: bool,
+    /// The pointer position of the last draw (hover delta detection).
+    last_mouse: Option<(f32, f32)>,
+    /// The row the pointer was over at the last draw: hover updates
+    /// `hi` only when the pointer ENTERS A DIFFERENT ROW, so a 1px
+    /// jitter cannot yank the highlight from under the arrow keys.
+    hover_row: Option<usize>,
+}
+
+impl MenuState {
+    /// A menu opened at `(x, y)` — the right-click position or a
+    /// control's rect corner — with `t` (seconds, the frame clock) as
+    /// the unfold's start.
+    pub fn open_at(entries: Vec<MenuEntry>, x: f32, y: f32, t: f64) -> MenuState {
+        MenuState {
+            entries,
+            at: (x, y),
+            opened_t: t,
+            hi: None,
+            hi_kbd: false,
+            kbd_hold: false,
+            sub: None,
+            anchor_row: None,
+            rect: Rect::new(0.0, 0.0, 0.0, 0.0),
+            rows: Vec::new(),
+            placed: false,
+            last_mouse: None,
+            hover_row: None,
+        }
+    }
+
+    /// Keyboard, routed to the deepest open level first. Down/Up move
+    /// the highlight skipping rules and disabled rows (wrapping);
+    /// Right/Enter opens the submenu or picks; Left/Escape closes one
+    /// level. Typing is ignored in F1 (mnemonics later) — but consumed:
+    /// the open menu is a grab.
+    pub fn key(&mut self, ev: &KeyEv) -> MenuOut {
+        if let Some((_, sub)) = &mut self.sub {
+            return match sub.key(ev) {
+                MenuOut::Close => {
+                    self.sub = None;
+                    MenuOut::None
+                }
+                out => out,
+            };
+        }
+        if ev.mods != Mods::NONE {
+            return MenuOut::None;
+        }
+        match ev.key {
+            Key::Down => {
+                self.move_hi(1);
+                MenuOut::None
+            }
+            Key::Up => {
+                self.move_hi(-1);
+                MenuOut::None
+            }
+            Key::Right => {
+                if let Some(i) = self.hi {
+                    if self.openable(i) {
+                        self.open_sub(i);
+                    }
+                }
+                MenuOut::None
+            }
+            Key::Enter => match self.hi {
+                Some(i) if self.openable(i) => {
+                    self.open_sub(i);
+                    MenuOut::None
+                }
+                Some(i) => match &self.entries[i] {
+                    MenuEntry::Item(it) if !it.disabled => MenuOut::Pick(it.cmd),
+                    _ => MenuOut::None,
+                },
+                None => MenuOut::None,
+            },
+            Key::Left | Key::Escape => MenuOut::Close,
+            _ => MenuOut::None,
+        }
+    }
+
+    /// A pointer press, routed to the deepest level containing it.
+    /// Inside a level: a plain row picks, a submenu row opens its
+    /// level, a rule or disabled row is a consumed no-op. Outside every
+    /// level: [`MenuOut::Close`] — and the router still consumes the
+    /// press (no click-through).
+    pub fn click(&mut self, x: f32, y: f32) -> MenuOut {
+        if !self.placed {
+            // Between opening and the first draw there is no geometry
+            // to judge against; swallow rather than misjudge.
+            return MenuOut::None;
+        }
+        if let Some((_, sub)) = &mut self.sub {
+            return match sub.click(x, y) {
+                MenuOut::Close => {
+                    if self.rect.contains(x, y) {
+                        // Outside the subtree but on THIS level: the
+                        // subtree folds and the row acts.
+                        self.sub = None;
+                        self.act_on(x, y)
+                    } else {
+                        MenuOut::Close
+                    }
+                }
+                out => out,
+            };
+        }
+        if self.rect.contains(x, y) {
+            self.act_on(x, y)
+        } else {
+            MenuOut::Close
+        }
+    }
+
+    /// Immediate draw + hit info, deepest level last (on top). Hover
+    /// tracking happens here — the draw pass is the one place that
+    /// knows this frame's geometry.
+    pub fn draw(&mut self, ctx: &mut Ctx) -> MenuHit {
+        static FILL: OnceLock<TokenId> = OnceLock::new();
+        static BORDER_C: OnceLock<TokenId> = OnceLock::new();
+        static BORDER_W: OnceLock<TokenId> = OnceLock::new();
+        static CORNER: OnceLock<TokenId> = OnceLock::new();
+        static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
+        static ROW_H: OnceLock<TokenId> = OnceLock::new();
+        static PAD: OnceLock<TokenId> = OnceLock::new();
+        static MIN_W: OnceLock<TokenId> = OnceLock::new();
+        static ITEM_INSET: OnceLock<TokenId> = OnceLock::new();
+        static TEXT_THRESHOLD: OnceLock<TokenId> = OnceLock::new();
+        static RULE_W: OnceLock<TokenId> = OnceLock::new();
+        static RULE_PAD: OnceLock<TokenId> = OnceLock::new();
+        static HINT_GAP: OnceLock<TokenId> = OnceLock::new();
+        static HINT_C: OnceLock<TokenId> = OnceLock::new();
+        static CHEVRON_W: OnceLock<TokenId> = OnceLock::new();
+        static CHEVRON_S: OnceLock<TokenId> = OnceLock::new();
+        static OVERLAP: OnceLock<TokenId> = OnceLock::new();
+        static ROLE: OnceLock<TokenId> = OnceLock::new();
+        static HINT_ROLE: OnceLock<TokenId> = OnceLock::new();
+        static CLASS: OnceLock<Option<u16>> = OnceLock::new();
+
+        if !self.opened_t.is_finite() {
+            self.opened_t = ctx.t;
+        }
+        let t = theme::resolved();
+        let class = *CLASS.get_or_init(|| theme::class_id("menu.item"));
+
+        // ---- metrics ----------------------------------------------------
+        let row_h = t.px(tok(&ROW_H, "menu.row_h")).max(0.0);
+        let pad = t.px(tok(&PAD, "menu.pad")).max(0.0);
+        let min_w = t.px(tok(&MIN_W, "menu.min_w")).max(0.0);
+        let inset = t.px(tok(&ITEM_INSET, "menu.item_inset")).max(0.0);
+        let text_threshold = t.px(tok(&TEXT_THRESHOLD, "menu.item_text_threshold"));
+        let rule_w = t.px(tok(&RULE_W, "menu.rule")).max(0.0);
+        let rule_pad = t.px(tok(&RULE_PAD, "menu.rule_pad")).max(0.0);
+        let hint_gap = t.px(tok(&HINT_GAP, "menu.hint_gap")).max(0.0);
+        let chevron_w = t.px(tok(&CHEVRON_W, "menu.chevron_w")).max(0.0);
+        let chevron_s = t.px(tok(&CHEVRON_S, "menu.chevron_stroke")).max(0.0);
+        let overlap = t.px(tok(&OVERLAP, "menu.submenu_overlap")).max(0.0);
+
+        let role = ui::bound_role(&ROLE, "menu.item.role");
+        let px = role.px(ctx, ctx.ui_font_scale);
+        let track = role.tracking_px(px);
+        let leading = role.leading();
+        let hint_role = ui::bound_role(&HINT_ROLE, "menu.hint_role");
+        let hpx = hint_role.px(ctx, ctx.ui_font_scale);
+        let htrack = hint_role.tracking_px(hpx);
+        let hleading = hint_role.leading();
+
+        // ---- measure ----------------------------------------------------
+        let mut label_max: f32 = 0.0;
+        let mut hint_max: f32 = 0.0;
+        let mut any_sub = false;
+        for e in &self.entries {
+            if let MenuEntry::Item(it) = e {
+                label_max = label_max.max(ctx.fonts.measure(FONT_UI, px, &it.label, track));
+                if let Some(hint) = &it.hint {
+                    hint_max = hint_max.max(ctx.fonts.measure(FONT_UI, hpx, hint, htrack));
+                }
+                any_sub |= it.submenu.is_some();
+            }
+        }
+        // Column layout: [inset][label][gap hint][gap chevron][inset].
+        // A context menu always sizes to content over the min_w floor;
+        // `menu.anchor_width = anchor` applies only to the dropdown.
+        let mut content_w = inset + label_max + inset;
+        if hint_max > 0.0 {
+            content_w += hint_gap + hint_max;
+        }
+        if any_sub {
+            content_w += hint_gap + chevron_w;
+        }
+        let w = content_w.max(min_w);
+        let rows_h: f32 = self
+            .entries
+            .iter()
+            .map(|e| entry_h(e, row_h, rule_pad, rule_w))
+            .sum();
+        let h = pad * 2.0 + rows_h;
+
+        // ---- place ------------------------------------------------------
+        let pos = match self.anchor_row {
+            Some(row) => place_sub(row, (w, h), overlap, (ctx.w, ctx.h)),
+            None => place(self.at, (w, h), (ctx.w, ctx.h)),
+        };
+        self.rect = Rect::new(pos.0, pos.1, w, h);
+
+        // ---- unfold -----------------------------------------------------
+        let p = unfold_p(self.opened_t, ctx.t);
+        let visible_h = p * rows_h;
+
+        // ---- rows' geometry (full size — hit data) ----------------------
+        self.rows.clear();
+        let mut top = 0.0;
+        for e in &self.entries {
+            let eh = entry_h(e, row_h, rule_pad, rule_w);
+            let full = top + eh <= visible_h + 0.5;
+            self.rows.push((
+                Rect::new(self.rect.x, self.rect.y + pad + top, w, eh),
+                full,
+            ));
+            top += eh;
+        }
+
+        // ---- hover tracking ---------------------------------------------
+        // Pointer motion updates the highlight only when it enters a
+        // DIFFERENT row (index, not raw position), and keyboard motion
+        // holds hover off until the pointer actually moves again.
+        let mouse = ctx.mouse;
+        if self.last_mouse != Some(mouse) {
+            self.kbd_hold = false;
+            self.last_mouse = Some(mouse);
+        }
+        let under = self
+            .rows
+            .iter()
+            .enumerate()
+            .find(|(i, (r, full))| {
+                *full && r.contains(mouse.0, mouse.1) && self.selectable(*i)
+            })
+            .map(|(i, _)| i);
+        if !self.kbd_hold && under != self.hover_row {
+            self.hover_row = under;
+            match under {
+                Some(i) => {
+                    self.hi = Some(i);
+                    self.hi_kbd = false;
+                }
+                // The pointer left the rows: a keyboard highlight
+                // stays, a hover one goes out.
+                None if !self.hi_kbd => self.hi = None,
+                None => {}
+            }
+        }
+
+        // ---- the box ----------------------------------------------------
+        let drawn = Rect::new(self.rect.x, self.rect.y, w, pad * 2.0 + visible_h);
+        let corner = t.px(tok(&CORNER, "menu.corner")).max(0.0).min(drawn.h / 2.0);
+        let c = [Corner { style: CornerStyle::Round, size: corner }; 4];
+        let seg = super::window::corner_segments(t, &SEGMENTS, corner);
+        ctx.dl.ring_fill(drawn, &c, seg, col(t.bed(tok(&FILL, "component.menu.fill"))));
+        let bw = t.px(tok(&BORDER_W, "menu.border")).max(0.0);
+        if bw > 0.0 {
+            ctx.dl.ring(
+                drawn,
+                &c,
+                seg,
+                bw,
+                col(t.color(tok(&BORDER_C, "component.menu.border"))),
+            );
+        }
+
+        // ---- rows -------------------------------------------------------
+        let hint_ink = col(t.color(tok(&HINT_C, "component.menu.hint")));
+        let sub_open = self.sub.as_ref().map(|(i, _)| *i);
+        for (i, e) in self.entries.iter().enumerate() {
+            let (full_r, _) = self.rows[i];
+            let top = full_r.y - (self.rect.y + pad);
+            if top >= visible_h {
+                break;
+            }
+            // Mid-unfold the row keeps its top and loses its bottom,
+            // exactly the accordion.
+            let rh = (visible_h - top).min(full_r.h);
+            let r = Rect::new(full_r.x, full_r.y, full_r.w, rh);
+            let full = rh >= full_r.h - 0.5;
+            match e {
+                MenuEntry::Rule => {
+                    // The separator draws once whole — half a hairline
+                    // is noise, and its breathing is already the row.
+                    if full && rule_w > 0.0 {
+                        let y = r.y + (r.h - rule_w) / 2.0;
+                        ctx.dl.rect(
+                            r.x,
+                            y,
+                            r.w,
+                            rule_w,
+                            col(t.color(tok(&BORDER_C, "component.menu.border"))),
+                        );
+                    }
+                }
+                MenuEntry::Item(it) => {
+                    // Keyboard highlight is the SELECTED rung, pointer
+                    // hover the hover rung — keyboard never produces
+                    // hover. The parent row of an open submenu stays
+                    // on the selected rung too.
+                    let state = if it.disabled {
+                        State::Disabled
+                    } else if sub_open == Some(i) {
+                        State::Selected
+                    } else if self.hi == Some(i) {
+                        if self.hi_kbd {
+                            State::Selected
+                        } else {
+                            State::Hover
+                        }
+                    } else {
+                        State::Idle
+                    };
+                    let style = match class {
+                        Some(cl) => t.class_state(cl, state),
+                        None => StateStyle::RAW,
+                    };
+                    // The highlight wash; idle rows rest on the menu's
+                    // own bed (the window-menu idiom, winframe.rs).
+                    if state != State::Idle {
+                        ctx.dl.rect(r.x, r.y, r.w, r.h, col(style.fill));
+                    }
+                    if rh >= text_threshold {
+                        ctx.dl.text(
+                            ctx.fonts,
+                            FONT_UI,
+                            px,
+                            r.x + inset,
+                            r.y + (rh - px * leading) / 2.0,
+                            &it.label,
+                            col(style.text),
+                            track,
+                        );
+                        let mut right = r.x + r.w - inset;
+                        if any_sub {
+                            if it.submenu.is_some() {
+                                // The chevron: a `>` of two strokes in
+                                // the glyph box at the row's right edge.
+                                let cx = right - chevron_w;
+                                let cy = r.y + rh / 2.0;
+                                let half = chevron_w / 2.0;
+                                ctx.dl.polyline(
+                                    &[
+                                        [cx + half * 0.5, cy - half],
+                                        [cx + half * 1.5, cy],
+                                        [cx + half * 0.5, cy + half],
+                                    ],
+                                    chevron_s,
+                                    col(style.glyph),
+                                    false,
+                                );
+                            }
+                            right -= chevron_w + hint_gap;
+                        }
+                        if let Some(hint) = &it.hint {
+                            // Right-aligned in the hint column, muted
+                            // by design — secondary to the label.
+                            let ink = if it.disabled { col(style.text) } else { hint_ink };
+                            ctx.dl.text_right(
+                                ctx.fonts,
+                                FONT_UI,
+                                hpx,
+                                right,
+                                r.y + (rh - hpx * hleading) / 2.0,
+                                hint,
+                                ink,
+                                htrack,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        self.placed = true;
+
+        // ---- the open submenu, drawn after = on top ---------------------
+        if let Some((i, sub)) = &mut self.sub {
+            let anchor = self.rows.get(*i).map(|(r, _)| *r);
+            if let Some(anchor) = anchor {
+                sub.anchor_row = Some(anchor);
+                sub.draw(ctx);
+            }
+        }
+        MenuHit { rect: self.rect, hover: under }
+    }
+
+    // ---- internals ------------------------------------------------------
+
+    fn selectable(&self, i: usize) -> bool {
+        matches!(&self.entries[i], MenuEntry::Item(it) if !it.disabled)
+    }
+
+    fn openable(&self, i: usize) -> bool {
+        matches!(&self.entries[i], MenuEntry::Item(it) if !it.disabled && it.submenu.is_some())
+    }
+
+    /// Moves the keyboard highlight by `dir`, skipping rules and
+    /// disabled rows, wrapping at either end. From nothing, Down lands
+    /// on the first selectable row and Up on the last.
+    fn move_hi(&mut self, dir: isize) {
+        let n = self.entries.len();
+        if n == 0 || !(0..n).any(|i| self.selectable(i)) {
+            return;
+        }
+        let mut i = match self.hi {
+            Some(cur) => cur as isize,
+            None if dir > 0 => -1,
+            None => n as isize,
+        };
+        loop {
+            i += dir;
+            if i < 0 {
+                i = n as isize - 1;
+            } else if i >= n as isize {
+                i = 0;
+            }
+            if self.selectable(i as usize) {
+                break;
+            }
+        }
+        self.hi = Some(i as usize);
+        self.hi_kbd = true;
+        self.kbd_hold = true;
+    }
+
+    /// Opens row `i`'s submenu. The unfold clock is stamped by the
+    /// submenu's first draw (key and click handlers hold no clock),
+    /// and the parent's draw anchors it to the row each frame.
+    fn open_sub(&mut self, i: usize) {
+        // The submenu keeps its own submenus: arbitrary depth, one
+        // open level per node.
+        let items = match &self.entries[i] {
+            MenuEntry::Item(it) => it
+                .submenu
+                .as_ref()
+                .map(|items| items.iter().cloned().map(MenuEntry::Item).collect::<Vec<_>>()),
+            MenuEntry::Rule => None,
+        };
+        if let Some(entries) = items {
+            let mut sub = MenuState::open_at(entries, 0.0, 0.0, f64::NAN);
+            // Keyboard entry into a submenu starts on its first row.
+            if self.hi_kbd {
+                sub.move_hi(1);
+            }
+            self.sub = Some((i, Box::new(sub)));
+            self.hi = Some(i);
+        }
+    }
+
+    /// Acts on a press inside this level's box: the row under the
+    /// point, with the hit rect grown to the a11y floor when the theme
+    /// says `grow` — drawn geometry untouched, exactly the `[a11y]`
+    /// contract (`menu.row_h` sits under the 24 px floor).
+    fn act_on(&mut self, x: f32, y: f32) -> MenuOut {
+        static MIN_HIT: OnceLock<TokenId> = OnceLock::new();
+        static PAD_MODE: OnceLock<TokenId> = OnceLock::new();
+        static GROW: OnceLock<Option<u16>> = OnceLock::new();
+        let hit = self
+            .rows
+            .iter()
+            .enumerate()
+            .find(|(_, (r, full))| *full && r.contains(x, y))
+            .map(|(i, _)| i);
+        let hit = hit.or_else(|| {
+            // Between rows or on the padding: the grown hit rects get a
+            // say, nearest centre winning where they overlap.
+            let t = theme::resolved();
+            let mode = tok(&PAD_MODE, "a11y.hit_pad_mode");
+            let grow = *GROW.get_or_init(|| theme::enum_index(mode, "grow"));
+            if grow.is_none() || Some(t.enum_of(mode)) != grow {
+                return None;
+            }
+            let min_hit = t.px(tok(&MIN_HIT, "a11y.min_hit"));
+            let mut best: Option<(f32, usize)> = None;
+            for (i, (r, full)) in self.rows.iter().enumerate() {
+                if !*full || !self.selectable(i) {
+                    continue;
+                }
+                let g = grown(*r, min_hit);
+                if !g.contains(x, y) {
+                    continue;
+                }
+                let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+                let d = (cx - x) * (cx - x) + (cy - y) * (cy - y);
+                if best.map_or(true, |(bd, _)| d < bd) {
+                    best = Some((d, i));
+                }
+            }
+            best.map(|(_, i)| i)
+        });
+        match hit {
+            Some(i) => match &self.entries[i] {
+                MenuEntry::Item(it) if !it.disabled => {
+                    if it.submenu.is_some() {
+                        self.hi = Some(i);
+                        self.hi_kbd = false;
+                        self.open_sub(i);
+                        MenuOut::None
+                    } else {
+                        MenuOut::Pick(it.cmd)
+                    }
+                }
+                _ => MenuOut::None,
+            },
+            None => MenuOut::None,
+        }
+    }
+}
+
+/// One entry's slot height: a row for an item, the separator's
+/// breathing plus its stroke for a rule.
+fn entry_h(e: &MenuEntry, row_h: f32, rule_pad: f32, rule_w: f32) -> f32 {
+    match e {
+        MenuEntry::Item(_) => row_h,
+        MenuEntry::Rule => rule_pad * 2.0 + rule_w,
+    }
+}
+
+/// Where a `size` box lands for the opening point `at`: prefer
+/// right+down; flip to the other side of the point when the box would
+/// leave the window; clamp inside as a last resort.
+fn place(at: (f32, f32), size: (f32, f32), win: (f32, f32)) -> (f32, f32) {
+    let x = if at.0 + size.0 <= win.0 {
+        at.0
+    } else if at.0 - size.0 >= 0.0 {
+        at.0 - size.0
+    } else {
+        (win.0 - size.0).max(0.0)
+    };
+    let y = if at.1 + size.1 <= win.1 {
+        at.1
+    } else if at.1 - size.1 >= 0.0 {
+        at.1 - size.1
+    } else {
+        (win.1 - size.1).max(0.0)
+    };
+    (x, y)
+}
+
+/// Where a submenu of `size` lands for its parent `row`: at the row's
+/// right edge tucked under by `overlap`, top-aligned with the row;
+/// flipped to the row's left edge / upwards when out of room, clamped
+/// as a last resort.
+fn place_sub(row: Rect, size: (f32, f32), overlap: f32, win: (f32, f32)) -> (f32, f32) {
+    let x = if row.right() - overlap + size.0 <= win.0 {
+        row.right() - overlap
+    } else if row.x + overlap - size.0 >= 0.0 {
+        row.x + overlap - size.0
+    } else {
+        (win.0 - size.0).max(0.0)
+    };
+    let y = if row.y + size.1 <= win.1 {
+        row.y
+    } else if row.bottom() - size.1 >= 0.0 {
+        row.bottom() - size.1
+    } else {
+        (win.1 - size.1).max(0.0)
+    };
+    (x, y)
+}
+
+/// The symmetric a11y growth of a hit rect to at least `min_hit` a
+/// side — the DRAWN rect never moves.
+fn grown(r: Rect, min_hit: f32) -> Rect {
+    let gw = (min_hit - r.w).max(0.0) / 2.0;
+    let gh = (min_hit - r.h).max(0.0) / 2.0;
+    Rect::new(r.x - gw, r.y - gh, r.w + 2.0 * gw, r.h + 2.0 * gh)
+}
+
+/// The unfold progress 0..1 at `now` for a level opened at `opened_t`,
+/// from `motion.menu_unfold`. A one-shot: reduced motion
+/// (`motion.scale = 0`), a disabled effect or a zero duration FREEZE
+/// AT FULLY OPEN — "already open", never "never opens" (the
+/// freeze-at-visible rule; `blink_factor`'s cyclic freeze is not for
+/// one-shots).
+fn unfold_p(opened_t: f64, now: f64) -> f32 {
+    static DUR: OnceLock<TokenId> = OnceLock::new();
+    static ENABLED: OnceLock<TokenId> = OnceLock::new();
+    static SCALE: OnceLock<TokenId> = OnceLock::new();
+    static EASING: OnceLock<TokenId> = OnceLock::new();
+    static DUTY: OnceLock<TokenId> = OnceLock::new();
+    static FLOOR: OnceLock<TokenId> = OnceLock::new();
+    static WORDS: OnceLock<[Option<u16>; 5]> = OnceLock::new();
+    let t = theme::resolved();
+    let scale = t.px(tok(&SCALE, "motion.scale"));
+    if scale <= 0.0 || !t.flag(tok(&ENABLED, "motion.menu_unfold.enabled")) {
+        return 1.0;
+    }
+    let dur = (t.px(tok(&DUR, "motion.menu_unfold.duration_ms")) * scale) as f64;
+    if dur <= 0.0 {
+        return 1.0;
+    }
+    let t01 = (((now - opened_t) * 1000.0 / dur).clamp(0.0, 1.0)) as f32;
+    // The easing, picked by the motion token's word — the board ride's
+    // resolver (deco.rs), applied to this effect's tokens. An
+    // unrecognised word runs linear, the enum's own fallback.
+    let id = tok(&EASING, "motion.menu_unfold.easing");
+    let w = WORDS.get_or_init(|| {
+        ["ease_out", "ease_in", "ease_in_out", "sine", "step"]
+            .map(|word| theme::enum_index(id, word))
+    });
+    let e = Some(t.enum_of(id));
+    if e == w[0] {
+        1.0 - (1.0 - t01) * (1.0 - t01)
+    } else if e == w[1] {
+        t01 * t01
+    } else if e == w[2] {
+        t01 * t01 * (3.0 - 2.0 * t01)
+    } else if e == w[3] {
+        0.5 - 0.5 * (std::f32::consts::PI * t01).cos()
+    } else if e == w[4] {
+        if t01 >= t.px(tok(&DUTY, "motion.menu_unfold.duty")) {
+            1.0
+        } else {
+            t.px(tok(&FLOOR, "motion.menu_unfold.floor"))
+        }
+    } else {
+        t01
+    }
+}
+
+// ---------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(label: &str, cmd: u32) -> MenuEntry {
+        MenuEntry::Item(MenuItem::new(label, cmd))
+    }
+
+    fn ev(key: Key) -> KeyEv {
+        KeyEv { key, mods: Mods::NONE, repeat: false, text: None }
+    }
+
+    /// Copy / rule / Clear (disabled) / Paste — the nav fixture.
+    fn menu() -> MenuState {
+        MenuState::open_at(
+            vec![
+                item("COPY", 1),
+                MenuEntry::Rule,
+                MenuEntry::Item(MenuItem::new("CLEAR", 2).with_disabled(true)),
+                item("PASTE", 3),
+            ],
+            10.0,
+            10.0,
+            0.0,
+        )
+    }
+
+    // ---- placement ----
+
+    #[test]
+    fn placement_prefers_right_down_and_flips() {
+        // Room everywhere: right+down from the point.
+        assert_eq!(place((10.0, 20.0), (100.0, 50.0), (500.0, 300.0)), (10.0, 20.0));
+        // Out of room on the right: flip to the point's left.
+        assert_eq!(place((450.0, 20.0), (100.0, 50.0), (500.0, 300.0)), (350.0, 20.0));
+        // Out of room below: flip above the point.
+        assert_eq!(place((10.0, 280.0), (100.0, 50.0), (500.0, 300.0)), (10.0, 230.0));
+        // Both: both flips.
+        assert_eq!(place((450.0, 280.0), (100.0, 50.0), (500.0, 300.0)), (350.0, 230.0));
+    }
+
+    #[test]
+    fn placement_clamps_when_no_side_fits() {
+        // No room right of the point AND none left of it: clamp to the
+        // window's edge, never negative.
+        let (x, _) = place((50.0, 10.0), (400.0, 50.0), (410.0, 300.0));
+        assert_eq!(x, 10.0); // 410 - 400
+        let (x, y) = place((5.0, 5.0), (500.0, 400.0), (400.0, 300.0));
+        assert_eq!((x, y), (0.0, 0.0)); // wider than the window: pinned at 0
+    }
+
+    #[test]
+    fn submenu_tucks_under_the_row_edge_and_flips() {
+        let row = Rect::new(100.0, 50.0, 200.0, 24.0);
+        // Room on the right: at right edge minus the overlap, top-aligned.
+        assert_eq!(place_sub(row, (150.0, 80.0), 6.0, (800.0, 600.0)), (294.0, 50.0));
+        // No room right: the mirror position off the row's LEFT edge.
+        let right = Rect::new(300.0, 50.0, 200.0, 24.0);
+        assert_eq!(place_sub(right, (150.0, 80.0), 6.0, (500.0, 600.0)), (156.0, 50.0));
+        // No room below: bottom-aligned with the row instead.
+        let low = Rect::new(100.0, 500.0, 200.0, 24.0);
+        assert_eq!(place_sub(low, (150.0, 80.0), 6.0, (800.0, 550.0)), (294.0, 444.0));
+        // Neither: clamped inside the window.
+        assert_eq!(place_sub(row, (150.0, 80.0), 6.0, (400.0, 100.0)), (250.0, 20.0));
+    }
+
+    // ---- keyboard ----
+
+    #[test]
+    fn arrows_skip_rules_and_disabled_and_wrap() {
+        let mut m = menu();
+        m.key(&ev(Key::Down));
+        assert_eq!(m.hi, Some(0), "Down from nothing lands on the head");
+        m.key(&ev(Key::Down));
+        assert_eq!(m.hi, Some(3), "skips the rule AND the disabled row");
+        m.key(&ev(Key::Down));
+        assert_eq!(m.hi, Some(0), "wraps");
+        m.key(&ev(Key::Up));
+        assert_eq!(m.hi, Some(3), "wraps backwards");
+    }
+
+    #[test]
+    fn up_from_nothing_lands_on_the_tail() {
+        let mut m = menu();
+        m.key(&ev(Key::Up));
+        assert_eq!(m.hi, Some(3));
+    }
+
+    #[test]
+    fn keyboard_highlight_is_marked_keyboard() {
+        let mut m = menu();
+        m.key(&ev(Key::Down));
+        assert!(m.hi_kbd && m.kbd_hold, "arrows suppress hover until the pointer moves");
+    }
+
+    #[test]
+    fn enter_picks_only_enabled_rows() {
+        let mut m = menu();
+        assert_eq!(m.key(&ev(Key::Enter)), MenuOut::None, "nothing highlighted");
+        m.key(&ev(Key::Down));
+        assert_eq!(m.key(&ev(Key::Enter)), MenuOut::Pick(1));
+        // Force the highlight onto the disabled row: Enter still refuses.
+        m.hi = Some(2);
+        assert_eq!(m.key(&ev(Key::Enter)), MenuOut::None);
+    }
+
+    #[test]
+    fn escape_and_left_close_a_level() {
+        let mut m = menu();
+        assert_eq!(m.key(&ev(Key::Escape)), MenuOut::Close);
+        assert_eq!(m.key(&ev(Key::Left)), MenuOut::Close);
+    }
+
+    #[test]
+    fn modified_keys_are_consumed_not_acted_on() {
+        let mut m = menu();
+        let e = KeyEv {
+            key: Key::Down,
+            mods: Mods::CTRL,
+            repeat: false,
+            text: None,
+        };
+        assert_eq!(m.key(&e), MenuOut::None);
+        assert_eq!(m.hi, None, "a modified arrow is a shortcut's business");
+    }
+
+    #[test]
+    fn typing_is_ignored_but_consumed() {
+        let mut m = menu();
+        assert_eq!(m.key(&ev(Key::Char('x'))), MenuOut::None);
+        assert_eq!(m.hi, None);
+    }
+
+    // ---- submenu ----
+
+    fn with_sub() -> MenuState {
+        MenuState::open_at(
+            vec![
+                item("PLAIN", 1),
+                MenuEntry::Item(
+                    MenuItem::new("MORE", 0)
+                        .with_submenu(vec![MenuItem::new("A", 10), MenuItem::new("B", 11)]),
+                ),
+            ],
+            0.0,
+            0.0,
+            0.0,
+        )
+    }
+
+    #[test]
+    fn right_opens_enter_picks_left_closes_one_level() {
+        let mut m = with_sub();
+        m.key(&ev(Key::Down));
+        assert_eq!(m.key(&ev(Key::Right)), MenuOut::None, "no submenu on a plain row");
+        assert!(m.sub.is_none());
+        m.key(&ev(Key::Down)); // onto MORE
+        assert_eq!(m.key(&ev(Key::Right)), MenuOut::None);
+        assert!(m.sub.is_some(), "Right opens the submenu");
+        // Keyboard entry pre-highlights the submenu's first row.
+        assert_eq!(m.sub.as_ref().unwrap().1.hi, Some(0));
+        // Keys now route to the deepest level.
+        m.key(&ev(Key::Down));
+        assert_eq!(m.sub.as_ref().unwrap().1.hi, Some(1));
+        assert_eq!(m.key(&ev(Key::Enter)), MenuOut::Pick(11), "picks bubble up");
+        // Left closes ONE level: consumed by the parent, menu stays.
+        assert_eq!(m.key(&ev(Key::Left)), MenuOut::None);
+        assert!(m.sub.is_none());
+        // And at the root it closes the menu.
+        assert_eq!(m.key(&ev(Key::Left)), MenuOut::Close);
+    }
+
+    #[test]
+    fn enter_opens_a_submenu_rather_than_picking_it() {
+        let mut m = with_sub();
+        m.key(&ev(Key::Down));
+        m.key(&ev(Key::Down));
+        assert_eq!(m.key(&ev(Key::Enter)), MenuOut::None);
+        assert!(m.sub.is_some());
+    }
+
+    // ---- clicks (geometry fabricated — draw needs a window) ----
+
+    /// Lays the fixture out by hand exactly as draw would at full
+    /// unfold: rows 24 px tall from y=10, box padded by 8.
+    fn placed(mut m: MenuState) -> MenuState {
+        let row_h = 24.0;
+        let mut y = 18.0;
+        m.rows = m
+            .entries
+            .iter()
+            .map(|e| {
+                let h = match e {
+                    MenuEntry::Item(_) => row_h,
+                    MenuEntry::Rule => 10.0,
+                };
+                let r = Rect::new(10.0, y, 200.0, h);
+                y += h;
+                (r, true)
+            })
+            .collect();
+        m.rect = Rect::new(10.0, 10.0, 200.0, y - 10.0 + 8.0);
+        m.placed = true;
+        m
+    }
+
+    #[test]
+    fn click_outside_closes_inside_picks() {
+        let mut m = placed(menu());
+        assert_eq!(m.click(500.0, 500.0), MenuOut::Close);
+        // Row 0 (COPY) spans y 18..42.
+        assert_eq!(m.click(50.0, 30.0), MenuOut::Pick(1));
+        // The disabled row is a consumed no-op.
+        let (r, _) = m.rows[2];
+        assert_eq!(m.click(r.x + 5.0, r.y + r.h / 2.0), MenuOut::None);
+    }
+
+    #[test]
+    fn click_before_first_draw_is_consumed_not_judged() {
+        let mut m = menu(); // never drawn: no geometry
+        assert_eq!(m.click(500.0, 500.0), MenuOut::None);
+    }
+
+    #[test]
+    fn click_routes_to_the_deepest_level_first() {
+        let mut m = placed(with_sub());
+        // Open MORE's submenu, then fabricate its geometry beside it.
+        m.key(&ev(Key::Down));
+        m.key(&ev(Key::Down));
+        m.key(&ev(Key::Right));
+        {
+            let (_, sub) = m.sub.as_mut().unwrap();
+            let s = placed(std::mem::replace(
+                sub.as_mut(),
+                MenuState::open_at(Vec::new(), 0.0, 0.0, 0.0),
+            ));
+            **sub = s;
+            // Move the submenu's box clear of the parent's.
+            let dx = 300.0;
+            sub.rect.x += dx;
+            for (r, _) in sub.rows.iter_mut() {
+                r.x += dx;
+            }
+        }
+        // A point inside the submenu picks there.
+        let (r, _) = m.sub.as_ref().unwrap().1.rows[0];
+        assert_eq!(m.click(r.x + 5.0, r.y + 5.0), MenuOut::Pick(10));
+        // A point on the PARENT with the submenu open folds the
+        // subtree and acts on the parent row.
+        assert!(m.sub.is_some());
+        let (r0, _) = m.rows[0];
+        assert_eq!(m.click(r0.x + 5.0, r0.y + 5.0), MenuOut::Pick(1));
+        assert!(m.sub.is_none());
+        // Outside everything: close.
+        assert_eq!(m.click(700.0, 700.0), MenuOut::Close);
+    }
+
+    // ---- a11y growth ----
+
+    #[test]
+    fn hit_rects_grow_symmetrically_and_never_shrink() {
+        let g = grown(Rect::new(10.0, 10.0, 200.0, 23.9), 24.0);
+        assert!((g.y - 9.95).abs() < 1e-4);
+        assert!((g.h - 24.0).abs() < 1e-4);
+        assert_eq!(g.x, 10.0, "already past the floor: untouched");
+        assert_eq!(g.w, 200.0);
+        let same = grown(Rect::new(0.0, 0.0, 30.0, 30.0), 24.0);
+        assert_eq!((same.x, same.y, same.w, same.h), (0.0, 0.0, 30.0, 30.0));
+    }
+
+    // ---- entry heights ----
+
+    #[test]
+    fn a_rule_takes_its_breathing_plus_stroke() {
+        assert_eq!(entry_h(&MenuEntry::Rule, 24.0, 8.4, 1.2), 18.0);
+        assert_eq!(entry_h(&item("X", 1), 24.0, 8.4, 1.2), 24.0);
+    }
+}

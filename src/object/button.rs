@@ -2,6 +2,8 @@
 //! interface (terminal-tab style: slanted sides, hover highlight,
 //! flash on click, optional "selected" state).
 
+use super::focus_ring;
+use crate::focus::{Caps, FocusId};
 use crate::font::FONT_UI;
 use crate::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
 use crate::{Ctx, Rect};
@@ -89,4 +91,18 @@ pub fn draw(ctx: &mut Ctx, r: Rect, label: &str, st: ButtonState) {
         col(style.text),
         px * t.px(tok(&TRACKING, "type.button.tracking")),
     );
+}
+
+/// [`draw`], joined to the world's focus chain: `id` is the caller's
+/// stable path (`"settings.btn.reset"` — a path, never an index). A
+/// button eats no keys — activation is the router's Enter/Space — so it
+/// registers with no capabilities. Focus never touches the state ladder
+/// (`ButtonState` grows no `focused` field); the ring overlay is the
+/// only focus signal, drawn around the same slanted quad.
+pub fn draw_focusable(ctx: &mut Ctx, r: Rect, label: &str, st: ButtonState, id: FocusId) {
+    let f = ctx.focus.as_deref_mut().map(|fc| fc.register(id, r, Caps::NONE));
+    draw(ctx, r, label, st);
+    if f.map_or(false, |f| f.ring) {
+        focus_ring::draw_quad(ctx, quad(&r));
+    }
 }

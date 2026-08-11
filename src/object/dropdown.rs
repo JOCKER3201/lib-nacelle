@@ -2,6 +2,8 @@
 //! anchor (a parallelogram button), exactly as wide as that edge.
 //! Items are opaque. The caller hit-tests the returned rectangles.
 
+use super::focus_ring;
+use crate::focus::{Caps, FocusId};
 use crate::font::FONT_UI;
 use crate::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
 use crate::{Ctx, Rect};
@@ -26,6 +28,35 @@ pub fn accordion(
     names: &[String],
     p: f32,
 ) -> Vec<(Rect, bool)> {
+    accordion_impl(ctx, anchor, item_h, names, p, None)
+}
+
+/// [`accordion`], joined to the world's focus chain: every FULLY
+/// unfolded row registers as `base.item(i)` (a row's order is its
+/// content's order, so the index is legal), letting arrows walk the
+/// open list and Enter pick — the router compares the chain's focused
+/// id against the same derived ids. Mid-unfold rows never register:
+/// their rects are still moving, and a ring on a moving rect is the
+/// board-ride pitfall in miniature.
+pub fn accordion_focusable(
+    ctx: &mut Ctx,
+    anchor: Rect,
+    item_h: f32,
+    names: &[String],
+    p: f32,
+    base: FocusId,
+) -> Vec<(Rect, bool)> {
+    accordion_impl(ctx, anchor, item_h, names, p, Some(base))
+}
+
+fn accordion_impl(
+    ctx: &mut Ctx,
+    anchor: Rect,
+    item_h: f32,
+    names: &[String],
+    p: f32,
+    base: Option<FocusId>,
+) -> Vec<(Rect, bool)> {
     static FILL: OnceLock<TokenId> = OnceLock::new();
     static BORDER: OnceLock<TokenId> = OnceLock::new();
     static SKEW: OnceLock<TokenId> = OnceLock::new();
@@ -49,6 +80,7 @@ pub fn accordion(
     let text_threshold = t.px(tok(&THRESHOLD, "menu.item_text_threshold"));
     let visible_h = p.clamp(0.0, 1.0) * item_h * names.len() as f32;
     let mut out = Vec::new();
+    let mut ring: Option<Rect> = None;
     for (i, name) in names.iter().enumerate() {
         let top = item_h * i as f32;
         if top >= visible_h {
@@ -61,6 +93,13 @@ pub fn accordion(
         // Floating-point tolerance: the LAST item's height comes from a
         // subtraction and can be epsilon short of item_h.
         let full = h >= item_h - 0.5;
+        if full {
+            if let (Some(base), Some(fc)) = (base, ctx.focus.as_deref_mut()) {
+                if fc.register(base.item(i), r, Caps::NONE).ring {
+                    ring = Some(r);
+                }
+            }
+        }
         let hover = full && r.contains(ctx.mouse.0, ctx.mouse.1);
         let style = match class {
             Some(c) => t.class_state(c, if hover { State::Hover } else { State::Idle }),
@@ -85,6 +124,11 @@ pub fn accordion(
             );
         }
         out.push((r, full));
+    }
+    // The ring is an overlay: drawn after every row, so the next row's
+    // opaque bed cannot cover the band below the focused one.
+    if let Some(r) = ring {
+        focus_ring::draw(ctx, r);
     }
     out
 }

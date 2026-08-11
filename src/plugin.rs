@@ -11,18 +11,20 @@
 //! [`crate::runtime::ATTACH_SYMBOL`].
 
 use crate::runtime::{
-    ActionC, CellC, ChromeC, ColorC, HostApi, PluginApi, RectC, TermReqC, TermViewC, ABI_VERSION,
-    CELL_HAS_BG, CELL_SIZE_MIN, CELL_UNDERLINE, TERM_REQ_SIZE_MIN, TERM_VIEW_SIZE_MIN,
-    VIEW_CURSOR, VIEW_LIVE, VIEW_TRUNCATED, ACTION_BYTES, ACTION_EXIT, SIZING_ROWS,
-    ACTION_NONE, ACTION_OPEN_DIR, ACTION_OPEN_FILE, ACTION_OPEN_SETTINGS, ACTION_SCROLL_TERMINAL,
-    ACTION_SELECT_TAB, CHROME_BUTTONS_CLOSE, CHROME_BUTTONS_MIN_CLOSE,
-    CHROME_BUTTONS_MIN_MAX_CLOSE, MASK_QUAD_ADD, PLUGIN_API_HAS_CHROME, PLUGIN_API_SIZE_MIN,
-    StateStyleC,
+    ActionC, CellC, ChromeC, ColorC, HostApi, PluginApi, RectC, TermReqC, TermSelectC, TermViewC,
+    ABI_VERSION, CELL_HAS_BG, CELL_SELECTED, CELL_SIZE_MIN, CELL_UNDERLINE, TERM_REQ_SIZE_MIN,
+    TERM_SELECT_SIZE_MIN, TERM_VIEW_SIZE_MIN, VIEW_CURSOR, VIEW_LIVE, VIEW_TRUNCATED,
+    ACTION_BYTES, ACTION_EXIT, SIZING_ROWS, ACTION_NONE, ACTION_OPEN_DIR, ACTION_OPEN_FILE,
+    ACTION_OPEN_SETTINGS, ACTION_PASTE_PRIMARY, ACTION_SCROLL_TERMINAL, ACTION_SELECT_TAB,
+    ACTION_TERM_SELECT, CHROME_BUTTONS_CLOSE, CHROME_BUTTONS_MIN_CLOSE,
+    CHROME_BUTTONS_MIN_MAX_CLOSE, DRAG_BEGIN, DRAG_END, DRAG_MOVE, MASK_QUAD_ADD,
+    PLUGIN_API_HAS_CHROME, PLUGIN_API_HAS_DRAG, PLUGIN_API_SIZE_MIN, SELECT_KIND_LINES,
+    SELECT_KIND_WORDS, SELECT_OP_BEGIN, SELECT_OP_END, SELECT_OP_EXTEND, StateStyleC,
 };
 use crate::font::{FontSystem, FONT_COUNT};
-use crate::term::{Cell, FLAG_UNDERLINE, FLAG_WIDE_LEAD, FLAG_WIDE_SPACER};
+use crate::term::{Cell, SelKind, FLAG_UNDERLINE, FLAG_WIDE_LEAD, FLAG_WIDE_SPACER};
 use crate::theme::Color;
-use crate::widget::Sizing;
+use crate::widget::{DragPhase, SelectOp, Sizing};
 use crate::{Action, Ctx, Host, Rect, Widget};
 use std::ffi::c_void;
 use std::path::PathBuf;
@@ -501,6 +503,11 @@ extern "C" fn h_term_view(
         if let Some(term) = host.term {
             v.flags |= VIEW_LIVE;
             v.view_offset = term.view_offset.min(u32::MAX as usize) as u32;
+            // The id of the first delivered row, for the widget to echo
+            // back in a TermSelect (the drag-vs-feed race fix, §2.7).
+            let first_id = term.line_id_of_view_row(0);
+            v.first_id_lo = first_id as u32;
+            v.first_id_hi = (first_id >> 32) as u32;
             let vcols = (v.cols as usize).min(term.cols);
             let vrows = (v.rows as usize).min(term.rows);
 
@@ -531,16 +538,29 @@ extern "C" fn h_term_view(
             let n = CELL_BYTES.min(stride);
             for y in 0..fit_rows {
                 let row = term.view_row(y);
+                // The selected span on this row, from the ONE span
+                // authority the copied text also reads. Endpoints are
+                // inclusive; the open end clamps to the delivered
+                // width. Spacer cells inside the span carry the flag
+                // too, so the wash has no gap in a wide character.
+                let span = term
+                    .selection_span_on_line(term.line_id_of_view_row(y))
+                    .map(|(c0, c1)| (c0, c1.min(vcols.saturating_sub(1))));
                 for x in 0..vcols {
                     // Scrollback rows keep the width they scrolled off
                     // with — `resize` never touches them — so a short
                     // row is PADDED here rather than trusted anywhere.
                     // An absent cell draws nothing, which is exactly
                     // what breaking out of the row used to produce.
-                    let c = match row.and_then(|rw| rw.get(x)) {
+                    let mut c = match row.and_then(|rw| rw.get(x)) {
                         Some(cell) => cell_out(cell),
                         None => CellC::absent(),
                     };
+                    if let Some((c0, c1)) = span {
+                        if x >= c0 && x <= c1 {
+                            c.flags |= CELL_SELECTED;
+                        }
+                    }
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             &c as *const CellC as *const u8,
@@ -628,6 +648,44 @@ fn action_in(a: &ActionC) -> Action {
         ACTION_EXIT => Action::Exit,
         ACTION_OPEN_SETTINGS => Action::OpenSettings,
         ACTION_SCROLL_TERMINAL => Action::ScrollTerminal(a.lines),
+        ACTION_TERM_SELECT => {
+            // The payload rides in `data` like a path's bytes do. Only
+            // the prefix both sides agree on is read; anything shorter
+            // than the minimum is malformed and means nothing.
+            if a.data.is_null() || (a.data_len as usize) < TERM_SELECT_SIZE_MIN {
+                return Action::None;
+            }
+            let mut s = TermSelectC {
+                op: 0, kind: 0, col: 0, row: 0, base_lo: 0, base_hi: 0,
+            };
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    a.data,
+                    &mut s as *mut TermSelectC as *mut u8,
+                    (a.data_len as usize).min(std::mem::size_of::<TermSelectC>()),
+                );
+            }
+            let kind = match s.kind {
+                SELECT_KIND_WORDS => SelKind::Words,
+                SELECT_KIND_LINES => SelKind::Lines,
+                _ => SelKind::Cells,
+            };
+            let op = match s.op {
+                SELECT_OP_BEGIN => SelectOp::Begin(kind),
+                SELECT_OP_EXTEND => SelectOp::Extend,
+                SELECT_OP_END => SelectOp::End,
+                // An op from a newer interface than this build knows
+                // must not corrupt the selection it cannot mean.
+                _ => return Action::None,
+            };
+            Action::TermSelect {
+                op,
+                col: s.col as usize,
+                row: s.row as usize,
+                base: (s.base_hi as u64) << 32 | s.base_lo as u64,
+            }
+        }
+        ACTION_PASTE_PRIMARY => Action::PastePrimary,
         _ => Action::None,
     }
 }
@@ -663,6 +721,22 @@ extern "C" fn chrome_absent(
     _: u32,
 ) -> u32 {
     0
+}
+
+/// The stand-in for a table that ends before `drag`: every phase is
+/// declined, so the press falls back to the ordinary click delivery —
+/// a pre-drag widget is mouse-only, never broken.
+#[allow(clippy::too_many_arguments)]
+extern "C" fn drag_absent(
+    _: *mut c_void,
+    _: u32,
+    _: f32,
+    _: f32,
+    _: RectC,
+    _: f32,
+    _: f32,
+    _: *mut ActionC,
+) {
 }
 
 impl PluginWidget {
@@ -707,6 +781,9 @@ impl PluginWidget {
             if size < PLUGIN_API_HAS_CHROME {
                 std::ptr::addr_of_mut!((*slot.as_mut_ptr()).chrome).write(chrome_absent);
             }
+            if size < PLUGIN_API_HAS_DRAG {
+                std::ptr::addr_of_mut!((*slot.as_mut_ptr()).drag).write(drag_absent);
+            }
             slot.assume_init()
         };
         let instance = (table.create)();
@@ -720,6 +797,11 @@ impl PluginWidget {
     /// Whether the plugin's table reaches the `chrome` entry at all.
     fn has_chrome(&self) -> bool {
         self.api.api_size as usize >= PLUGIN_API_HAS_CHROME
+    }
+
+    /// Whether the plugin's table reaches the `drag` entry.
+    fn has_drag(&self) -> bool {
+        self.api.api_size as usize >= PLUGIN_API_HAS_DRAG
     }
 }
 
@@ -789,6 +871,32 @@ impl Widget for PluginWidget {
         (self.api.wheel)(
             self.instance,
             dy,
+            rect_out(r),
+            host.window.0,
+            host.window.1,
+            &mut out,
+        );
+        action_in(&out)
+    }
+
+    fn drag(&mut self, p: DragPhase, x: f32, y: f32, r: Rect, host: &Host) -> Action {
+        // A table from before the entry existed declines every drag —
+        // the same degradation `has_chrome` applies, and the host then
+        // falls back to click delivery.
+        if !self.has_drag() {
+            return Action::None;
+        }
+        let phase = match p {
+            DragPhase::Begin => DRAG_BEGIN,
+            DragPhase::Move => DRAG_MOVE,
+            DragPhase::End => DRAG_END,
+        };
+        let mut out = empty_action();
+        (self.api.drag)(
+            self.instance,
+            phase,
+            x,
+            y,
             rect_out(r),
             host.window.0,
             host.window.1,
@@ -964,6 +1072,38 @@ mod tests {
         (out_size as usize).min(std::mem::size_of::<ChromeC>()) as u32
     }
 
+    /// Answers a TermSelect the way the shell widget does: a payload
+    /// the plugin owns, echoed base, phase mapped to an op.
+    extern "C" fn t_drag(
+        _: *mut c_void,
+        phase: u32,
+        x: f32,
+        y: f32,
+        _: RectC,
+        _: f32,
+        _: f32,
+        out: *mut ActionC,
+    ) {
+        static SEL: TermSelectC = TermSelectC {
+            op: 0, kind: 0, col: 0, row: 0, base_lo: 0, base_hi: 0,
+        };
+        // The test payload is static and immutable; a real widget keeps
+        // a per-instance one, valid until its next call.
+        let mut s = SEL;
+        s.op = phase; // DRAG_* and SELECT_OP_* line up by construction
+        s.col = x as u32;
+        s.row = y as u32;
+        s.base_lo = 7;
+        s.base_hi = 1;
+        let Some(out) = (unsafe { out.as_mut() }) else { return };
+        // Leak-free because 'static: the boxed payload lives for the
+        // test process, standing in for the plugin's instance field.
+        let payload: &'static TermSelectC = Box::leak(Box::new(s));
+        out.kind = ACTION_TERM_SELECT;
+        out.data = payload as *const TermSelectC as *const u8;
+        out.data_len = std::mem::size_of::<TermSelectC>() as u32;
+    }
+
     fn t_api() -> PluginApi {
         PluginApi {
             abi_version: ABI_VERSION,
@@ -977,6 +1117,7 @@ mod tests {
             key_feedback: t_key,
             sizing: t_sizing,
             chrome: t_chrome,
+            drag: t_drag,
         }
     }
 
@@ -1015,6 +1156,98 @@ mod tests {
         // A table shorter than the version's own minimum is refused.
         let broken = PluginApi { api_size: 8, ..t_api() };
         assert!(unsafe { PluginWidget::new(&broken) }.is_none());
+    }
+
+    /// `api_size` gates `drag` exactly like `chrome`: a pre-drag table
+    /// loads, declines every drag, and the click path is what remains.
+    #[test]
+    fn a_table_without_drag_declines_the_capture() {
+        use crate::runtime::{PLUGIN_API_HAS_CHROME, PLUGIN_API_HAS_DRAG};
+        // The appended entries sit past the mandatory prefix, in order,
+        // with `drag` the current end of the table.
+        assert!(PLUGIN_API_HAS_CHROME < PLUGIN_API_HAS_DRAG);
+        assert_eq!(PLUGIN_API_HAS_DRAG, std::mem::size_of::<PluginApi>());
+
+        let host = Host {
+            snap: &crate::telemetry::Snapshot::default(),
+            term: None,
+            tabs: &[true],
+            tab_active: 0,
+            shell_cwd: None,
+            t: 0.0,
+            window: (800.0, 600.0),
+        };
+        let r = Rect::new(0.0, 0.0, 100.0, 100.0);
+
+        let short = PluginApi { api_size: PLUGIN_API_HAS_CHROME as u32, ..t_api() };
+        let mut w = unsafe { PluginWidget::new(&short) }.expect("a pre-drag table loads");
+        assert!(!w.has_drag());
+        assert_eq!(w.drag(DragPhase::Begin, 5.0, 5.0, r, &host), Action::None);
+
+        // A full table is asked, and the payload survives the crossing:
+        // op from the phase, cells from the coordinates, the echoed
+        // 64-bit base reassembled from its two words.
+        let mut w = unsafe { PluginWidget::new(&t_api()) }.expect("full table loads");
+        assert!(w.has_drag());
+        assert_eq!(
+            w.drag(DragPhase::Begin, 3.0, 2.0, r, &host),
+            Action::TermSelect {
+                op: SelectOp::Begin(SelKind::Cells),
+                col: 3,
+                row: 2,
+                base: (1u64 << 32) | 7,
+            }
+        );
+        assert_eq!(
+            w.drag(DragPhase::End, 4.0, 2.0, r, &host),
+            Action::TermSelect { op: SelectOp::End, col: 4, row: 2, base: (1u64 << 32) | 7 }
+        );
+    }
+
+    /// The TermSelect payload is read defensively: null data, a payload
+    /// shorter than the minimum, and an unknown op all mean nothing.
+    #[test]
+    fn a_malformed_term_select_means_nothing() {
+        let empty = ActionC { kind: ACTION_TERM_SELECT, ..empty_action() };
+        assert_eq!(action_in(&empty), Action::None);
+
+        let s = TermSelectC { op: 0, kind: 0, col: 1, row: 1, base_lo: 0, base_hi: 0 };
+        let short = ActionC {
+            kind: ACTION_TERM_SELECT,
+            data: &s as *const TermSelectC as *const u8,
+            data_len: 4,
+            ..empty_action()
+        };
+        assert_eq!(action_in(&short), Action::None);
+
+        let wild = TermSelectC { op: 99, ..s };
+        let unknown = ActionC {
+            kind: ACTION_TERM_SELECT,
+            data: &wild as *const TermSelectC as *const u8,
+            data_len: std::mem::size_of::<TermSelectC>() as u32,
+            ..empty_action()
+        };
+        assert_eq!(action_in(&unknown), Action::None);
+
+        // An unknown KIND on a valid op degrades to Cells rather than
+        // dying: the selection kinds may grow.
+        let odd = TermSelectC { op: crate::runtime::SELECT_OP_BEGIN, kind: 42, ..s };
+        let a = ActionC {
+            kind: ACTION_TERM_SELECT,
+            data: &odd as *const TermSelectC as *const u8,
+            data_len: std::mem::size_of::<TermSelectC>() as u32,
+            ..empty_action()
+        };
+        assert_eq!(
+            action_in(&a),
+            Action::TermSelect { op: SelectOp::Begin(SelKind::Cells), col: 1, row: 1, base: 0 }
+        );
+
+        // PastePrimary carries nothing and crosses as itself.
+        assert_eq!(
+            action_in(&ActionC { kind: ACTION_PASTE_PRIMARY, ..empty_action() }),
+            Action::PastePrimary
+        );
     }
 
     #[test]

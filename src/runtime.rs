@@ -76,6 +76,53 @@ pub const ACTION_SELECT_TAB: u32 = 4;
 pub const ACTION_EXIT: u32 = 5;
 pub const ACTION_OPEN_SETTINGS: u32 = 6;
 pub const ACTION_SCROLL_TERMINAL: u32 = 7;
+/// `Action::TermSelect`: `data` points at a [`TermSelectC`] the plugin
+/// owns until its next call, `data_len` is its size — the same
+/// discipline as a path's bytes, and what lets the payload GROW without
+/// touching `ActionC` itself (whose writers cannot be size-checked).
+pub const ACTION_TERM_SELECT: u32 = 8;
+/// `Action::PastePrimary`: no payload.
+pub const ACTION_PASTE_PRIMARY: u32 = 9;
+
+/// [`PluginApi::drag`] phases — `DragPhase` as numbers.
+pub const DRAG_BEGIN: u32 = 0;
+pub const DRAG_MOVE: u32 = 1;
+pub const DRAG_END: u32 = 2;
+
+/// `TermSelectC::op`.
+pub const SELECT_OP_BEGIN: u32 = 0;
+pub const SELECT_OP_EXTEND: u32 = 1;
+pub const SELECT_OP_END: u32 = 2;
+
+/// `TermSelectC::kind`, meaningful on BEGIN — `term::SelKind` as
+/// numbers. The HOST may override it from its click count (a widget
+/// cannot see double clicks).
+pub const SELECT_KIND_CELLS: u32 = 0;
+pub const SELECT_KIND_WORDS: u32 = 1;
+pub const SELECT_KIND_LINES: u32 = 2;
+
+/// The payload of [`ACTION_TERM_SELECT`]: one selection step in the
+/// coordinates of the view the widget DREW. `base_lo`/`base_hi` are the
+/// 64-bit line id of that view's first row, split into two words so the
+/// struct keeps four-byte alignment on every target — echoed from
+/// [`TermViewC::first_id_lo`], and what the host resolves `row` against
+/// (never the live `view_offset`; a PTY feed between the draw and the
+/// event would shift every row otherwise).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TermSelectC {
+    pub op: u32,
+    pub kind: u32,
+    pub col: u32,
+    pub row: u32,
+    pub base_lo: u32,
+    pub base_hi: u32,
+}
+
+/// The prefix of [`TermSelectC`] a reader requires; a shorter payload
+/// is malformed and reads as no action at all.
+pub const TERM_SELECT_SIZE_MIN: usize =
+    std::mem::offset_of!(TermSelectC, base_hi) + std::mem::size_of::<u32>();
 
 /// The functions a plugin uses to reach the host's shared state.
 ///
@@ -394,6 +441,26 @@ pub struct PluginApi {
         out: *mut ChromeC,
         out_size: u32,
     ) -> u32,
+    /// A pointer drag over the widget — `Widget::drag` across the
+    /// boundary, and the host's SINGLE capture path (F1 §5.1: F2's
+    /// press/release append after this entry and are synthesized
+    /// through the same capture, never a second one). `phase` is a
+    /// `DRAG_*` code; a `Begin` answered with `ACTION_NONE` declines
+    /// the capture and the press falls back to the click delivery.
+    /// Appended past `chrome`, `api_size`-gated: a plugin whose table
+    /// ends before it simply never receives drags.
+    ///
+    /// next append: `press`, `release` (F2 §6, per the ledger).
+    pub drag: extern "C" fn(
+        instance: *mut c_void,
+        phase: u32,
+        x: f32,
+        y: f32,
+        r: RectC,
+        win_w: f32,
+        win_h: f32,
+        out: *mut ActionC,
+    ),
 }
 
 /// The prefix of [`PluginApi`] every version-6 plugin must fill —
@@ -408,6 +475,10 @@ pub const PLUGIN_API_SIZE_MIN: usize =
 /// this far declared the entry.
 pub const PLUGIN_API_HAS_CHROME: usize =
     std::mem::offset_of!(PluginApi, chrome) + std::mem::size_of::<usize>();
+
+/// The prefix that includes `drag`.
+pub const PLUGIN_API_HAS_DRAG: usize =
+    std::mem::offset_of!(PluginApi, drag) + std::mem::size_of::<usize>();
 
 /// The attach point every plugin must export:
 ///
@@ -470,6 +541,12 @@ pub const CELL_HAS_BG: u32 = 2;
 /// No cell exists at this position — a scrollback row that kept an
 /// older, shorter width, or a row past the end of the view.
 pub const CELL_ABSENT: u32 = 4;
+/// The cell is inside the terminal selection. A FLAG, never a colour
+/// baked into `bg`: `term.selection.mode = invert` needs the ORIGINAL
+/// colours to invert, so the widget applies the selection look itself
+/// from the `term.selection*` tokens. Old plugins ignore unknown bits —
+/// the documented contract — and simply draw no wash.
+pub const CELL_SELECTED: u32 = 8;
 
 impl CellC {
     /// A position with nothing in it. `width` 0 is what makes it draw
@@ -588,6 +665,20 @@ pub struct TermViewC {
     pub tab_active: u32,
     pub cursor_fg: ColorC,
     pub cursor_bg: ColorC,
+    // ------------------------------------------------------------------
+    // Appended past TERM_VIEW_SIZE_MIN — prefix-written, so an old
+    // caller gets the front it knows and a new caller on an old host
+    // keeps the zeros it initialised (`TermViewC::empty`).
+    // ------------------------------------------------------------------
+    /// The 64-bit monotonic line id of the FIRST delivered view row,
+    /// split into two words to keep four-byte alignment on every
+    /// target. A widget echoes it back in [`TermSelectC`] so a drag
+    /// resolves against the view it actually drew — fast output between
+    /// the draw and the input event must not make the selection jump
+    /// under the cursor (F1 §2.7 red-team). Zero on a host older than
+    /// this field, where `ACTION_TERM_SELECT` is unknown anyway.
+    pub first_id_lo: u32,
+    pub first_id_hi: u32,
 }
 
 impl TermViewC {
@@ -616,6 +707,8 @@ impl TermViewC {
             tab_active: 0,
             cursor_fg: NIL,
             cursor_bg: NIL,
+            first_id_lo: 0,
+            first_id_hi: 0,
         }
     }
 }

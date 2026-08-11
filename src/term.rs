@@ -189,6 +189,39 @@ impl Cell {
     }
 }
 
+/// What a selection is made of: cells as dragged, whole words, whole
+/// lines — the double- and triple-click kinds every terminal has.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SelKind {
+    Cells,
+    Words,
+    Lines,
+}
+
+/// A selection over the terminal's text.
+///
+/// Coordinates are `(line id, column)` where the line id is MONOTONIC —
+/// [`Term::line_id_of_view_row`] — never a view row or a grid row. The
+/// scrollback is a `VecDeque` that trims from the front; any index
+/// stored across frames without this translation is a future off-by-N.
+#[derive(Clone, Copy, Debug)]
+pub struct Selection {
+    pub anchor: (u64, usize),
+    pub head: (u64, usize),
+    pub kind: SelKind,
+}
+
+impl Selection {
+    /// The endpoints ordered by (line, column) — reading order.
+    fn ordered(&self) -> ((u64, usize), (u64, usize)) {
+        if self.head < self.anchor {
+            (self.head, self.anchor)
+        } else {
+            (self.anchor, self.head)
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Pen {
     fg: CellColor,
@@ -227,6 +260,15 @@ pub struct Term {
     pub view_offset: usize,
     /// Responses to send to the PTY (DA, CPR etc.).
     pub responses: Vec<u8>,
+    /// Total lines ever pushed off the top of the main screen into the
+    /// scrollback. Never decremented — a trim or an `ESC[3J` forgets
+    /// CONTENT, not history — which is what makes a line id monotonic
+    /// for the life of the session.
+    scrolled_total: u64,
+    /// The selection, in monotonic line ids (see [`Selection`]).
+    pub selection: Option<Selection>,
+    /// DECSET/DECRST 2004: wrap pastes in `ESC[200~ … ESC[201~`.
+    pub bracketed_paste: bool,
 }
 
 impl Term {
@@ -252,6 +294,9 @@ impl Term {
             autowrap: true,
             view_offset: 0,
             responses: Vec::new(),
+            scrolled_total: 0,
+            selection: None,
+            bracketed_paste: false,
         }
     }
 
@@ -269,6 +314,10 @@ impl Term {
         if cols == self.cols && rows == self.rows {
             return;
         }
+        // A resize reflows nothing (rows are cut or padded), but the
+        // cells a selection meant may no longer be where it points —
+        // the conservative first-cut rule clears it.
+        self.selection = None;
         for grid in [&mut self.screen, &mut self.alt_screen] {
             for row in grid.iter_mut() {
                 row.resize(cols, Cell::blank(CellColor::Default));
@@ -315,10 +364,177 @@ impl Term {
         }
     }
 
+    // ---- selection, in monotonic line ids ---------------------------
+    //
+    // The only public selection coordinates are line ids: an id names a
+    // LINE OF CONTENT and follows it from the screen into the scrollback
+    // and out of it, so trim and append never shift a selection. All the
+    // span logic sits in `selection_span_on_line`, and both consumers —
+    // the copied text and the drawn wash — read the same answer, which
+    // is what keeps one authority over what "selected" means.
+
+    /// The monotonic id of the line shown on view row `y`. Uniform
+    /// across the scrollback boundary: the id of view row 0 plus `y`.
+    pub fn line_id_of_view_row(&self, y: usize) -> u64 {
+        (self.scrolled_total + y as u64).saturating_sub(self.view_offset as u64)
+    }
+
+    /// The line a monotonic id names now — a MAIN-screen row or a
+    /// retained scrollback row. None once it is trimmed away, and always
+    /// None on the alt screen, which has no stable lines to name.
+    fn row_of_line(&self, id: u64) -> Option<&Vec<Cell>> {
+        if id >= self.scrolled_total {
+            if self.alt_active {
+                return None;
+            }
+            self.screen.get((id - self.scrolled_total) as usize)
+        } else {
+            let sb = self.scrollback.len() as u64;
+            let first = self.scrolled_total - sb;
+            if id < first {
+                None
+            } else {
+                self.scrollback.get((id - first) as usize)
+            }
+        }
+    }
+
+    /// Whether the selection reaches into the live screen — the lines a
+    /// feed can still move. Scrollback-only selections are settled.
+    fn selection_touches_screen(&self) -> bool {
+        self.selection
+            .map_or(false, |s| s.anchor.0.max(s.head.0) >= self.scrolled_total)
+    }
+
+    /// Starts a selection: anchor and head on the same cell.
+    pub fn selection_begin(&mut self, line: u64, col: usize, kind: SelKind) {
+        self.selection = Some(Selection { anchor: (line, col), head: (line, col), kind });
+    }
+
+    /// Moves the head of the selection in progress; nothing without one.
+    pub fn selection_extend(&mut self, line: u64, col: usize) {
+        if let Some(sel) = self.selection.as_mut() {
+            sel.head = (line, col);
+        }
+    }
+
+    /// Sets the whole selection at once.
+    pub fn selection_set(&mut self, anchor: (u64, usize), head: (u64, usize), kind: SelKind) {
+        self.selection = Some(Selection { anchor, head, kind });
+    }
+
+    pub fn selection_clear(&mut self) {
+        self.selection = None;
+    }
+
+    /// The selected column span on one line, endpoints INCLUSIVE, or
+    /// None when the line is outside the selection. The end column may
+    /// be `usize::MAX`, meaning "to the end of the line" — a consumer
+    /// clamps it to the width it has. This one function is what both
+    /// the copied text and the drawn wash are made from.
+    pub fn selection_span_on_line(&self, id: u64) -> Option<(usize, usize)> {
+        let sel = self.selection?;
+        let (s, e) = sel.ordered();
+        if id < s.0 || id > e.0 {
+            return None;
+        }
+        let (mut c0, mut c1) = (
+            if id == s.0 { s.1 } else { 0 },
+            if id == e.0 { e.1 } else { usize::MAX },
+        );
+        match sel.kind {
+            SelKind::Lines => return Some((0, usize::MAX)),
+            SelKind::Cells => {}
+            SelKind::Words => {
+                // The endpoints snap outward to word boundaries; the
+                // lines between are already whole.
+                if let Some(row) = self.row_of_line(id) {
+                    if id == s.0 {
+                        c0 = word_edge(row, c0, false);
+                    }
+                    if id == e.0 && c1 != usize::MAX {
+                        c1 = word_edge(row, c1, true);
+                    }
+                }
+            }
+        }
+        Some((c0, c1))
+    }
+
+    /// The selected text: wide-cell spacers skipped, trailing blanks
+    /// trimmed per line, lines joined with `\n`. Lines trimmed out of
+    /// the scrollback contribute nothing but their newline.
+    pub fn selection_text(&self) -> Option<String> {
+        let sel = self.selection?;
+        let (s, e) = sel.ordered();
+        // A stale selection from another epoch must not become a
+        // hundred-thousand-iteration loop.
+        if e.0 - s.0 > 200_000 {
+            return None;
+        }
+        let mut out = String::new();
+        for id in s.0..=e.0 {
+            if id != s.0 {
+                out.push('\n');
+            }
+            let Some(row) = self.row_of_line(id) else { continue };
+            let Some((c0, c1)) = self.selection_span_on_line(id) else { continue };
+            if row.is_empty() {
+                continue;
+            }
+            let c1 = c1.min(row.len() - 1);
+            let mut line = String::new();
+            for cell in row.iter().take(c1 + 1).skip(c0.min(c1)) {
+                if cell.flags & FLAG_WIDE_SPACER != 0 {
+                    continue;
+                }
+                line.push(cell.ch);
+            }
+            out.push_str(line.trim_end_matches(' '));
+        }
+        Some(out)
+    }
+
+    // ---- paste ------------------------------------------------------
+
+    /// What a paste becomes on the wire. Sanitised ALWAYS, bracketed or
+    /// not: C0 controls except `\t` and `\r` are stripped (a paste is
+    /// text, never an escape sequence), `\r\n` and `\n` normalise to
+    /// `\r` (the terminal's Enter), and any literal `ESC[201~` is
+    /// excised first — the bracket-escape injection that lets a crafted
+    /// paste end its own bracket and smuggle a command is a real
+    /// terminal CVE class, and stripping ESC alone would still leave
+    /// the tail behind. Wrapped in `ESC[200~ … ESC[201~` when the
+    /// application enabled DECSET 2004.
+    pub fn paste_bytes(&self, text: &str) -> Vec<u8> {
+        let normalised = text.replace("\r\n", "\r").replace('\n', "\r");
+        let excised = normalised.replace("\x1b[201~", "");
+        let clean: String = excised
+            .chars()
+            .filter(|&c| c == '\t' || c == '\r' || (c as u32 >= 0x20 && c != '\u{7f}'))
+            .collect();
+        let mut out = Vec::with_capacity(clean.len() + 12);
+        if self.bracketed_paste {
+            out.extend_from_slice(b"\x1b[200~");
+        }
+        out.extend_from_slice(clean.as_bytes());
+        if self.bracketed_paste {
+            out.extend_from_slice(b"\x1b[201~");
+        }
+        out
+    }
+
     fn scroll_up(&mut self, n: usize) {
         // Scrolling more than the region height clears it — clamp so a
         // crafted CSI parameter (up to 65535) cannot spin the CPU.
         let n = n.min(self.rows);
+        // Any feed that scrolls the selected screen region invalidates
+        // the selection (the conservative first cut — a finer damage
+        // test is F2). Scrollback-only selections survive output: their
+        // line ids are settled and nothing moves them.
+        if n > 0 && self.selection_touches_screen() {
+            self.selection = None;
+        }
         for _ in 0..n {
             let top = self.scroll_top;
             let bottom = self.scroll_bottom;
@@ -328,6 +544,7 @@ impl Term {
             let removed = self.grid_mut()[top].clone();
             if !alt && top == 0 {
                 self.scrollback.push_back(removed);
+                self.scrolled_total += 1;
                 if self.scrollback.len() > 5000 {
                     self.scrollback.pop_front();
                 }
@@ -342,6 +559,9 @@ impl Term {
 
     fn scroll_down(&mut self, n: usize) {
         let n = n.min(self.rows);
+        if n > 0 && self.selection_touches_screen() {
+            self.selection = None;
+        }
         for _ in 0..n {
             let top = self.scroll_top;
             let bottom = self.scroll_bottom;
@@ -444,8 +664,10 @@ impl Term {
             }
             3 => {
                 self.scrollback.clear();
-                // The scrollback is gone — any scrolled-back view is invalid.
+                // The scrollback is gone — any scrolled-back view is
+                // invalid, and so is anything selected in it.
                 self.view_offset = 0;
+                self.selection = None;
                 let grid = self.grid_mut();
                 for r in 0..rows {
                     grid[r] = vec![Cell::blank(bg); cols];
@@ -514,7 +736,12 @@ impl Term {
             1 => self.app_cursor = enable,
             7 => self.autowrap = enable,
             25 => self.cursor_visible = enable,
+            2004 => self.bracketed_paste = enable,
             47 | 1047 | 1049 => {
+                // Switching screens either way orphans a selection: the
+                // ids still name main-screen lines, but what is on
+                // display is another screen entirely.
+                self.selection = None;
                 if enable && !self.alt_active {
                     self.alt_active = true;
                     let bg = self.pen.bg;
@@ -541,6 +768,49 @@ impl Term {
             _ => {}
         }
     }
+}
+
+/// One end of a double-click word: from `col`, walk outward while the
+/// cells keep the class of the clicked one. Three classes — blank,
+/// word (alphanumeric or `_`), punctuation — so a double click takes
+/// `main.rs` apart at the dot the way every terminal does, and a click
+/// on a blank run takes the run. Wide-cell spacers ride with their
+/// lead: they carry a blank, and stopping at one would cut a CJK word
+/// in half.
+fn word_edge(row: &[Cell], col: usize, forward: bool) -> usize {
+    fn class(c: char) -> u8 {
+        if c == ' ' || c.is_whitespace() {
+            0
+        } else if c.is_alphanumeric() || c == '_' {
+            1
+        } else {
+            2
+        }
+    }
+    if row.is_empty() {
+        return col;
+    }
+    let mut at = col.min(row.len() - 1);
+    let want = class(row[at].ch);
+    loop {
+        let next = if forward {
+            if at + 1 >= row.len() {
+                break;
+            }
+            at + 1
+        } else {
+            if at == 0 {
+                break;
+            }
+            at - 1
+        };
+        let cell = &row[next];
+        if cell.flags & FLAG_WIDE_SPACER == 0 && class(cell.ch) != want {
+            break;
+        }
+        at = next;
+    }
+    at
 }
 
 /// Executor of vte parser events.
@@ -759,9 +1029,14 @@ impl<'a> vte::Perform for Performer<'a> {
                 t.pen = pen;
             }
             b'c' => {
-                // Full reset
+                // Full reset — except the line-id counter, which is
+                // monotonic for the SESSION: a stale selection base
+                // held by a widget must resolve to nothing, never to
+                // a fresh line that happens to reuse the number.
                 let (cols, rows) = (t.cols, t.rows);
+                let kept = t.scrolled_total;
                 **t = Term::new(cols, rows);
+                t.scrolled_total = kept;
             }
             _ => {}
         }
@@ -826,6 +1101,213 @@ mod wide_tests {
         let mut t = Term::new(10, 2);
         feed(&mut t, b"a");
         assert_eq!(cell(&t, 0).flags & FLAG_WIDE_LEAD, 0);
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    fn feed(t: &mut Term, bytes: &[u8]) {
+        let mut parser = vte::Parser::new();
+        let mut performer = Performer { term: t };
+        for b in bytes {
+            parser.advance(&mut performer, *b);
+        }
+    }
+
+    /// A line id names content, and follows it off the screen, through
+    /// the scrollback and past the trim: the selected text is the same
+    /// string before and after both moves.
+    #[test]
+    fn line_ids_survive_scroll_and_trim() {
+        let mut t = Term::new(20, 3);
+        // The marker scrolls into the scrollback first: a selection
+        // made over scrollback lines is settled, and output may not
+        // move it.
+        feed(&mut t, b"marker\r\n\r\n\r\n");
+        assert!(!t.scrollback.is_empty());
+        let id = t.scrolled_total - t.scrollback.len() as u64;
+        t.selection_set((id, 0), (id, 5), SelKind::Cells);
+        assert_eq!(t.selection_text().as_deref(), Some("marker"));
+        feed(&mut t, b"more\r\noutput\r\n");
+        assert!(t.selection.is_some(), "scrollback-only selections survive output");
+        assert_eq!(t.selection_text().as_deref(), Some("marker"));
+
+        // Push it past the 5000-line trim: the id resolves to nothing,
+        // never to some other line.
+        for _ in 0..5001 {
+            t.linefeed();
+        }
+        assert_eq!(t.selection_text().as_deref(), Some(""));
+    }
+
+    /// The uniform formula: view row 0's id plus y, across the
+    /// scrollback boundary.
+    #[test]
+    fn view_row_ids_are_contiguous_across_the_boundary() {
+        let mut t = Term::new(10, 4);
+        for _ in 0..10 {
+            t.linefeed();
+        }
+        t.scroll_view(2); // two scrollback rows on top, screen below
+        let base = t.line_id_of_view_row(0);
+        for y in 1..4 {
+            assert_eq!(t.line_id_of_view_row(y), base + y as u64);
+        }
+        assert_eq!(base, t.scrolled_total - 2);
+    }
+
+    /// Wide-cell spacers are skipped in the copied text, so CJK copies
+    /// as its characters, not as characters plus phantom blanks.
+    #[test]
+    fn selection_text_skips_wide_spacers() {
+        let mut t = Term::new(10, 2);
+        feed(&mut t, "a\u{4e2d}b".as_bytes());
+        let id = t.line_id_of_view_row(0);
+        t.selection_set((id, 0), (id, 3), SelKind::Cells);
+        assert_eq!(t.selection_text().as_deref(), Some("a\u{4e2d}b"));
+    }
+
+    /// Trailing blanks are trimmed per line and lines join with \n; a
+    /// middle line is taken whole.
+    #[test]
+    fn selection_text_trims_and_joins() {
+        let mut t = Term::new(10, 3);
+        feed(&mut t, b"one\r\ntwo\r\nthree");
+        let top = t.line_id_of_view_row(0);
+        t.selection_set((top, 1), (top + 2, 2), SelKind::Cells);
+        assert_eq!(t.selection_text().as_deref(), Some("ne\ntwo\nthr"));
+    }
+
+    /// Word selection snaps outward by character class: a double click
+    /// inside `main.rs` stops at the dot, one on a blank takes the run.
+    #[test]
+    fn word_selection_snaps_to_class_edges() {
+        let mut t = Term::new(20, 2);
+        feed(&mut t, b"cat main.rs now");
+        let id = t.line_id_of_view_row(0);
+        t.selection_set((id, 5), (id, 5), SelKind::Words);
+        assert_eq!(t.selection_text().as_deref(), Some("main"));
+        t.selection_set((id, 8), (id, 8), SelKind::Words);
+        assert_eq!(t.selection_text().as_deref(), Some("."));
+        t.selection_set((id, 9), (id, 10), SelKind::Words);
+        assert_eq!(t.selection_text().as_deref(), Some("rs"));
+    }
+
+    /// Line selection takes whole lines whatever the columns say.
+    #[test]
+    fn line_selection_takes_whole_lines() {
+        let mut t = Term::new(10, 3);
+        feed(&mut t, b"alpha\r\nbeta");
+        let top = t.line_id_of_view_row(0);
+        t.selection_set((top, 4), (top + 1, 0), SelKind::Lines);
+        assert_eq!(t.selection_text().as_deref(), Some("alpha\nbeta"));
+    }
+
+    /// The wash and the copy read the same span function; endpoints are
+    /// inclusive and middle lines answer "to the end of the line".
+    #[test]
+    fn span_on_line_is_the_single_authority() {
+        let mut t = Term::new(10, 4);
+        feed(&mut t, b"aa\r\nbb\r\ncc");
+        let top = t.line_id_of_view_row(0);
+        t.selection_set((top, 1), (top + 2, 0), SelKind::Cells);
+        assert_eq!(t.selection_span_on_line(top), Some((1, usize::MAX)));
+        assert_eq!(t.selection_span_on_line(top + 1), Some((0, usize::MAX)));
+        assert_eq!(t.selection_span_on_line(top + 2), Some((0, 0)));
+        assert_eq!(t.selection_span_on_line(top + 3), None);
+        // Backwards drags order themselves.
+        t.selection_set((top + 2, 0), (top, 1), SelKind::Cells);
+        assert_eq!(t.selection_span_on_line(top), Some((1, usize::MAX)));
+    }
+
+    /// The conservative clearing rules: a scroll of the selected screen
+    /// region, the alt screen, a resize and ESC[3J all drop the
+    /// selection; output while a scrollback selection stands does not.
+    #[test]
+    fn selection_clears_on_the_documented_events() {
+        // A feed that scrolls the selected screen region.
+        let mut t = Term::new(10, 2);
+        feed(&mut t, b"hi");
+        let id = t.line_id_of_view_row(0);
+        t.selection_set((id, 0), (id, 1), SelKind::Cells);
+        feed(&mut t, b"\r\n\r\n\r\n");
+        assert!(t.selection.is_none(), "a scrolled screen selection is dropped");
+
+        // Alt-screen switch.
+        let mut t = Term::new(10, 2);
+        feed(&mut t, b"hi");
+        t.selection_set((0, 0), (0, 1), SelKind::Cells);
+        feed(&mut t, b"\x1b[?1049h");
+        assert!(t.selection.is_none(), "alt switch drops the selection");
+
+        // Resize.
+        let mut t = Term::new(10, 2);
+        t.selection_set((0, 0), (0, 1), SelKind::Cells);
+        t.resize(12, 3);
+        assert!(t.selection.is_none(), "resize drops the selection");
+
+        // Scrollback clear.
+        let mut t = Term::new(10, 2);
+        for _ in 0..4 {
+            t.linefeed();
+        }
+        t.selection_set((0, 0), (0, 1), SelKind::Cells);
+        t.erase_display(3);
+        assert!(t.selection.is_none(), "ESC[3J drops the selection");
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+
+    fn feed(t: &mut Term, bytes: &[u8]) {
+        let mut parser = vte::Parser::new();
+        let mut performer = Performer { term: t };
+        for b in bytes {
+            parser.advance(&mut performer, *b);
+        }
+    }
+
+    /// DECSET/DECRST 2004 turns the brackets on and off.
+    #[test]
+    fn mode_2004_brackets_the_paste() {
+        let mut t = Term::new(10, 2);
+        assert!(!t.bracketed_paste);
+        assert_eq!(t.paste_bytes("hi"), b"hi".to_vec());
+        feed(&mut t, b"\x1b[?2004h");
+        assert!(t.bracketed_paste);
+        assert_eq!(t.paste_bytes("hi"), b"\x1b[200~hi\x1b[201~".to_vec());
+        feed(&mut t, b"\x1b[?2004l");
+        assert!(!t.bracketed_paste);
+    }
+
+    /// Newlines become the terminal's Enter, both spellings.
+    #[test]
+    fn paste_normalises_newlines_to_cr() {
+        let t = Term::new(10, 2);
+        assert_eq!(t.paste_bytes("a\r\nb\nc"), b"a\rb\rc".to_vec());
+    }
+
+    /// C0 controls are stripped except tab and return — a paste is
+    /// text, never a control sequence.
+    #[test]
+    fn paste_strips_c0_except_tab_and_cr() {
+        let t = Term::new(10, 2);
+        assert_eq!(t.paste_bytes("a\x07b\tc\x00d\x7f"), b"ab\tcd".to_vec());
+    }
+
+    /// The bracket-escape injection: a literal ESC[201~ inside the
+    /// payload is excised WHOLE, so nothing in a paste can end its own
+    /// bracket — and the loose "[201~" tail never reaches the shell.
+    #[test]
+    fn paste_excises_the_closing_bracket_sequence() {
+        let mut t = Term::new(10, 2);
+        feed(&mut t, b"\x1b[?2004h");
+        let out = t.paste_bytes("safe\x1b[201~; rm -rf /\x1b[201~");
+        assert_eq!(out, b"\x1b[200~safe; rm -rf /\x1b[201~".to_vec());
     }
 }
 

@@ -24,7 +24,7 @@
 //! [`plugin`]: crate::plugin
 
 use crate::telemetry::Snapshot;
-use crate::term::Term;
+use crate::term::{SelKind, Term};
 use crate::{Ctx, Rect};
 use std::path::PathBuf;
 
@@ -53,6 +53,28 @@ pub struct Host<'a> {
     pub window: (f32, f32),
 }
 
+/// Where a pointer capture stands. Delivered through [`Widget::drag`]:
+/// the host captures the pointer on a press the widget's `drag(Begin)`
+/// accepted, routes every motion as `Move`, and the release as `End` —
+/// ONE capture path, which F2's press/release will be synthesized into
+/// rather than duplicating (F1 §5.1 red-team).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DragPhase {
+    Begin,
+    Move,
+    End,
+}
+
+/// What a [`Action::TermSelect`] does to the selection. The kind rides
+/// on `Begin` — cells, or the word/line kinds a double or triple click
+/// means (the HOST tracks click counts; a widget has no way to).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SelectOp {
+    Begin(SelKind),
+    Extend,
+    End,
+}
+
 /// What a widget asks the application to do. A widget never acts on the
 /// system itself — it returns one of these and the application decides.
 #[derive(Clone, Debug, PartialEq)]
@@ -74,6 +96,19 @@ pub enum Action {
     /// state belongs to the session, not to the widget drawing it, so
     /// the widget asks rather than scrolls.
     ScrollTerminal(i32),
+    /// The shell widget translated a drag into cell coordinates; the
+    /// HOST applies it to the session's `Term` (widgets get `&Term`,
+    /// never `&mut`). `row` is a row of the view THE WIDGET DREW, and
+    /// `base` is the line id of that view's first row, echoed from
+    /// `term_view`'s reply — the host resolves `base + row`, never
+    /// "row against the terminal now", because a PTY feed between the
+    /// draw and this event scrolls the screen and would shift every
+    /// resolved row by N (F1 §2.7 red-team).
+    TermSelect { op: SelectOp, col: usize, row: usize, base: u64 },
+    /// Paste the PRIMARY selection into the active session — the
+    /// middle-click convention. The host does the clipboard work; a
+    /// widget only ever asks.
+    PastePrimary,
 }
 
 /// Which window controls a panel's title band carries, right-aligned in
@@ -148,6 +183,17 @@ pub trait Widget {
 
     /// The wheel turned over the widget.
     fn wheel(&mut self, _dy: f32, _r: Rect, _host: &Host) -> Action {
+        Action::None
+    }
+
+    /// A pointer drag over the widget — the host's single capture path
+    /// (see [`DragPhase`]). `Begin` is the press: a widget that answers
+    /// [`Action::None`] declines the capture and the press falls back to
+    /// the ordinary click delivery, which is why every existing widget
+    /// keeps working untouched. `Move` and `End` follow only an accepted
+    /// `Begin`, and their coordinates may leave `r` — a selection
+    /// dragged past the edge clamps in the widget, not in the host.
+    fn drag(&mut self, _p: DragPhase, _x: f32, _y: f32, _r: Rect, _host: &Host) -> Action {
         Action::None
     }
 

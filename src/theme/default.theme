@@ -4166,7 +4166,8 @@ rule = @stroke.hair                 # the title bar's floor line · images 7,8 �
 # =========================================================================
 # menu — the window menu (winframe.rs) and the settings drop-down
 # (dropdown.rs) were the same object drawn twice with different numbers.
-# UNIFIED here.
+# UNIFIED here. The context menu (menu.rs) reads the same table plus the
+# hint/chevron/rule/submenu keys below, which the two older menus ignore.
 # =========================================================================
 [menu]
 row_h = 0.85x @titlebar.h           # one menu row · - · rat of @titlebar.h · 23.9 px; the drop-down's btn_h*0.8 = 36.3 unified down
@@ -4180,8 +4181,14 @@ border = @stroke.hair               # the menu's ring · - · str · @stroke.hai
 item.role = body                    # type role of a menu row's label · - · role · type.body, which 5.25's gloss names as the target anyway
 item_inset = 0.5x @menu.row_h       # left inset of a row's label · - · rat of @menu.row_h · 12.0 px
 item_text_threshold = 0.7x @menu.row_h   # below this height an unfolding row draws no text · - · rat of @menu.row_h · 16.7 px
-anchor_width = anchor               # whether the menu takes its anchor's width or its own minimum · - · enum: anchor | min_w · -
+anchor_width = anchor               # whether the menu takes its anchor's width or its own minimum · - · enum: anchor | min_w · -; context menus always size to content over the min_w floor
 rule = @stroke.hair                 # the separator between menu groups · - · str | none · @stroke.hair
+hint_role = caption                 # type role of the shortcut hint at a row's right edge · - · role · type.caption
+hint_gap = @space.4                 # gap between the label column and the hint column · - · len (u) · @space.4 = 2u = 10.8 px
+chevron_w = 2u                      # the submenu chevron's glyph box · - · len (u) · 10.8 px
+chevron_stroke = @stroke.thin       # the chevron's line weight · - · str · @stroke.thin
+rule_pad = 0.35x @menu.row_h        # vertical breathing around a separator rule · - · rat of @menu.row_h · 8.4 px
+submenu_overlap = 1u                # how far a submenu tucks under its parent's edge · - · len (u) · 5.4 px
 
 # =========================================================================
 # button — the parallelogram. skew is UNIFIED: button.rs used 0.7 and the
@@ -4291,7 +4298,9 @@ pad_x = @space.3                    # left/right padding inside a cell · - · l
 min_cell_w = 10u                    # minimum cell width · - · len (u) · 54.0 px
 
 # =========================================================================
-# field — image 7's `browser` search box. No such object exists in code.
+# field — image 7's `browser` search box. Drawn by object/text_input.rs
+# (F1 §3); nothing at boot contains one, so every key here is read only
+# after a field exists on screen.
 # =========================================================================
 [field]
 h = @size.lg                        # the field's height · image 7 (the search field) · len (u) · @size.lg = 6.5u = 35.1 px
@@ -4304,6 +4313,10 @@ icon_gap = @space.2                 # gap between that glyph and the text · ima
 caret_w = @stroke.thin              # the caret's width · image 7 · str · @stroke.thin
 caret_h = 1.2x @type.body.size      # the caret's height · image 7 · rat of @type.body.size · 16.8 px
 caret_style = bar                   # what the caret is · image 7 · enum: bar | block | underline · -
+role = field                        # type role of the typed text · image 7 · role · type.field — the role table's own "text typed into a field" row
+scroll_margin = 2u                  # the caret's distance from either edge before the view slides · - · len (u) · 10.8 px
+preedit_underline = @stroke.thin    # underline beneath IME composing text · - · str · @stroke.thin
+mask_glyph = bullet                 # what a masked char draws as · - · enum: bullet | asterisk | block · bullet is the unknown-word fallback in code
 
 # =========================================================================
 # list — the task list, the notification list, the crew list.
@@ -4928,6 +4941,7 @@ launcher.active_border = @accent.warm    # that tile's ring · image 8 · col ·
 # ---------------------------------------------------------------- menu / control marks
 menu.fill = @surface.raised         # the opaque bed of a drop-down or window menu · images 1,7 · col · @surface.raised; [menu] carries geometry only, so a menu could not take a material distinct from the panel behind it
 menu.border = @border.default       # the menu's chamfered ring · images 1,7 · col · @border.default; [menu].border is a stroke WIDTH
+menu.hint = @text.muted             # a row's shortcut hint ink · - · col · @text.muted; secondary to the row label by design
 checkbox.tick = @accent.primary     # the filled mark inside a checked box · - · col · @accent.primary; [checkbox] sets the mark's shape and inset and never its colour
 
 # ---------------------------------------------------------------- field
@@ -4936,6 +4950,9 @@ field.border = @border.subtle       # its ring · image 7 · col · @border.subt
 field.text = @text.primary          # typed text · image 7 · col · @text.primary
 field.placeholder = @text.muted     # the `browser` placeholder · image 7 · col · @text.muted
 field.caret = @accent.primary       # the caret · image 7 · col · @accent.primary
+field.selection = alpha(@accent.primary, 0.28)   # wash behind selected text · - · col · mirrors term.selection
+field.selection_text = contrast_on(over(@component.field.selection, @component.field.fill), @surface.void, @text.primary)   # ink inside the wash · - · col · the term.selection_fg idiom, resolved over the composited wash
+field.preedit = @text.primary       # IME composing text ink · - · col · @text.primary; the underline is what marks it
 
 # ---------------------------------------------------------------- chrome bits
 taskbar.fill = @surface.raised      # the dock's material · images 7,8,9 · col · @surface.raised

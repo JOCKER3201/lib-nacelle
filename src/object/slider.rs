@@ -2,6 +2,8 @@
 //! The caller draws its own label/value text and hit-tests the
 //! returned track rectangle.
 
+use super::focus_ring;
+use crate::focus::{Caps, FocusId};
 use crate::theme::{self, Color, TokenId};
 use crate::{Ctx, Rect};
 use std::sync::OnceLock;
@@ -61,4 +63,17 @@ pub fn track(ctx: &mut Ctx, track: Rect, t: f32) {
         kh,
         col(th.color(tok(&KNOB_COLOR, "slider.knob_color"))),
     );
+}
+
+/// [`track`], joined to the world's focus chain. A slider EATS the
+/// arrows (`GREEDY_ARROWS`): while it owns focus, Left/Right adjust the
+/// value instead of navigating — the router dispatches them to the
+/// caller's value logic. Tab still leaves. The ring wraps the track
+/// rect the caller already hit-tests.
+pub fn track_focusable(ctx: &mut Ctx, r: Rect, t: f32, id: FocusId) {
+    let f = ctx.focus.as_deref_mut().map(|fc| fc.register(id, r, Caps::GREEDY_ARROWS));
+    track(ctx, r, t);
+    if f.map_or(false, |f| f.ring) {
+        focus_ring::draw(ctx, r);
+    }
 }

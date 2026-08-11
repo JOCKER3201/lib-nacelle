@@ -24,6 +24,10 @@ serde_json = "1"
 vte = "0.13"
 unicode-width = "0.1"
 
+# Grapheme-cluster and word boundaries for the text-input model
+# (object/text_input.rs): the caret moves by graphemes, never chars.
+unicode-segmentation = "1"
+
 # Widget scripting: pure Rust, so building needs no C toolchain, and
 # sandboxed by construction — a script sees only what it is given.
 rhai = { version = "1.25.1", default-features = false, features = ["std", "sync"] }

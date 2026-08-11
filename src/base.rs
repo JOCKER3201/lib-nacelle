@@ -2,6 +2,7 @@
 //! drawing context shared by every nacelle widget.
 
 use crate::draw::DrawList;
+use crate::focus::FocusCtl;
 use crate::font::{FontSystem, FONT_UI};
 use std::sync::{OnceLock, RwLock};
 
@@ -508,6 +509,12 @@ pub struct Ctx<'a> {
     /// narrow columns shrink their text. Panels set it on entry and
     /// reset it to 1.0 when done; full-width panels leave it at 1.0.
     pub panel_scale: f32,
+    /// The focus chain of the world being drawn — how a control asks
+    /// "am I focused?" and joins the Tab order ([`crate::focus`]).
+    /// Per-world like `SizeTable`, owned by the application. None while
+    /// a caller draws without one (tests, an embedder with no keyboard)
+    /// — every control treats that as "never focused".
+    pub focus: Option<&'a mut FocusCtl>,
 }
 
 impl<'a> Ctx<'a> {
