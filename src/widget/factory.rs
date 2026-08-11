@@ -75,17 +75,19 @@ impl WidgetFactory {
             }
             return None;
         }
-        let dir = registry::widget_dir(&self.roots, &name)?;
-        #[cfg(unix)]
-        if self.plugins_enabled {
-            if let Some(w) = super::loader::load(&dir, &name) {
-                return Some(w);
+        if let Some(lib) = registry::plugin_path(&self.roots, &name) {
+            #[cfg(unix)]
+            if self.plugins_enabled {
+                if let Some(w) = super::loader::load(&lib, &name) {
+                    return Some(w);
+                }
+            } else {
+                eprintln!("nacelle: plugins disabled — skipping compiled widget '{name}'");
             }
-        } else if dir.join(format!("{name}.so")).is_file() {
-            eprintln!("nacelle: plugins disabled — skipping compiled widget '{name}'");
+            #[cfg(not(unix))]
+            let _ = lib;
         }
-        let script = dir.join(format!("{name}.rhai"));
-        if script.is_file() {
+        if let Some(script) = registry::script_path(&self.roots, &name) {
             if let Some(s) = crate::script::Script::load(&script) {
                 return Some(Box::new(crate::script::ScriptWidget::new(s)) as Box<dyn Widget>);
             }

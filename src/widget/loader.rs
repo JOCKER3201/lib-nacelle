@@ -15,12 +15,11 @@ use crate::widget::Widget;
 use std::ffi::CString;
 use std::path::Path;
 
-/// Loads `<dir>/<name>.so` and attaches it. Every failure returns
+/// Loads the given `.so` and attaches it. Every failure returns
 /// None with a message: a plugin that will not open, does not export
 /// the attach point, or speaks a different interface version leaves
 /// its panel empty and the embedder running.
-pub fn load(dir: &Path, name: &str) -> Option<Box<dyn Widget>> {
-    let path = dir.join(format!("{name}.so"));
+pub fn load(path: &Path, name: &str) -> Option<Box<dyn Widget>> {
     if !path.is_file() {
         return None;
     }
