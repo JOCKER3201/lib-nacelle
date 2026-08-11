@@ -346,7 +346,37 @@ pub struct HostApi {
     /// neighbours: the host counts the depth around
     /// [`PluginApi::draw`] and unwinds whatever is left over.
     pub pop_clip: extern "C" fn(ctx: *mut c_void),
+    /// A filled rectangle wearing the family's corners, and its stroke.
+    /// Until these existed a plugin could draw a sharp rect or hand-roll
+    /// a chamfer out of polylines — which is why the file browser's
+    /// tiles carry their own corner code — and no plugin could round
+    /// anything at all. `style` is [`CORNER_SQUARE`], [`CORNER_ROUND`]
+    /// or [`CORNER_CHAMFER`]; anything else degrades to square, the
+    /// look of an unstyled rect. `radius` is in device pixels, clamped
+    /// by the host to half the short side, and the arc tessellation is
+    /// the host's own quarter-pixel rule — a plugin never has to know
+    /// how many segments an arc needs at this size.
+    pub ring_fill:
+        extern "C" fn(ctx: *mut c_void, r: RectC, style: u32, radius: f32, c: ColorC),
+    /// The stroke of the same shape, drawn inward like every other
+    /// border in this toolkit.
+    pub ring: extern "C" fn(
+        ctx: *mut c_void,
+        r: RectC,
+        style: u32,
+        radius: f32,
+        w: f32,
+        c: ColorC,
+    ),
 }
+
+/// Corner styles for [`HostApi::ring_fill`] and [`HostApi::ring`]. The
+/// numbers are the boundary's own vocabulary, not the theme's enum
+/// indices — those intern in load order and mean nothing across a
+/// library edge.
+pub const CORNER_SQUARE: u32 = 0;
+pub const CORNER_ROUND: u32 = 1;
+pub const CORNER_CHAMFER: u32 = 2;
 
 /// The prefix of [`HostApi`] every version-6 host must fill — everything
 /// up to and including `theme_epoch`. [`attach`] refuses a table shorter
@@ -367,6 +397,12 @@ pub const HOST_API_HAS_MASK_QUAD: usize =
 /// pair is either wholly there or wholly absent.
 pub const HOST_API_HAS_CLIP: usize =
     std::mem::offset_of!(HostApi, pop_clip) + std::mem::size_of::<usize>();
+
+/// The prefix that includes BOTH ring entries. One gate for the pair,
+/// like the clips: a caller that can fill a rounded rect but not stroke
+/// it would draw half a control.
+pub const HOST_API_HAS_RING: usize =
+    std::mem::offset_of!(HostApi, ring) + std::mem::size_of::<usize>();
 
 /// [`HostApi::mask_quad`]: blend additively — the quad adds light, the
 /// way the host's own glow does. Without it the quad covers, the way its
@@ -392,6 +428,13 @@ impl HostApi {
     /// once rather than painting outside its box.
     pub fn has_clip(&self) -> bool {
         self.api_size as usize >= HOST_API_HAS_CLIP
+    }
+
+    /// Whether this host can draw the family's corners for a plugin.
+    /// Absent: draw a plain rect and say so — a sharp control among
+    /// rounded ones is a visible degradation, not a silent one.
+    pub fn has_ring(&self) -> bool {
+        self.api_size as usize >= HOST_API_HAS_RING
     }
 }
 

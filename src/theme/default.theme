@@ -4199,8 +4199,9 @@ submenu_overlap = 1u                # how far a submenu tucks under its parent's
 [button]
 icon_skew_frac = 0.8                # where a glyph anchors along the skewed edge · - · frac · was ax = skew * 0.8 in settings.rs
 h = @size.xl                        # button height · images 1,7 · len (u) · @size.xl = 8.4u = 45.4 px
-skew = 0.55x @button.h              # horizontal shear that makes the parallelogram · images 1,7 · rat of @button.h · 25.0 px; unified from 0.7 / 0.55
-corner = @corner.none               # corner radius; the parallelogram IS the shape · images 1,7 · len (u) · @corner.none = 0u
+skew = 0u                           # horizontal shear that makes a parallelogram · images 1,7 · len (u) · 0u: a button wears the FRAMES' corners now (below), and a shear on top of them would be two shapes at once; a theme that wants image 1's slant back gives this a width again
+corner = @elev.panel.radius         # corner radius · images 1,7 · len (u) · the panel's own radius: a control inside a frame answers with the frame's shape, so the decision is made once
+corner_style = @elev.panel.corner   # which shape those corners take · images 1,7 · enum: square | round | chamfer · follows the panel for the same reason as the radius; a theme may still pin the button alone
 border = @stroke.hair               # the resting ring · images 1,7 · str · @stroke.hair
 border_hover = @stroke.hair         # the hovered ring; brightness carries hover, not thickness · image 7 · str · @stroke.hair
 pad_x = @space.5                    # left/right padding around the label · images 1,7 · len (u) · @space.5 = 3u = 16.2 px

@@ -24,6 +24,7 @@ use crate::runtime::{
 };
 use crate::font::{FontSystem, FONT_COUNT};
 use crate::term::{Cell, SelKind, FLAG_UNDERLINE, FLAG_WIDE_LEAD, FLAG_WIDE_SPACER};
+use crate::draw::{ring_segments, Corner, CornerStyle};
 use crate::theme::Color;
 use crate::widget::{DragPhase, SelectOp, Sizing};
 use crate::{Action, Ctx, Host, Rect, Widget};
@@ -346,6 +347,40 @@ extern "C" fn h_pop_clip(p: *mut c_void) {
     ctx.dl.pop_clip();
 }
 
+/// The corner vocabulary of the boundary, turned into the toolkit's own.
+/// Anything the plugin invents degrades to Square — the same rule the
+/// theme's enum words follow when a vocabulary does not name a word.
+fn corners_in(style: u32, radius: f32, r: RectC) -> ([Corner; 4], u8) {
+    let style = match style {
+        crate::runtime::CORNER_ROUND => CornerStyle::Round,
+        crate::runtime::CORNER_CHAMFER => CornerStyle::Chamfer,
+        _ => CornerStyle::Square,
+    };
+    // Half the short side is the geometric ceiling: past it the arcs of
+    // two corners would cross and the outline would fold on itself.
+    let size = radius.max(0.0).min(r.w.min(r.h) / 2.0);
+    let seg = ring_segments(size, 0.25, 16);
+    ([Corner { style, size }; 4], seg)
+}
+
+extern "C" fn h_ring_fill(p: *mut c_void, r: RectC, style: u32, radius: f32, c: ColorC) {
+    let Some(ctx) = (unsafe { ctx_of(p) }) else { return };
+    if r.w <= 0.0 || r.h <= 0.0 {
+        return;
+    }
+    let (corners, seg) = corners_in(style, radius, r);
+    ctx.dl.ring_fill(Rect::new(r.x, r.y, r.w, r.h), &corners, seg, color_in(c));
+}
+
+extern "C" fn h_ring(p: *mut c_void, r: RectC, style: u32, radius: f32, w: f32, c: ColorC) {
+    let Some(ctx) = (unsafe { ctx_of(p) }) else { return };
+    if r.w <= 0.0 || r.h <= 0.0 || w <= 0.0 {
+        return;
+    }
+    let (corners, seg) = corners_in(style, radius, r);
+    ctx.dl.ring(Rect::new(r.x, r.y, r.w, r.h), &corners, seg, w, color_in(c));
+}
+
 // The two v4 theme entries. Append-only means they stay at their table
 // positions forever and keep answering what the retired seven-field
 // bridge answered: `accent.primary` and `surface.base`.
@@ -647,6 +682,8 @@ pub fn host_api() -> &'static HostApi {
         mask_quad: h_mask_quad,
         push_clip: h_push_clip,
         pop_clip: h_pop_clip,
+        ring_fill: h_ring_fill,
+        ring: h_ring,
     };
     &API
 }
@@ -1060,25 +1097,32 @@ mod tests {
     fn the_host_table_grows_at_the_end_only() {
         use crate::runtime::{
             HOST_API_HAS_CLIP, HOST_API_HAS_ENUM_WORD, HOST_API_HAS_MASK_QUAD,
-            HOST_API_SIZE_MIN,
+            HOST_API_HAS_RING, HOST_API_SIZE_MIN,
         };
         let api = host_api();
         assert_eq!(api.api_size as usize, std::mem::size_of::<HostApi>());
         assert!(api.has_theme_enum_word());
         assert!(api.has_mask_quad());
         assert!(api.has_clip());
+        assert!(api.has_ring());
         // The appended entries sit past the mandatory prefix, in order,
-        // with the clip pair the current end of the table.
+        // with the ring pair the current end of the table.
         assert!(HOST_API_SIZE_MIN < HOST_API_HAS_ENUM_WORD);
         assert!(HOST_API_HAS_ENUM_WORD < HOST_API_HAS_MASK_QUAD);
         assert!(HOST_API_HAS_MASK_QUAD < HOST_API_HAS_CLIP);
-        assert_eq!(HOST_API_HAS_CLIP, std::mem::size_of::<HostApi>());
+        assert!(HOST_API_HAS_CLIP < HOST_API_HAS_RING);
+        assert_eq!(HOST_API_HAS_RING, std::mem::size_of::<HostApi>());
         // A host that stopped at the version-6 minimum answers none of
         // them, which is what a plugin's `has_*` gate is for.
         let old = HostApi { api_size: HOST_API_SIZE_MIN as u32, ..*api };
         assert!(!old.has_theme_enum_word());
         assert!(!old.has_mask_quad());
         assert!(!old.has_clip());
+        assert!(!old.has_ring());
+        // And a host from before the ring pair keeps the clips.
+        let pre_ring = HostApi { api_size: HOST_API_HAS_CLIP as u32, ..*api };
+        assert!(pre_ring.has_clip());
+        assert!(!pre_ring.has_ring());
         // A host from before the clip pair — the whole of ABI 6 as it
         // stood — still answers everything it did answer.
         let pre_clip = HostApi { api_size: HOST_API_HAS_MASK_QUAD as u32, ..*api };
