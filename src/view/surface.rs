@@ -22,6 +22,7 @@
 //! hash where a static is a load: a view reads its tokens into a local
 //! `Look` struct ONCE per draw and never inside a row loop.
 
+use crate::draw::{Corner, CornerStyle};
 use crate::font::FONT_UI;
 use crate::theme::parse::State;
 use crate::theme::{self, Color, TokenId};
@@ -78,6 +79,25 @@ impl From<theme::bake::StateStyle> for StateInk {
 /// answer the pointer. Nothing else: a view that could reach further
 /// would stop being portable across the boundary, which is the whole
 /// point of the trait.
+/// Corners and tessellation for a ring at this size: the radius can
+/// never exceed half the short side (past it two corners would cross),
+/// and the arc count is the toolkit's own quarter-pixel rule.
+/// The boundary's corner vocabulary. The theme's enum indices intern in
+/// load order and mean nothing across a library edge, so the numbers
+/// travel instead.
+fn corner_code(style: CornerStyle) -> u32 {
+    match style {
+        CornerStyle::Round => crate::runtime::CORNER_ROUND,
+        CornerStyle::Chamfer => crate::runtime::CORNER_CHAMFER,
+        CornerStyle::Square => crate::runtime::CORNER_SQUARE,
+    }
+}
+
+fn ring_parts(style: CornerStyle, radius: f32, r: Rect) -> ([Corner; 4], u8) {
+    let size = radius.max(0.0).min(r.w.min(r.h) / 2.0);
+    ([Corner { style, size }; 4], crate::draw::ring_segments(size, 0.25, 16))
+}
+
 pub trait Surface {
     // ----------------------------------------------------------- paint
     fn rect(&mut self, r: Rect, c: Color);
@@ -85,6 +105,18 @@ pub trait Surface {
     fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, w: f32, c: Color);
     /// A run of points; `closed` joins the last back to the first.
     fn polyline(&mut self, pts: &[[f32; 2]], w: f32, c: Color, closed: bool);
+    /// A filled rectangle wearing the family's corners, and its stroke.
+    /// The default draws the plain rectangle, which is what a surface
+    /// without the primitive can honestly do — and what a theme asking
+    /// for square corners wants anyway.
+    fn ring_fill(&mut self, r: Rect, style: CornerStyle, radius: f32, c: Color) {
+        let _ = (style, radius);
+        self.rect(r, c);
+    }
+    fn ring(&mut self, r: Rect, style: CornerStyle, radius: f32, w: f32, c: Color) {
+        let _ = (style, radius);
+        self.rect_outline(r, w, c);
+    }
     /// A filled convex quadrilateral — the sheared plate a tab is drawn
     /// on, which no rectangle can stand in for.
     ///
@@ -299,6 +331,16 @@ impl Surface for CtxSurface<'_, '_> {
         self.ctx.dl.polyline(pts, w, c, closed);
     }
 
+    fn ring_fill(&mut self, r: Rect, style: CornerStyle, radius: f32, c: Color) {
+        let (corners, seg) = ring_parts(style, radius, r);
+        self.ctx.dl.ring_fill(r, &corners, seg, c);
+    }
+
+    fn ring(&mut self, r: Rect, style: CornerStyle, radius: f32, w: f32, c: Color) {
+        let (corners, seg) = ring_parts(style, radius, r);
+        self.ctx.dl.ring(r, &corners, seg, w, c);
+    }
+
     fn quad(&mut self, pts: [[f32; 2]; 4], c: Color) {
         self.ctx.dl.quad(pts, c);
     }
@@ -489,6 +531,22 @@ impl<'a> AbiSurface<'a> {
 }
 
 impl Surface for AbiSurface<'_> {
+    fn ring_fill(&mut self, r: Rect, style: CornerStyle, radius: f32, c: Color) {
+        if self.api.has_ring() {
+            (self.api.ring_fill)(self.ctx, rc(r), corner_code(style), radius, cc(c));
+        } else {
+            self.rect(r, c);
+        }
+    }
+
+    fn ring(&mut self, r: Rect, style: CornerStyle, radius: f32, w: f32, c: Color) {
+        if self.api.has_ring() {
+            (self.api.ring)(self.ctx, rc(r), corner_code(style), radius, w, cc(c));
+        } else {
+            self.rect_outline(r, w, c);
+        }
+    }
+
     fn rect(&mut self, r: Rect, c: Color) {
         (self.api.rect)(self.ctx, rc(r), cc(c));
     }

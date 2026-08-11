@@ -4391,7 +4391,9 @@ divider_inset = @space.1            # how far that divider is pulled in from the
 [tab]
 rule_color    = @border.subtle      # the line under the WHOLE session strip · - · col · @border.subtle; shell strip rule, not one tab's ring (m1 §3.3)
 h = @size.md                        # tab height · - · len (u) · @size.md = 5.2u = 28.1 px; today vh(2.6)
-skew = 0.7x @tab.h                  # the shear that slants a tab · - · rat of @tab.h · 19.7 px; deliberately NOT unified with button.skew
+skew = 0u                           # the shear that slants a tab · - · len (u) · 0u: a tab is a button and wears the FRAMES' corners below; a theme that wants image 1's slanted strip back gives this a width again
+corner = @button.corner             # a tab's corner radius · - · len (u) · the button's, which is the panel's — one shape for every control
+corner_style = @button.corner_style # which shape those corners take · - · enum: square | round | chamfer · follows the button for the same reason
 pad = 1.5u                          # padding inside a tab · - · len (u) · 8.1 px; today vh(0.74)
 gap = @space.0                      # gap between tabs · - · len (u) · @space.0 = 0u
 rule = @stroke.thin                 # the line under the whole strip · - · str | none · @stroke.thin

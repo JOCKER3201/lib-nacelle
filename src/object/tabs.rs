@@ -130,6 +130,8 @@ pub struct StripView<'a> {
 struct Look {
     h: f32,
     skew: f32,
+    corner: f32,
+    corner_style: crate::draw::CornerStyle,
     pad: f32,
     gap: f32,
     min_w: f32,
@@ -147,6 +149,15 @@ impl Look {
             // Deliberately NOT `button.skew`: the master says so where
             // the token stands, and two shapes are allowed to differ.
             skew: sf.px("tab.skew").max(0.0),
+            corner: sf.px("tab.corner").max(0.0),
+            // The frames' shape, reached the same way every control
+            // reaches it — the master points tab.corner_style at the
+            // button's, which points at the panel's.
+            corner_style: match sf.word("tab.corner_style").as_str() {
+                "round" => crate::draw::CornerStyle::Round,
+                "chamfer" => crate::draw::CornerStyle::Chamfer,
+                _ => crate::draw::CornerStyle::Square,
+            },
             pad: sf.px("tab.pad").max(0.0),
             gap: sf.px("tab.gap").max(0.0),
             min_w: sf.px("tab.min_w").max(0.0),
@@ -320,14 +331,24 @@ pub fn strip<S: Surface>(
     let mouse = sf.mouse();
     for (i, cell) in cells.iter().enumerate() {
         let ink = sf.class_state("tab", st.rung(i));
+        // A sheared tab is a quad; an unsheared one is the family's
+        // rounded or chamfered rect, like every other control.
         let q = quad(cell, look.skew);
         if ink.fill.a > 0.0 {
-            sf.quad(q, ink.fill);
+            if look.skew > 0.0 {
+                sf.quad(q, ink.fill);
+            } else {
+                sf.ring_fill(*cell, look.corner_style, look.corner, ink.fill);
+            }
         }
         // The rung's ring last, so a theme's `selected.edge` reaches the
         // showing tab through the ladder and not through a special case.
         if ink.edge_width > 0.0 && ink.edge.a > 0.0 {
-            sf.polyline(&q, ink.edge_width, ink.edge, true);
+            if look.skew > 0.0 {
+                sf.polyline(&q, ink.edge_width, ink.edge, true);
+            } else {
+                sf.ring(*cell, look.corner_style, look.corner, ink.edge_width, ink.edge);
+            }
         }
         // The showing page's underline, wholly INSIDE the tab: a bold
         // one drawn on the edge would bleed into the rule below.
@@ -428,7 +449,10 @@ mod tests {
     #[test]
     fn the_master_declares_every_metric_a_strip_draws_from() {
         assert!(px("tab.h") > 0.0);
-        assert!(px("tab.skew") > 0.0);
+        // skew is 0 in the master now — a tab wears the frames'
+        // corners — so what matters is that both shape tokens exist.
+        assert!(crate::theme::id("tab.skew").is_some());
+        assert!(px("tab.corner") >= 0.0 && crate::theme::id("tab.corner_style").is_some());
         assert!(px("tab.pad") > 0.0);
         assert!(px("tab.rule") > 0.0 && px("tab.rule_gap") > 0.0);
         assert!(px("tab.underline_active") > 0.0);
