@@ -1,0 +1,36 @@
+[package]
+name = "libnacelle"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+description = "The toolkit the nacelle project is built on: drawing, fonts, themes, the responsive layout engine, interface objects, the widget contract and its scripting, terminal emulation, telemetry and sound"
+license = "MIT"
+repository = "https://github.com/JOCKER3201/libnacelle"
+
+[lib]
+name = "nacelle"
+
+[dependencies]
+# Font rasterization + glyph atlas
+fontdue = "0.8"
+
+# Flexbox layout engine (the algorithm web pages use)
+taffy = "0.12.2"
+
+# Loading eDEX-UI theme files (*.json)
+serde_json = "1"
+
+# ANSI/VT sequence parser (terminal emulation)
+vte = "0.13"
+unicode-width = "0.1"
+
+# Widget scripting: pure Rust, so building needs no C toolchain, and
+# sandboxed by construction — a script sees only what it is given.
+rhai = { version = "1.25.1", default-features = false, features = ["std", "sync"] }
+
+# Wall clock for widgets that show the time
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[target.'cfg(unix)'.dependencies]
+# dlopen for compiled widget plugins (widget/loader.rs)
+libc = "0.2"

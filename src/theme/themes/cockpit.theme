@@ -1,0 +1,234 @@
+[meta]
+schema          = 1
+name            = "Cockpit"
+name[pl]        = "Kokpit"
+description     = "Night glass over a live sky. Reference images 7 and 10."
+description[pl] = "Nocne szkło nad żywym niebem. Obrazy referencyjne 7 i 10."
+author          = "nacelle"
+family          = holographic
+base            = "default"
+strict          = false
+watch           = false
+
+# =========================================================================
+# COCKPIT — reference images 7 ("cockpit hologram") and 10 ("night
+# hologram").
+#
+# This is the family-B theme at night: panes of translucent glass floating
+# in the air over something the theme does not own. Images 7 and 10 are the
+# proof — the same composition over a ringed planet and over a neon city —
+# and what stays constant between them is the theme: cyan glass, a bright
+# thin edge, a soft inner light, a real shadow, and one focused pane framed
+# in a magenta-to-violet gradient instead of cyan.
+#
+# So cockpit authors MATERIAL, not surfaces. The five seeds set the hue;
+# the six surface levels are re-pinned onto night blue because in family B
+# the accent is the LIGHT and the bed behind it is the SKY, and those are
+# not the same colour; everything else — every border, badge, chart, glyph,
+# terminal slot and type role — is inherited from `default` as an
+# expression and re-derives in these hues.
+# =========================================================================
+
+# ---------------------------------------------------------------- palette
+# The five seeds. Everything else in the interface derives from these.
+[palette]
+black      = #050C14   # target of shade(); night blue-black, not the console's green-black
+white      = #EAF4FA   # target of tint(); a cool white — glass highlights in 7/10 are never warm
+accent     = #4FE8FF   # cyan primary: every panel edge, title, glyph, plot and cursor in image 7
+accent_alt = #C04CFF   # the violet of image 7's focused frame. The master derives accent_alt as
+                       # hue(accent, 32), which lands on a greener cyan; image 7 names magenta/violet
+                       # beside the cyan, so this is authored rather than rotated.
+neutral    = #6B7A85   # hue-free grey anchor for offline / disabled, pulled cool to match the bed
+# palette.data is deliberately NOT written: images 7 and 10 draw chrome and data in the
+# same cyan. The two-hue split is image 5's feature (see `lockdown`), not this theme's.
+
+# ---------------------------------------------------------------- surfaces
+# THE ONE PLACE COCKPIT FIGHTS THE MASTER, AND THE REASON IT HAS TO.
+# The master places all six levels at the ACCENT's hue and low chroma, which
+# for a cyan accent gives a teal-black console bed. Images 7 and 10 do not
+# have a console bed: what sits behind and between the panes is night sky.
+# Was six longhand oklch() lines, which also threw away the tie to
+# @chroma.accent; these three scalars reproduce that ladder to within
+# 1/255 and the tie survives (m3 M1-M3, §4.7). The whole text ladder, every
+# border and every badge keep deriving from the accent above.
+[surface]
+hue    = 237           # images 7/10: what sits between the panes is night SKY at 237deg, a
+                       # full 28deg off the readouts' cyan
+lift   = 0.045         # the sky is LIT — it is perceptibly lighter than a console's black
+chroma = 3.0           # and it is blue, not blue-grey: C 0.046 at the composited pane
+                       # against the master's 0.0156
+
+# ---------------------------------------------------------------- text
+[text]
+primary = #DCEEF6      # PINNED. The master's ladder puts primary at L 0.905 against a near-black bed.
+                       # Family B text sits on glass over a LIT backdrop — a planet, a nebula, a city —
+                       # and glass only attenuates what is behind it. The readout half of every
+                       # key:value is lifted a step so it survives a bright pixel arriving behind the
+                       # pane. Resolves 12.60 against panel-over-base; floor is 7.0 (m3 §5.2).
+
+# severity.critical.text is deliberately NOT pinned any more (m3 §4.7): the
+# reason the pin existed (red dragged toward cyan arrived pink) is fixed for
+# everyone by the master's 7deg pull_clamp, and the derivation now lands on
+# #FF5160 — dE 0.024 from the old #FF4A4A pin.
+
+# ---------------------------------------------------------------- focus
+# Image 7's single most distinctive fact: on a screen of cyan panels,
+# `ZADANIA BIEZACE` — the focused window — is framed in a MAGENTA/VIOLET
+# GRADIENT. That is the focus colour, and it is a gradient, not a hue.
+[grad.focus]
+stops = [ [0.0, #FF48C8], [0.48, @palette.accent_alt], [1.0, #5A6CFF] ]
+                       # magenta -> violet -> blue, the arc image 7 shows and the most hue-travelled
+                       # gradient in the brief; the master's default arc is built from the data ramp
+                       # and lands on the accent, which would make the focused frame cyan again
+axis  = diag_down      # corner to corner, so the frame reads as lit rather than striped
+space = oklab
+
+[accent]
+focus = @palette.accent_alt   # the flat focus colour for anything too small to carry a gradient
+                              # (5.8 names exactly this value for family B)
+
+# The night ribbons. Image 10 is image 8 after dark: "cooler, stronger
+# violet and magenta in the ribbon waves". The master samples the spectrum
+# from the data ramp, which for a cyan `palette.data` skews green.
+[grad.spectrum]
+stops = [ [0.0, #FF3FA8], [0.34, #B24CFF], [0.67, #4F8CFF], [1.0, @accent.primary] ]
+axis  = x
+space = oklab
+
+# ---------------------------------------------------------------- material
+# The whole reason this theme exists. Glass rank rises 1 -> 3 up the ladder
+# (the user's blur slider is a ceiling on it, 5.12), edge alpha rises
+# 0.85 -> 1.00, and shadow grows 3.9u -> 6.4u, so depth is legible without
+# a single extra blur pass: one snapshot, five materials.
+#
+# Glass is always TWO quads: `tint` multiplies (it can only darken and cool
+# what is behind), `wash` is alpha-over (the only knob that can brighten).
+
+[elev.board]
+fill           = alpha(@surface.base, 0.0)   # THE family-B line: the board itself paints nothing, so
+                                             # the backdrop shows through between the panes (7, 10)
+reflect.height = 9.0u    # image 10 is image 8 at night, and image 8's hologram reflects in the desk
+reflect.alpha  = 0.18    # below the whole composition, once; a board reflection suppresses its panels'
+reflect.fade   = 2.4     # own smears, so the picture never smears twice (5.12)
+
+[elev.panel]
+glass.rank        = 1                          # lightly frosted: a resting pane
+glass.tint        = #8FB4C8 / 0.90             # multiply: cools and darkens the sky behind the pane
+glass.wash        = alpha(@surface.sunken, 0.34) # the pane's own body over that frost
+radius            = @corner.md                 # image 7's rounded cards
+edge.color        = alpha(@accent.primary, 0.85) # the bright thin cyan edge, the theme's signature line
+glow.inner.color  = alpha(@accent.primary, 0.14) # "a soft inner glow" — image 7, every pane
+glow.inner.radius = 2.2u
+shadow.color      = alpha(@palette.black, 0.55)  # panes float; without a shadow they are stickers
+shadow.radius     = 3.9u
+shadow.dy         = 1.1u
+
+[elev.raised]
+glass.rank        = 2                          # a hovered or dragged pane pulls further off the sky
+glass.tint        = #83AAC0 / 0.92
+glass.wash        = alpha(@surface.sunken, 0.42)
+edge.color        = alpha(@accent.primary, 0.92)
+glow.inner.color  = alpha(@accent.primary, 0.18)
+glow.inner.radius = 2.6u
+shadow.color      = alpha(@palette.black, 0.60)
+shadow.radius     = 5.0u
+shadow.dy         = 1.6u
+
+[elev.focused]
+glass.rank        = 2
+glass.tint        = #7BA2BA / 0.94
+glass.wash        = alpha(@surface.sunken, 0.46)
+radius            = @corner.lg                 # image 7's focused window is the largest, softest frame
+edge.mode         = gradient                   # a named gradient beats the color2 sugar (5.12)
+edge.gradient     = @grad.focus
+edge.axis         = diag_down
+edge.width        = @stroke.regular            # the focused ring is the one edge drawn heavier than 1px
+glow.inner.color  = alpha(@palette.accent_alt, 0.22)  # the frame's violet spills inward, not the cyan
+glow.inner.radius = 3.0u
+shadow.color      = alpha(@palette.black, 0.66)
+shadow.radius     = 6.4u
+shadow.dy         = 2.2u
+
+[elev.popover]
+glass.rank    = 3                              # deepest frost: a menu must not let the sky read through it
+glass.tint    = #6E96AF / 0.96
+glass.wash    = alpha(@surface.void, 0.62)
+edge.color    = @accent.primary                # alpha 1.00, the top of the edge ladder
+shadow.color  = alpha(@palette.black, 0.70)
+shadow.radius = 6.4u
+shadow.dy     = 2.0u
+
+[elev.fixture]
+glass.rank = 3                                 # the APPGRID / SEARCH AND AI sheet over a frozen board
+glass.tint = #6A93AD / 0.97
+glass.wash = alpha(@surface.void, 0.58)        # a deep wash: the board beneath must recede, not vanish
+edge.color = alpha(@accent.primary, 0.90)
+
+# ---------------------------------------------------------------- glow
+# "Generous Gaussian glow." Kept moderate on purpose: until additive blend
+# lands, alpha glow over a BRIGHT backdrop reads as a milky film rather than
+# light (5.13), and family B is exactly the bright-backdrop case.
+[glow]
+panel_edge.enabled     = true    # the halo on every pane edge in images 7 and 10
+panel_edge.radius      = 1.6u
+panel_edge.alpha       = 0.34
+panel_edge.falloff     = gauss
+focus_ring.enabled     = true    # the focused pane's frame reads as lit, which is how it is found
+focus_ring.radius      = 2.4u
+focus_ring.alpha       = 0.46
+focus_ring.falloff     = gauss
+text_display.enabled   = true    # `14:38:12` in image 7's top-left block
+text_display.radius    = 1.1u
+text_display.alpha     = 0.26
+text_display.mode      = text4
+icon_active.enabled    = true    # image 7's warm orange launcher icon and image 8's HOME glyph
+icon_active.radius     = 1.3u
+icon_active.alpha      = 0.40
+chart_line.enabled     = true    # the bar chart under `STATUS SYSTEMU I ZASOBY`
+chart_line.radius      = 0.8u
+chart_line.alpha       = 0.28
+taskbar_active.enabled = true    # the chevron taskbar at image 7's bottom left
+taskbar_active.radius  = 1.2u
+taskbar_active.alpha   = 0.32
+
+# ---------------------------------------------------------------- backdrop
+# THE CLAIM THIS THEME REFUSES TO MAKE. Image 10 is image 7's composition
+# over a different world, which is the whole point: in family B the
+# background is NOT the theme's. So cockpit names no wallpaper and does not
+# touch `source` or `solid`: it inherits the master's solid bed, which is
+# now the night blue above, and pointing `backdrop.image` at a file is a
+# one-line change the USER makes. What the theme DOES own is the treatment,
+# and this is the night one — the canopy has to sit back behind the glass,
+# not compete with it.
+[backdrop]
+treat.dim = 0.12
+
+# ---------------------------------------------------------------- decoration
+# Ribbons only. Image 7 shows ONE panel with flowing waves — the focused
+# task list — and `max_hosts = 1` with the master's `focused_else_largest`
+# already says exactly that, so it is not restated here.
+[decor]
+enabled = true
+
+[decor.ribbons]
+enabled  = true
+gradient = @grad.spectrum   # the night arc above: magenta -> violet -> blue -> cyan
+alpha    = 0.48             # slightly under the master's 0.55; at night the waves are light in
+                            # the glass, not paint on it
+
+# ---------------------------------------------------------------- density
+# Image 7 sits at `comfortable` in 5.3's level table, but density is
+# geometry, and switching themes must never rearrange a widget's interior
+# (11.08): every shipped theme keeps the master's `compact`, so a theme
+# switch changes colour and light, never layout.
+
+# ---------------------------------------------------------------- shape
+# Image 7's panes are soft-cornered glass, and the frame is the one place
+# where that reads at a glance. Global, for the same reason as instrument's:
+# the shape of a window is part of the theme, not only its hue.
+
+[corner]
+md = 2.2u                # image 7's rounded cards, at the master's lg step
+
+[border.edge]
+width = @stroke.regular  # glass carries a heavier edge than a console hairline

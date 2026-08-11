@@ -1,0 +1,56 @@
+//! libnacelle — the toolkit the nacelle project is built on.
+//!
+//! One crate, the way libcosmic is one crate for COSMIC: everything a
+//! nacelle application needs, from the pixels up.
+//!
+//! * [`draw`], [`font`], [`theme`] — the drawing primitives, the glyph
+//!   atlas and colours.
+//! * [`base`] — geometry, the drawing context, the panel model and the
+//!   widget registry. Re-exported at the root, so `nacelle::Rect` works.
+//! * [`geometry`] — the control rectangles an application and the
+//!   widget that owns them must agree on before either has drawn.
+//! * [`flex`] — the responsive layout engine (the algorithm web pages
+//!   use), recomputed from the actual window size every frame.
+//! * [`object`] — reusable on-screen objects: windows and dialogs,
+//!   buttons, sliders, drop-downs, checkboxes, and the frame put
+//!   around windows the application does not own.
+//! * [`ui`] — the drawing vocabulary widgets are composed from.
+//! * [`widget`] — the contract widgets are written against and that an
+//!   application drives them through. Re-exported at the root.
+//! * [`script`] — widgets written as Rhai scripts, rendered through
+//!   that same vocabulary.
+//! * [`term`] — terminal emulation, a pure VT state machine.
+//! * [`telemetry`] — the system data model widgets render.
+//! * [`sound`] — sound events, themes and mixing.
+//! * [`runtime`] — the process-wide state, and how a compiled plugin
+//!   shares the host's copy of it instead of quietly getting its own.
+//! * [`plugin`] — the host side of the plugin boundary: the functions a
+//!   plugin draws through, and the wrapper that makes one look like any
+//!   other widget.
+//!
+//! Everything here is platform-independent. Creating a window, opening a
+//! PTY, collecting telemetry and handing audio frames to a device are
+//! the platform's job and live in the application.
+
+pub mod assets;
+pub mod base;
+pub mod deco;
+pub mod draw;
+pub mod layout;
+pub use layout::flex;
+pub mod font;
+pub mod geometry;
+pub mod object;
+pub mod plugin;
+pub mod runtime;
+pub mod script;
+pub mod sound;
+pub mod stage;
+pub mod telemetry;
+pub mod term;
+pub mod theme;
+pub mod ui;
+pub mod widget;
+
+pub use base::*;
+pub use widget::*;

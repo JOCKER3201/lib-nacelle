@@ -1,0 +1,119 @@
+# =========================================================================
+# AURORA — reference image 1 (and image 2 for the same layout in its
+# near-monochrome state).
+#
+# Aurora is the mint console: a warship status screen, near-black
+# green-grey field, every panel a rounded rectangle with a 1 px mint edge
+# that glows softly, and a cyan secondary sitting beside the mint in the
+# station render and the node graph. It is the DRESSED member of family A —
+# where `spring` proves the cascade with one hex, aurora turns on the three
+# things image 1 actually shows over a bare console: PCB traces on the
+# field, ribbon waves behind the station panel, and edge glow.
+#
+# Everything else is inherited from `default` as an expression and
+# re-derived: six surfaces, seven text roles, five borders, the severity
+# hues, the ANSI sixteen, every metric and every shape. This file is short
+# on purpose.
+# =========================================================================
+
+[meta]
+schema          = 1
+name            = "Aurora"
+name[pl]        = "Zorza"
+description     = "Mint console with a cyan secondary. Reference image 1."
+description[pl] = "Miętowa konsola z cyjanem pomocniczym. Obraz referencyjny 1."
+author          = "nacelle"
+family          = console
+base            = "default"
+
+
+# ---------------------------------------------------------------- palette
+# The six seeds. This is the whole authored identity; ~2 190 other tokens
+# derive from these lines (5.2). Five of them are the master's own values —
+# aurora IS the reference implementation of the mint family, so it restates
+# the seeds rather than hiding them, and deviates in exactly one.
+[palette]
+black      = #0A100E     # shade() target: severity badge fills, vignette, scrim. NOT the bed (see the
+                         # master's surface.hue/lift/chroma — m3 M1-M3). Must stay a literal (5.2)
+white      = #EAF6F1     # tint() target;  must stay a literal (5.2)
+accent     = #3FE3AE     # image 1's mint: borders, panel titles, glyphs, hexagons, the clock
+data       = #43D9E8     # CORRECTED (m3 §4.1). Image 1's "cyan secondary" is the station wireframe,
+                         # the reticle, the node graph and the number columns — all data, not chrome.
+                         # Was written as accent_alt, which reaches ONE token (the symlink glyph);
+                         # palette.data reaches 46, including every chart, gauge, donut and the
+                         # whole render group. This is the single line that makes image 1's
+                         # two-hue screen true instead of nearly true.
+accent_alt = @palette.data
+                         # so the symlink glyph and the hexagon gradient agree with the wireframe
+neutral    = #6B7A74     # hue-free grey anchor for offline / disabled
+# render.wire is deliberately NOT written any more: with palette.data seeded,
+# render.wire = @data.line (the master default) already resolves to #43D9E8.
+
+
+# ---------------------------------------------------------------- component
+# Image 1: "five hexagons filled with a mint GRADIENT". The master ramps
+# accent -> accent.hover, i.e. mint -> lighter mint, which is a ramp with no
+# colour in it. Image 1's gradient runs mint -> cyan, and cyan is now a seed.
+# One line, one widget that exists (the resource hexagons). (m3 §4.1)
+[component]
+hexcell.fill_top = alpha(@accent.secondary, 0.38)
+
+
+# ---------------------------------------------------------------- glow
+# Family A's signature, described in image 1 as "1px border in the accent
+# hue with a soft outer glow", and photographed in image 2 as a bloom
+# thrown onto the wall behind the monitor. `default` ships every glow class
+# off (5.13); a theme that wants any must name the classes it wants, and
+# aurora wants three. Colour stays `element` throughout: the glow is the
+# thing's own colour, so it re-skins with the palette like everything else.
+[glow]
+
+# Radius stays at or below 0.85u so `auto` resolves to `shell` (24-72 verts)
+# rather than `sprite` (54 verts) — image 1 puts twenty-odd panels on one
+# screen and the shell is the cheap one at that count (DECISION M4).
+panel_edge.enabled   = true
+panel_edge.radius    = 0.70u
+panel_edge.alpha     = 0.35
+
+# The big `21:57:30` clock in its own bordered box, bottom right of image 1.
+# text4 is pinned because it is the only technique that glows text at all;
+# `auto` would pick sprite above 0.85u and blur a glyph run (5.13, M5).
+text_display.enabled = true
+text_display.radius  = 1.10u
+text_display.alpha   = 0.30
+text_display.mode    = text4
+
+# The amber half of the top bar: `KRYTYCZNY ALARM: NIEAUTORYZOWANE
+# the alarm half of the top bar, burning next to the calm mint product name.
+# `element` means it wears the live severity's own colour, so the same
+# switch serves the warning amber and the orange of `DAMAGE BREACH`.
+text_alert.enabled   = true
+text_alert.radius    = 0.90u
+text_alert.alpha     = 0.40
+text_alert.mode      = text4
+
+
+# ---------------------------------------------------------------- decor
+# The image-1 dressing. Both layers below are off in `default` because a
+# silent theme must render flat and cheap (8); aurora is the theme that
+# turns them on. Vignette, grid, starfield, scanlines and noise stay off —
+# image 1 shows none of them.
+[decor]
+enabled = true
+
+# "Background a very dark desaturated green-grey with faint PCB traces."
+# Baked once into the backdrop plate; colour and width inherit, so the
+# traces are mint here for the same reason image 4's are red.
+[decor.traces]
+enabled = true
+seed    = 11172124       # any fixed number: a pinned pattern rather than a
+                         # so aurora's field is reproducible and not the name hash
+
+# The multi-coloured waves flowing across the station panel, "magenta ->
+# violet -> cyan -> green". That sequence is already what @grad.spectrum
+# resolves to at this accent hue — series[4] lands magenta, [3] violet,
+# [2] blue-cyan, [0] mint — so the gradient needs no authoring, only the
+# switch. One host, the largest panel: image 1 shows waves on the station
+# panel and nowhere else, and max_hosts is a per-frame vertex budget.
+[decor.ribbons]
+enabled = true
