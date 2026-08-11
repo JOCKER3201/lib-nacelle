@@ -321,7 +321,7 @@ pub fn builtin_widgets() -> Vec<WidgetDef> {
     // 7.0 minimum is what keeps the KERNEL row on machines that report
     // one; the other ten are untouched — a layout that wants different
     // boxes names its own sizes (flex.rs::builtin_sizes for the default).
-    const DEFS: [(&str, &str, f32, f32); 12] = [
+    const DEFS: [(&str, &str, f32, f32); 14] = [
         ("clock", "CLOCK", 7.0, 5.0),
         ("sysinfo", "SYSTEM INFO", 4.5, 4.5),
         ("uptime", "UPTIME", 8.0, 7.0),
@@ -334,6 +334,12 @@ pub fn builtin_widgets() -> Vec<WidgetDef> {
         ("filesystem", "FILESYSTEM", 57.0, 8.0),
         ("keyboard", "KEYBOARD", 32.5, 10.0),
         ("control", "CONTROL", 22.0, 13.0),
+        // The two launcher widgets. Their home is the APPGRID fixture
+        // by name and by nature, and the category below sends them
+        // there: they are offered when that board is edited and
+        // nowhere else.
+        ("appgrid", "APPLICATIONS", 40.0, 10.0),
+        ("appcats", "CATEGORIES", 40.0, 12.0),
     ];
     DEFS.into_iter()
         .map(|(name, label, ref_h, min_h)| WidgetDef {
@@ -341,7 +347,13 @@ pub fn builtin_widgets() -> Vec<WidgetDef> {
             label: label.to_string(),
             ref_h_vh: ref_h,
             min_h_vh: min_h,
-            category: WidgetCategory::Board,
+            // The category is the widget's own nature, not the
+            // directory it came from: a launcher belongs on the
+            // APPGRID board wherever its file happens to live.
+            category: match name {
+                "appgrid" | "appcats" => WidgetCategory::Appgrid,
+                _ => WidgetCategory::Board,
+            },
         })
         .collect()
 }

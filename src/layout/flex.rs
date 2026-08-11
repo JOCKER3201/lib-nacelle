@@ -677,17 +677,22 @@ fn edge_adapt(base: &LayoutSpec, ratio: f32) -> LayoutSpec {
 mod tests {
     use super::*;
 
+    use crate::base::WidgetCategory;
+
     fn placed(l: &Layout, p: Panel, w: f32) -> bool {
         l.p(p).x < w
     }
 
-    /// u1 §5.5 (1): every registered widget is on the HOME board. This
-    /// is the test that failed before the §1.1 arrangement — `uptime`
-    /// was registered, drawable and on no board at all.
+    /// u1 §5.5 (1): every registered BOARD widget is on the HOME board.
+    /// This is the test that failed before the §1.1 arrangement —
+    /// `uptime` was registered, drawable and on no board at all. A
+    /// widget of another category is not homeless when HOME does not
+    /// hold it: its home is the fixture its category names, and the
+    /// fixtures ship empty by design.
     #[test]
     fn every_registered_widget_is_placed() {
         let l = compute(1920.0, 1080.0, &LayoutMode::Flex, 8.0);
-        for p in Panel::all() {
+        for p in Panel::all().into_iter().filter(|p| p.category() == WidgetCategory::Board) {
             assert!(
                 placed(&l, p, 1920.0),
                 "{} is not on the board at 1920x1080",
@@ -703,7 +708,7 @@ mod tests {
     fn every_widget_placed_in_portrait_too() {
         for (w, h) in [(1080.0, 1920.0), (720.0, 1280.0), (400.0, 800.0)] {
             let l = compute(w, h, &LayoutMode::Flex, 8.0);
-            for p in Panel::all() {
+            for p in Panel::all().into_iter().filter(|p| p.category() == WidgetCategory::Board) {
                 assert!(
                     placed(&l, p, w),
                     "{} is not on the board at {}x{}",
