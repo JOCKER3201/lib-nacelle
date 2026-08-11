@@ -217,6 +217,14 @@ gradient = @grad.spectrum   # the night arc above: magenta -> violet -> blue -> 
 alpha    = 0.48             # slightly under the master's 0.55; at night the waves are light in
                             # the glass, not paint on it
 
+[decor.starfield]
+enabled  = true             # what images 7 and 10 put behind the panes: night SKY, and a sky
+                            # has stars — between the panels on the main screen, and across a
+                            # hall that holds no panes yet
+count    = 360              # calmer than azure's field: the stars are behind glass, not the show
+seed     = 7                # pinned to the reference image number, so the sky never moves
+size_max = 0.22u            # far stars — never bright enough to compete with a readout
+
 # ---------------------------------------------------------------- density
 # Image 7 sits at `comfortable` in 5.3's level table, but density is
 # geometry, and switching themes must never rearrange a widget's interior
