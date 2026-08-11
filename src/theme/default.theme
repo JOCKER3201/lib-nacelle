@@ -3812,6 +3812,7 @@ min_hit_min_px  = 24px     # absolute floor for min_hit; -; device px, 16px .. 6
 hit_pad_mode    = grow     # how the hit rect reaches min_hit; -; one of grow | none; grow keeps the console dense and the controls reachable
 grab_pad        = 1.5u     # the invisible band that starts a resize/drag; -; u, 0.5u .. 4u; editor.rs's EDGE = 8.0, generalised
 grab_pad_min_px = 6px      # absolute floor for grab_pad; -; device px, 3px .. 24px; companion of grab_pad (3.2)
+drag_slop       = 1.5u     # travel between press and release under which the gesture is a CLICK, not a drag; -; u, 0u .. 6u; the companion of grab_pad on the other side of the gesture
 reduced_motion  = system   # honour the platform's reduce-motion preference; -; one of off | system | on; forces motion.scale to 0 when active
 contrast_floor  = false    # when true the contrast lint CORRECTS instead of reporting; -; bool; lifts OKLab L at constant hue and chroma
 lc_term_fg      = 90       # advisory APCA minimum for terminal foreground vs term.background; -; f, 0 .. 108; 4.4 pass D 4
@@ -4296,6 +4297,7 @@ border = @stroke.hair               # a resting cell's ring · - · str · @stro
 border_active = @stroke.regular     # the selected cell's ring · - · str · @stroke.regular
 pad_x = @space.3                    # left/right padding inside a cell · - · len (u) · @space.3 = 1.5u = 8.1 px
 min_cell_w = 10u                    # minimum cell width · - · len (u) · 54.0 px
+role = button                       # type role of a cell's label · - · role · type.button — the class matrix (5.27) already lends this control the button's ladder, and the label follows the ladder
 
 # =========================================================================
 # field — image 7's `browser` search box. Drawn by object/text_input.rs
@@ -4333,6 +4335,20 @@ indent = 3u                         # indent of a nested row · images 1,7 · le
 status_gap = @space.3               # gap before the trailing status, `(Zakończone)` · images 1,7 · len (u) · @space.3 = 1.5u = 8.1 px
 bar_h = @progress.h                 # the thin bar a resource row carries · images 1,7 · len (u) · @progress.h = 1.2u
 bar_gap = @space.2                  # gap between the label line and that bar · images 1,7 · len (u) · @space.2 = 1u = 5.4 px
+label_role = body                   # type role of a row's label · images 1,7 · role · type.body, the size a row of prose reads at
+status_role = caption               # type role of the trailing status word · images 1,7 · role · type.caption, a step under the label so the status reads as an aside
+
+# =========================================================================
+# tree — a tree is not a second view: it is a MODEL that flattens to the
+# row list [list] above already draws (view::tree::FlatTree). What is left
+# for a theme to say is the indent and the expander; everything else the
+# row carries is a list row's business.
+# =========================================================================
+[tree]
+indent = @list.indent               # how far one level of nesting shifts a row · images 1,7 · len (u) · @list.indent = 3u = 16.2 px, so a tree and a nested list agree
+disclosure = 2u                     # the box the expander triangle is drawn in · - · len (u) · 10.8 px, a triangle that reads at a row's own size
+disclosure_gap = @space.1           # gap between that triangle and what follows it · - · len (u) · @space.1 = 0.5u = 2.7 px
+guides = none                       # a hairline down each ancestor's indent column, in component.tree.guide · - · str | none · none = the master draws no guides, so the indent alone carries the depth
 
 # =========================================================================
 # table — the shared primitive of ui.rs. Colours are component.table.*.
@@ -4352,6 +4368,9 @@ head_gap_below = 0.2x @table.row_h  # space between header and first body row ·
 zebra_every = 0                     # tint every N rows with component.table.zebra; 0 disables · images 1,9 · n · -
 min_rows = 1                        # rows kept before the table gives up its space · images 1,9 · n · -
 bar_w = 6u                          # width of a `bar` cell's hairline track, drawn beside the number it re-reads (u2 2.7) · image 1's resource rows · len (u) · 32.4 px
+sort_glyph = 1.6u                   # the box the ascending/descending marker is drawn in, beside the sorted heading; read only by an `interactive` table · images 1,9 · len (u) · 8.6 px, a marker that reads at the heading's own size
+sort_glyph_gap = @space.1           # gap between that marker and the heading text it trims · images 1,9 · len (u) · @space.1 = 0.5u = 2.7 px
+resize_grip = 1.2u                  # HALF the width of the hit zone straddling two headings, where a drag resizes the column; read only by an `interactive` table · - · len (u) · 6.5 px, so the zone is a11y.min_hit wide across the join
 
 # =========================================================================
 # columns — the key:value primitive of ui.rs. Colours: component.columns.*.
@@ -4378,6 +4397,7 @@ rule = @stroke.thin                 # the line under the whole strip · - · str
 rule_gap = 0.8x @tab.pad            # gap between a tab's baseline and that rule · - · rat of @tab.pad · 6.5 px
 role = button                       # type role of a tab's label · - · role · type.button
 underline_active = @stroke.bold     # the selected tab's underline · - · str · @stroke.bold = 4 px
+min_w = 8u                          # the width a tab is never trimmed below when the strip runs out of room; read only by object::tabs, whose labels then ellipsise instead · - · len (u) · 43.2 px, a tab that still shows a word and its padding
 count = 5                           # number of session tabs; READ-ONLY for themes · - · n · mirrors TAB_COUNT, the session array is sized from it
 
 # =========================================================================
@@ -4580,6 +4600,19 @@ border = @stroke.hair               # its ring · - · str · @stroke.hair
 offset = @space.2                   # gap between the pointer and the tooltip · - · len (u) · @space.2 = 1u = 5.4 px
 role = tooltip                      # type role of its text · - · role · type.tooltip
 max_w = 60u                         # the width at which the text wraps · - · len (u) · 324.0 px
+delay_ms = 600ms                    # how long the pointer must rest on a target before its tooltip appears · - · ms, 0ms .. 3000ms · no derivation; the pause between resting and explaining, long enough that crossing a control on the way somewhere else says nothing
+linger_ms = 120ms                   # grace after a tooltip goes away in which the NEXT target skips the delay · - · ms, 0ms .. 1000ms · shorter than delay_ms by a factor of five: walking along a row of controls explains each one, a pause of a fifth of a second ends the walk
+
+# =========================================================================
+# scroll — how a scrolled area BEHAVES, as against how its bar looks
+# (that is [scrollbar], below). Read by every scroll container through
+# view::scroll::ScrollPhysics. Kinetics is OFF here: the master's wheel
+# moves the offset and lands, exactly as the file panel's always has.
+# =========================================================================
+[scroll]
+wheel_px = 3x @table.row_h          # how far one wheel notch scrolls · - · rat of @table.row_h · three rows, the same reading as terminal.wheel_lines = 3
+fling_scale = 0.0                   # a notch's velocity in px/s is wheel_px x this; 0 turns kinetics off · - · f, 0 .. 20 · 0 = the direct, immediate move that exists today
+glide_halflife_ms = 160ms           # how long a glide takes to lose half its speed; read only when fling_scale > 0 · - · ms, 0ms .. 2000ms · shorter than motion.scroll_settle, so the flick ends before the settle begins
 
 # =========================================================================
 # scrollbar — NEW and required. Nothing draws one today: the filesystem
@@ -4596,6 +4629,7 @@ thumb_min = 6u                      # minimum thumb length, so a long document s
 corner = @corner.pill               # the thumb's radius · - · len (u) | pill · @corner.pill = w/2
 track = off                         # whether the groove behind the thumb is drawn · - · enum: on | off · -
 auto_hide = true                    # whether the bar fades out when idle · - · bool · -
+fade_ms = 260ms                     # how long that fade takes, from the last movement · - · ms, 0ms .. 2000ms · read only when auto_hide = true; 0ms cuts the bar instead of fading it
 edge = right                        # which side of the content the bar sits on · - · enum: right | left · -
 
 # =========================================================================
@@ -4762,6 +4796,8 @@ corner = @corner.lg                 # the toast's corner radius · - · len (u) 
 dwell_ms = 8000ms                   # how long a toast stays up · - · ms, 500ms .. 30000ms · popup.rs:9's SHOW_SECS; the block sized and placed the toast but never said how long it lives
 title.role = label.section          # type role of the toast's title word · - · role · popup.rs:50's font_px(0.95)
 body.role = body                    # type role of the toast's message · - · role · popup.rs:49's font_px(1.1)
+max_visible = 1                     # how many toasts stand on screen at once; the rest wait their turn in the queue · - · n, 1 .. 8 · 1 = the single warning box this master has always drawn, in the place it has always drawn it
+gap = @space.4                      # vertical gap between two stacked toasts; read ONLY when max_visible > 1, and it is 1 here · - · len (u) · @space.4 = 2u = 10.8 px
 
 [dialog]
 inset_x = 4.4u                      # horizontal inset of the dialog's content · - · len (u) · 23.8 px
@@ -4976,6 +5012,15 @@ toast.title = @severity.warning.text    # the WARNING word at the top of a toast
 toast.text = @text.primary          # the toast's message body · - · col · popup.rs:75
 terminal.indicator = @text.muted    # the SCROLL +n scrollback readout · image 3 · col · shell/lib.rs:361 draws it at full base, as loud as the shell's own output
 
+# ---------------------------------------------------------------- tooltip
+# The tooltip is a raised sliver of the interface explaining the thing
+# under the pointer, so it takes the raised surface and the ordinary
+# border rather than a colour of its own — the menu's material one
+# elevation lower. Its class in the matrix is `badge`: one state, idle.
+tooltip.fill = @surface.raised      # the tooltip's body · - · col · @surface.raised, the same bed component.menu.fill sits on
+tooltip.edge = @border.default      # its hairline ring · - · col · @border.default, the ring every raised sliver carries
+tooltip.text = @text.primary        # its text · - · col · @text.primary; type.tooltip.fg says the same, and the component token is what a theme reaches for first
+
 # ---------------------------------------------------------------- topbar / alarm
 # The alarm bar's TEXT is sev[highest_live].text, indexed AT DRAW TIME by
 # the host, which is the only thing that knows which severities are live.
@@ -5003,6 +5048,12 @@ render.silhouette = @render.silhouette   # the small ship at the right · image 
 dot.fill = @severity.critical.text  # the unread dot · image 7's "red dot" · col · @severity.critical.text
 dot.border = @surface.panel         # the halo that separates it from the title behind · images 7,8,9,10 · col · @surface.panel
 dot.count_text = @severity.critical.on   # the number inside a counting dot · images 7,9 · col · @severity.critical.on
+
+# ---------------------------------------------------------------- scrollbar
+scrollbar.track = alpha(@surface.inset, 0.5)  # the groove behind the thumb; read ONLY when scrollbar.track = on, and that is off in the master, so nothing draws it here · - · col · @surface.inset at half, the same recess a meter's track sits in
+
+# ---------------------------------------------------------------- tree
+tree.guide = @border.subtle         # the hairline down an ancestor's indent column; read ONLY when tree.guides is not none, and it is none in the master · - · col · @border.subtle, the quietest line the palette has
 
 # ---------------------------------------------------------------- table / columns
 table.head = @text.secondary        # a header cell · images 1,9 · col · ui.rs:163, was base/0.5
@@ -5113,7 +5164,7 @@ image.render.tint_strength = 1.0    # a wireframe IS a drawing, so it is fully t
 # badge                 •    –     –     –    –     –    –      –
 # node                  •    •     –     •    •     –    –      –
 # avatar.tile           •    •     –     •    •     –    –      –
-# table.head            •    –     –     –    –     –    –      –
+# table.head            •    •     •     •    •     –    –      –
 # table.row             •    •     –     •    •     –    –      –
 # log.line              •    •     –     •    •     –    –      –
 # term.cell             •    –     –     • (selection)  –    –      –
@@ -5136,6 +5187,11 @@ image.render.tint_strength = 1.0    # a wireframe IS a drawing, so it is fully t
 # 1's leader lines label features and image 9's gauges sit in a bar the
 # pointer travels over: a data element the user can point at must be able
 # to answer.
+#
+# table.head gained hover / press / selected when the table learned to
+# sort (F2 §2.1): the heading is a control now, and `selected` is the
+# SORTED column. A table that was never told it is interactive never asks
+# for those rungs, which is why the master's own tables look untouched.
 #
 # Two gaps the inventory exposed, which this table closes: slider.rs has no
 # hover, no drag and no disabled — a dragging slider looks identical to an

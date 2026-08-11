@@ -1,6 +1,7 @@
 //! Reusable on-screen objects: windows and dialog windows,
 //! parallelogram buttons, sliders, accordion drop-downs, checkboxes,
-//! the single-line text input, the context menu, and the frame for
+//! the single-line text input, the context menu, the tab strip and the
+//! segmented control, the tooltip, the toaster, and the frame for
 //! windows the application does not own.
 //!
 //! These are the pieces an application builds its own interface from —
@@ -13,7 +14,11 @@ pub mod dropdown;
 pub mod focus_ring;
 pub mod menu;
 pub mod panel;
+pub mod segmented;
 pub mod slider;
+pub mod tabs;
 pub mod text_input;
+pub mod toaster;
+pub mod tooltip;
 pub mod window;
 pub mod winframe;

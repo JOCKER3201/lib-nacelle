@@ -20,6 +20,9 @@
 //! * [`object`] — reusable on-screen objects: windows and dialogs,
 //!   buttons, sliders, drop-downs, checkboxes, and the frame put
 //!   around windows the application does not own.
+//! * [`view`] — the model/view core: which rows a viewport shows, the
+//!   scroll offset and its physics, and the hit list a view records
+//!   while it draws.
 //! * [`ui`] — the drawing vocabulary widgets are composed from.
 //! * [`widget`] — the contract widgets are written against and that an
 //!   application drives them through. Re-exported at the root.
@@ -58,6 +61,7 @@ pub mod telemetry;
 pub mod term;
 pub mod theme;
 pub mod ui;
+pub mod view;
 pub mod widget;
 
 pub use base::*;

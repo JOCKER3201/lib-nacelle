@@ -109,6 +109,13 @@ pub enum Action {
     /// middle-click convention. The host does the clipboard work; a
     /// widget only ever asks.
     PastePrimary,
+    /// The gesture is mine, and I want nothing. The answer a widget
+    /// gives [`Widget::drag`]`(Begin)` when the press landed on
+    /// something it drives itself — a scroll thumb, a column edge — so
+    /// the host captures the pointer and neither the board nor the
+    /// click path sees the rest of the gesture. Not a request: the
+    /// application does nothing with it but remember who owns the hand.
+    Capture,
 }
 
 /// Which window controls a panel's title band carries, right-aligned in

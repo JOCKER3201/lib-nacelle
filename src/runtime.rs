@@ -83,6 +83,14 @@ pub const ACTION_SCROLL_TERMINAL: u32 = 7;
 pub const ACTION_TERM_SELECT: u32 = 8;
 /// `Action::PastePrimary`: no payload.
 pub const ACTION_PASTE_PRIMARY: u32 = 9;
+/// `Action::Capture`: no payload. The one answer to
+/// [`PluginApi::drag`]`(DRAG_BEGIN)` that takes the gesture and asks the
+/// application for NOTHING — a scroll thumb, a column edge, a knob. F2
+/// §6 wanted a `press -> bool` for exactly this; the F1 ledger merged
+/// press into the single capture path, and this is that boolean in the
+/// channel the path already has. Answering it from `click` or `wheel`
+/// means nothing and does nothing.
+pub const ACTION_CAPTURE: u32 = 10;
 
 /// [`PluginApi::drag`] phases — `DragPhase` as numbers.
 pub const DRAG_BEGIN: u32 = 0;
@@ -325,6 +333,19 @@ pub struct HostApi {
         c: ColorC,
         flags: u32,
     ),
+    /// Nested clip rectangles, forwarding `DrawList::push_clip` across
+    /// the boundary. The one primitive smooth pixel scrolling cannot
+    /// exist without: a partially visible row must not paint outside its
+    /// container. Clips NEST — each is intersected with the one below it
+    /// — and every push must be matched by a [`HostApi::pop_clip`].
+    /// Gated by [`HostApi::has_clip`]; an old host degrades the caller
+    /// to whole-row snapping (`view::Snap::Row`), which is the
+    /// filesystem widget's behaviour today — stated, never silent.
+    pub push_clip: extern "C" fn(ctx: *mut c_void, r: RectC),
+    /// The matching pop. An unbalanced plugin cannot spoil its
+    /// neighbours: the host counts the depth around
+    /// [`PluginApi::draw`] and unwinds whatever is left over.
+    pub pop_clip: extern "C" fn(ctx: *mut c_void),
 }
 
 /// The prefix of [`HostApi`] every version-6 host must fill — everything
@@ -340,6 +361,12 @@ pub const HOST_API_HAS_ENUM_WORD: usize =
 /// The prefix that includes `mask_quad`.
 pub const HOST_API_HAS_MASK_QUAD: usize =
     std::mem::offset_of!(HostApi, mask_quad) + std::mem::size_of::<usize>();
+
+/// The prefix that includes BOTH clip entries. One gate, not two: a
+/// caller that can push and cannot pop would wedge the frame, so the
+/// pair is either wholly there or wholly absent.
+pub const HOST_API_HAS_CLIP: usize =
+    std::mem::offset_of!(HostApi, pop_clip) + std::mem::size_of::<usize>();
 
 /// [`HostApi::mask_quad`]: blend additively — the quad adds light, the
 /// way the host's own glow does. Without it the quad covers, the way its
@@ -357,6 +384,14 @@ impl HostApi {
     /// the same degradation the renderer's texture-miss failsafe applies.
     pub fn has_mask_quad(&self) -> bool {
         self.api_size as usize >= HOST_API_HAS_MASK_QUAD
+    }
+
+    /// Whether this host's table reaches the clip pair. Absent: the
+    /// caller must not scroll by fractions of a row — it snaps to whole
+    /// rows, which is exactly what every widget does today, and says so
+    /// once rather than painting outside its box.
+    pub fn has_clip(&self) -> bool {
+        self.api_size as usize >= HOST_API_HAS_CLIP
     }
 }
 
@@ -447,6 +482,9 @@ pub struct PluginApi {
     /// through the same capture, never a second one). `phase` is a
     /// `DRAG_*` code; a `Begin` answered with `ACTION_NONE` declines
     /// the capture and the press falls back to the click delivery.
+    /// A widget that drives the gesture itself and wants nothing from
+    /// the application accepts with [`ACTION_CAPTURE`] — the file
+    /// panel's scroll thumb is the first.
     /// Appended past `chrome`, `api_size`-gated: a plugin whose table
     /// ends before it simply never receives drags.
     ///

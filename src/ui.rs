@@ -13,6 +13,8 @@
 
 use crate::font::FONT_UI;
 use crate::theme::{self, Color, TokenId};
+use crate::view::paint;
+use crate::view::surface::{CtxSurface, Surface};
 use crate::{Ctx, Rect};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -27,14 +29,6 @@ fn tok(cell: &'static OnceLock<TokenId>, name: &'static str) -> TokenId {
 /// A colour token, delivered in the `Color` the draw calls take.
 fn col(cell: &'static OnceLock<TokenId>, name: &'static str) -> Color {
     let c = theme::resolved().color(tok(cell, name));
-    Color { r: c.r, g: c.g, b: c.b, a: c.a }
-}
-
-/// A colour token used as a BED (a fill under things): missing degrades to
-/// the engine's raw bed, not its raw ink, so an unthemed zebra stripe or
-/// badge interior reads as background rather than as a grey slab.
-fn bed(cell: &'static OnceLock<TokenId>, name: &'static str) -> Color {
-    let c = theme::resolved().bed(tok(cell, name));
     Color { r: c.r, g: c.g, b: c.b, a: c.a }
 }
 
@@ -103,52 +97,27 @@ pub fn sev_fallback() -> Sev {
     sev_of(&word).unwrap_or(Sev(6))
 }
 
-/// The token ids of one severity role's members, resolved once per role.
-struct SevTok {
-    text: TokenId,
-    edge: TokenId,
-    fill: TokenId,
-    on: TokenId,
-    badge_style: TokenId,
-}
-
-fn sev_tok(s: Sev) -> &'static SevTok {
-    static TOKS: OnceLock<Vec<SevTok>> = OnceLock::new();
+/// The `text` token id of each severity role, resolved once per role.
+///
+/// The other four members (`edge`, `fill`, `on`, `badge_style`) are read
+/// by [`crate::view::paint`], which names them by string because it has
+/// to work on the far side of the plugin ABI, where a `TokenId` means
+/// nothing. Only the ink is asked for often enough on the host to be
+/// worth a static.
+fn sev_tok(s: Sev) -> TokenId {
+    static TOKS: OnceLock<Vec<TokenId>> = OnceLock::new();
     let all = TOKS.get_or_init(|| {
         SEVERITY_ROLES
             .iter()
-            .map(|n| SevTok {
-                text: theme::id(&format!("severity.{n}.text")).unwrap_or(TokenId::MISSING),
-                edge: theme::id(&format!("severity.{n}.edge")).unwrap_or(TokenId::MISSING),
-                fill: theme::id(&format!("severity.{n}.fill")).unwrap_or(TokenId::MISSING),
-                on: theme::id(&format!("severity.{n}.on")).unwrap_or(TokenId::MISSING),
-                badge_style: theme::id(&format!("severity.{n}.badge_style"))
-                    .unwrap_or(TokenId::MISSING),
-            })
+            .map(|n| theme::id(&format!("severity.{n}.text")).unwrap_or(TokenId::MISSING))
             .collect()
     });
-    &all[(s.0 as usize).min(all.len() - 1)]
+    all[(s.0 as usize).min(all.len() - 1)]
 }
 
 /// The ink a severity writes in — the label, the value, the status word.
 pub fn sev_text(s: Sev) -> Color {
-    let c = theme::resolved().color(sev_tok(s).text);
-    Color { r: c.r, g: c.g, b: c.b, a: c.a }
-}
-
-fn sev_edge(s: Sev) -> Color {
-    let c = theme::resolved().color(sev_tok(s).edge);
-    Color { r: c.r, g: c.g, b: c.b, a: c.a }
-}
-
-fn sev_fill(s: Sev) -> Color {
-    let c = theme::resolved().bed(sev_tok(s).fill);
-    Color { r: c.r, g: c.g, b: c.b, a: c.a }
-}
-
-fn sev_on(s: Sev) -> Color {
-    let c = theme::resolved().color(sev_tok(s).on);
-    Color { r: c.r, g: c.g, b: c.b, a: c.a }
+    theme::resolved().color(sev_tok(s))
 }
 
 // ---------------------------------------------------------------- type roles
@@ -319,18 +288,12 @@ fn role_px(ctx: &Ctx, cell: &'static OnceLock<TokenId>, name: &'static str) -> f
 /// its role's leading; in optical mode the cap-height bias nudges it.
 /// True optical centring wants the font's cap height, which the draw
 /// list does not expose yet — the bias is the part that can draw today.
-fn center_line_y(y: f32, box_h: f32, px: f32, leading: f32) -> f32 {
-    static MODE: OnceLock<TokenId> = OnceLock::new();
-    static OPTICAL: OnceLock<Option<u16>> = OnceLock::new();
-    static BIAS: OnceLock<TokenId> = OnceLock::new();
-    let t = theme::resolved();
-    let mode = tok(&MODE, "rhythm.center_mode");
-    let optical = *OPTICAL.get_or_init(|| theme::enum_index(mode, "optical"));
-    let mut ty = y + (box_h - px * leading) / 2.0;
-    if optical == Some(t.enum_of(mode)) {
-        ty += px * t.px(tok(&BIAS, "rhythm.cap_center_bias"));
-    }
-    ty
+///
+/// The arithmetic itself lives in [`paint::center_line_y`], where the
+/// views on the far side of the plugin boundary reach it too; this is
+/// the host's way in.
+fn center_line_y(ctx: &mut Ctx, y: f32, box_h: f32, px: f32, leading: f32) -> f32 {
+    paint::center_line_y(&mut CtxSurface::new(ctx), y, box_h, px, leading)
 }
 
 /// Top edge for a block of known natural height, centred vertically in
@@ -346,19 +309,17 @@ pub fn block_top(r: &Rect, natural: f32) -> f32 {
 /// which is how a content-measured table column came to ellipsise the
 /// very cell it was sized from.
 fn fit_end_tracked(ctx: &mut Ctx, px: f32, text: &str, max_w: f32, track: f32) -> String {
-    if ctx.fonts.measure(FONT_UI, px, text, track) <= max_w {
-        return text.to_string();
-    }
-    let chars: Vec<char> = text.chars().collect();
-    let mut n = chars.len().saturating_sub(1);
-    while n > 1 {
-        let cand: String = chars[..n].iter().collect::<String>() + "\u{2026}";
-        if ctx.fonts.measure(FONT_UI, px, &cand, track) <= max_w {
-            return cand;
-        }
-        n -= 1;
-    }
-    "\u{2026}".to_string()
+    paint::fit_end(&mut CtxSurface::new(ctx), px, text, max_w, track)
+}
+
+/// Breaks text into lines no wider than `max_w`, greedily by words —
+/// the host's way into [`paint::wrap`], where the arithmetic lives so
+/// that a view on the far side of the plugin boundary shares it.
+///
+/// The tooltip is its first caller; the text phase will be its second,
+/// which is why it is public vocabulary rather than a private helper.
+pub fn wrap_text(ctx: &mut Ctx, px: f32, text: &str, max_w: f32, track: f32) -> Vec<String> {
+    paint::wrap(&mut CtxSurface::new(ctx), px, text, max_w, track)
 }
 
 /// How a `rows` block sizes its label column (u2 §3.1 #4).
@@ -440,8 +401,8 @@ pub fn rows_label_value(ctx: &mut Ctx, r: Rect, rows: &[RowItem], st: &RowsStyle
         let cell_w = (r.w - gap * (cells_on_line as f32 - 1.0)) / cells_on_line as f32;
         let cx = r.x + (cell_w + gap) * j as f32;
         let y = top + row_h * line as f32;
-        let lty = center_line_y(y, row_h, lpx, st.label_role.leading());
-        let vty = center_line_y(y, row_h, vpx, st.value_role.leading());
+        let lty = center_line_y(ctx, y, row_h, lpx, st.label_role.leading());
+        let vty = center_line_y(ctx, y, row_h, vpx, st.value_role.leading());
         ctx.dl.text(ctx.fonts, FONT_UI, lpx, cx, lty, &row.label, label_c, ltrack);
         let vc = row.sev.map(sev_text).unwrap_or(value_c);
         match st.label_width {
@@ -472,33 +433,7 @@ pub fn rows_label_value(ctx: &mut Ctx, r: Rect, rows: &[RowItem], st: &RowsStyle
 /// closed set, not a colour) and tints the fill; `track = false` says the
 /// value has no meaningful whole, so no outline claims one.
 pub fn meter(ctx: &mut Ctx, r: Rect, frac: f32, sev: Option<Sev>, track: bool) {
-    let frac = if frac.is_finite() {
-        frac.clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    static BORDER: OnceLock<TokenId> = OnceLock::new();
-    static INSET: OnceLock<TokenId> = OnceLock::new();
-    static TRACK: OnceLock<TokenId> = OnceLock::new();
-    static FILL: OnceLock<TokenId> = OnceLock::new();
-    let t = theme::resolved();
-    let bw = t.px(tok(&BORDER, "progress.border"));
-    // The fill sits `progress.inset` behind the ring, so it never
-    // touches it.
-    let inset = bw + t.px(tok(&INSET, "progress.inset"));
-    if track {
-        ctx.dl
-            .rect_outline(r.x, r.y, r.w, r.h, bw, col(&TRACK, "component.bar.track"));
-    }
-    let inner = (r.w - 2.0 * inset).max(0.0);
-    let fill = sev.map(sev_text).unwrap_or_else(|| col(&FILL, "component.bar.fill"));
-    ctx.dl.rect(
-        r.x + inset,
-        r.y + inset,
-        inner * frac,
-        (r.h - 2.0 * inset).max(0.0),
-        fill,
-    );
+    paint::meter(&mut CtxSurface::new(ctx), r, frac, sev, track);
 }
 
 /// A grid of cells of which the first `frac` are lit — the dot matrix
@@ -653,16 +588,9 @@ pub fn gauge_grid(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
         // pixels of fill that were the whole point of the gauge.
         let swallowed = fill_w >= gw - 2.0 * bw - tw - clearance;
         let c = if swallowed { on_fill_c } else { text_c };
-        ctx.dl.text_right(
-            ctx.fonts,
-            FONT_UI,
-            px,
-            gx + gw - inset,
-            center_line_y(gy, gh, px, leading),
-            &text,
-            c,
-            track,
-        );
+        let ty = center_line_y(ctx, gy, gh, px, leading);
+        ctx.dl
+            .text_right(ctx.fonts, FONT_UI, px, gx + gw - inset, ty, &text, c, track);
     }
 }
 
@@ -719,7 +647,7 @@ fn gauge_rows(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
     for (i, v) in values.iter().enumerate() {
         let gx = r.x + (i % cols) as f32 * (gw + gap);
         let gy = r.y + (i / cols) as f32 * (gh + gap);
-        let ty = center_line_y(gy, gh, px, leading);
+        let ty = center_line_y(ctx, gy, gh, px, leading);
         let label = label_of(i);
         if !label.is_empty() {
             ctx.dl.text(ctx.fonts, FONT_UI, px, gx, ty, &label, text_c, track);
@@ -791,40 +719,93 @@ pub struct TableStyle {
     pub shrink: f32,
 }
 
+/// The view riding on a table: what it remembers between frames, where
+/// it records the rectangles it drew, and which of its interactions the
+/// script turned on.
+///
+/// F2 §2.1 gives this struct three fields (`state`, `hits`, `id`); the
+/// per-table OPTIONS live here too rather than in [`TableStyle`],
+/// because `TableStyle` is the shape every existing caller builds by
+/// hand and growing it would break them for a look that has not moved.
+///
+/// Every option is OFF in a table built this way with `Default`, and a
+/// table drawn with all of them off draws what [`table`] draws, to the
+/// pixel — the two share one implementation, which is the only way that
+/// claim stays true.
+pub struct TableView<'a> {
+    pub state: &'a mut crate::view::table::TableState,
+    pub hits: &'a mut crate::view::hits::Hits,
+    /// Which view recorded a rectangle: one [`crate::view::hits::Hits`]
+    /// may serve every view in a widget.
+    pub id: u32,
+    /// The model's rewrite counter (`Snapshot::generation`). The sort is
+    /// cached against it; a caller with no generation of its own passes
+    /// 0 and gets an order rebuilt only when the sort itself moves.
+    pub generation: u64,
+    /// Headings sort and answer the pointer.
+    pub interactive: bool,
+    /// Rows answer the pointer and one of them may be selected.
+    pub select: bool,
+    /// The column whose text identifies a row. `None`: the row's
+    /// position in the model, which is all there is to go on.
+    pub key_col: Option<usize>,
+    /// Scroll the body instead of truncating it at the bottom edge.
+    pub scroll: bool,
+    /// A heading or a cell the ellipsis cut short explains itself when
+    /// the pointer rests on it (F2 §8.1). Only what was TRIMMED asks:
+    /// a tooltip repeating text already on screen is noise.
+    pub tooltip: bool,
+}
+
 /// A table: one heading per column, then rows. The column marked
 /// `elastic` absorbs the leftover width and is trimmed with an ellipsis;
 /// everything else is measured from its content or its heading (u2 §2.7).
 pub fn table(ctx: &mut Ctx, r: Rect, columns: &[Column], rows: &[Vec<String>], st: &TableStyle) {
+    table_surface(&mut CtxSurface::new(ctx), r, columns, rows, st, None);
+}
+
+/// [`table`] with a view riding on it: an offset window instead of the
+/// top-of-list truncation, a sorted and pointer-aware header, and the
+/// selected row's `script.row` wash. With a default [`TableView`] it
+/// draws exactly what [`table`] draws — same function, same branches.
+pub fn table_view(
+    ctx: &mut Ctx,
+    r: Rect,
+    columns: &[Column],
+    rows: &[Vec<String>],
+    st: &TableStyle,
+    view: TableView,
+) {
+    table_surface(&mut CtxSurface::new(ctx), r, columns, rows, st, Some(view));
+}
+
+/// The table on any [`Surface`] — the ONE implementation [`table`] and
+/// [`table_view`] both are, and the one a plugin reaches through
+/// [`crate::view::surface::AbiSurface`].
+///
+/// The port from `Ctx` was mechanical on purpose: every
+/// `t.px(tok(&CELL, "table.cell_pad"))` became `sf.px("table.cell_pad")`,
+/// resolving the same token through the same engine, so the host's
+/// pixels did not move. What it buys is that the interactive table
+/// cannot exist twice — the fate `ui::fit_end_tracked` and the file
+/// panel's `fit_name` already met.
+pub fn table_surface<S: Surface>(
+    sf: &mut S,
+    r: Rect,
+    columns: &[Column],
+    rows: &[Vec<String>],
+    st: &TableStyle,
+    mut view: Option<TableView>,
+) {
     if columns.is_empty() {
         return;
     }
-    static HEAD_ROLE: OnceLock<TokenId> = OnceLock::new();
-    static CELL_ROLE: OnceLock<TokenId> = OnceLock::new();
-    static HEAD_H: OnceLock<TokenId> = OnceLock::new();
-    static ROW_H: OnceLock<TokenId> = OnceLock::new();
-    static COL_GAP: OnceLock<TokenId> = OnceLock::new();
-    static COL_MIN_W: OnceLock<TokenId> = OnceLock::new();
-    static CELL_PAD: OnceLock<TokenId> = OnceLock::new();
-    static HEAD_GAP: OnceLock<TokenId> = OnceLock::new();
-    static HEAD_GAP_BELOW: OnceLock<TokenId> = OnceLock::new();
-    static RULE_W: OnceLock<TokenId> = OnceLock::new();
-    static BAR_W: OnceLock<TokenId> = OnceLock::new();
-    static BAR_H: OnceLock<TokenId> = OnceLock::new();
-    static VALUE_GAP: OnceLock<TokenId> = OnceLock::new();
-    static ZEBRA_EVERY: OnceLock<TokenId> = OnceLock::new();
-    static HEAD_C: OnceLock<TokenId> = OnceLock::new();
-    static ROW_C: OnceLock<TokenId> = OnceLock::new();
-    static RULE_C: OnceLock<TokenId> = OnceLock::new();
-    static ZEBRA_C: OnceLock<TokenId> = OnceLock::new();
-    let t = theme::resolved();
     // Header and body each have a type role of their own, from the
     // `script.table_head_role` / `script.table_cell_role` bindings.
-    let head_role = bound_role(&HEAD_ROLE, "script.table_head_role");
-    let cell_role = bound_role(&CELL_ROLE, "script.table_cell_role");
-    let head_px = head_role.px(ctx, st.shrink);
-    let cell_px = cell_role.px(ctx, st.shrink);
-    let head_track = head_role.tracking_px(head_px);
-    let cell_track = cell_role.tracking_px(cell_px);
+    let head_role = paint::bound_role(sf, "script.table_head_role", st.shrink);
+    let cell_role = paint::bound_role(sf, "script.table_cell_role", st.shrink);
+    let (head_px, head_track) = (head_role.px, head_role.track);
+    let (cell_px, cell_track) = (cell_role.px, cell_role.track);
     // The severity column is style, not content: the display columns are
     // the row's cells with that entry removed — but only when the row
     // actually carries the extra entry, so a script that declares the
@@ -841,92 +822,209 @@ pub fn table(ctx: &mut Ctx, r: Rect, columns: &[Column], rows: &[Vec<String>], s
             _ => i,
         }
     };
+    // The view, taken apart before anything is drawn: the display ORDER
+    // is READ from the state while the hit list is WRITTEN to, and the
+    // borrow checker is right to insist those are two different things.
+    // Without a view every one of these is the "off" value, and every
+    // branch below that tests one is not taken.
+    let (
+        mut state,
+        mut hits,
+        view_id,
+        interactive,
+        select,
+        key_col,
+        wants_scroll,
+        generation,
+        explain,
+    ) = match view.take() {
+        Some(v) => (
+            Some(v.state),
+            Some(v.hits),
+            v.id,
+            v.interactive,
+            v.select,
+            v.key_col,
+            v.scroll,
+            v.generation,
+            v.tooltip,
+        ),
+        None => (None, None, 0, false, false, None, false, 0, false),
+    };
+
     // The table spans its box: as many rows as fit after the header,
     // sharing the height exactly, starting at the top edge. Only when
     // the data runs out before the space does does it keep its natural
     // row height and leave the remainder empty — stretching four rows
     // over a tall panel would look like a fault rather than a table.
-    let head_h = t.px(tok(&HEAD_H, "table.head_h")) * st.shrink;
-    let natural_h = t.px(tok(&ROW_H, "table.row_h")) * st.shrink;
+    let head_h = sf.px("table.head_h") * st.shrink;
+    let natural_h = sf.px("table.row_h") * st.shrink;
     let fits = ((r.h - head_h).max(0.0) / natural_h.max(1.0)).floor() as usize;
     let shown = rows.len().min(fits);
-    let row_h = if shown >= fits && shown > 0 {
+    let fitted_h = if shown >= fits && shown > 0 {
         (r.h - head_h) / shown as f32
     } else {
         natural_h
     };
-    let mut y = r.y;
+    // The header block: the headings sit on the top edge, `head_gap`
+    // above the rule, `head_gap_below` under it. `head_h` is what the
+    // FIT arithmetic reserves for the header and is a different number
+    // — that is how this function has always measured, and changing it
+    // would move every table by a pixel.
+    let head_gap = sf.px("table.head_gap") * st.shrink;
+    let head_gap_below = sf.px("table.head_gap_below") * st.shrink;
+    let body_y = r.y + head_gap + head_gap_below;
+    let body_h = (r.bottom() - body_y).max(0.0);
+    // A scrolled body keeps its natural row height: stretching the rows
+    // to divide the box exactly is what a table does when it shows
+    // everything it has, and it is meaningless once there is an offset.
+    let scrolling = wants_scroll && body_h > 0.0;
+    let row_h = if scrolling { natural_h } else { fitted_h };
+    // A surface that cannot clip must not paint half a row outside its
+    // box, so it scrolls by whole rows instead — the file panel's
+    // behaviour, and the honest degradation of an old host.
+    let can_clip = sf.can_clip();
+
+    // The display order. The sort is the RENDERER's (F2 §2.1): the
+    // script hands over rows in its own order and this decides which
+    // one is shown where — rebuilt only when the model was rewritten or
+    // the sort moved, never per frame.
+    if let Some(s) = state.as_deref_mut() {
+        let sc = s.sort.map(|(c, _)| c).unwrap_or(0);
+        s.refresh_order(generation, rows.len(), |i| {
+            rows.get(i)
+                .and_then(|row| row.get(cell_of(sev_slot(row), sc)))
+                .cloned()
+                .unwrap_or_default()
+        });
+    }
+
+    // The window of rows the body shows. Without scrolling it is the
+    // top of the list, truncated where the box ends — today's `shown`,
+    // expressed as a window so the drawing loop has one shape.
+    let mut window = crate::view::virt::RowWindow { first: 0, count: shown, y0: 0.0 };
+    let mut scroll_geom = None;
+    let mut bar_look = None;
+    if let Some(s) = state.as_deref_mut() {
+        s.extent = crate::view::table::Extent {
+            scrollable: scrolling,
+            viewport: body_h,
+            content: crate::view::virt::content_h(row_h, rows.len()),
+            bar: None,
+        };
+    }
+    if scrolling {
+        let phys = crate::view::scroll::ScrollPhysics::read(sf);
+        let look = crate::view::scroll::ScrollbarLook::read(sf);
+        let now = sf.now();
+        let mouse = sf.mouse();
+        if let Some(s) = state.as_deref_mut() {
+            let content = crate::view::virt::content_h(row_h, rows.len());
+            // A clipping surface leaves the offset free and a row may be
+            // half visible; one that cannot snaps to whole rows.
+            let snap = if can_clip {
+                crate::view::Snap::None
+            } else {
+                crate::view::Snap::Row(row_h)
+            };
+            s.scroll.tick(now, body_h, content, snap, &phys);
+            window = crate::view::virt::row_window(s.scroll.offset(), body_h, row_h, rows.len());
+            let area = Rect::new(r.x, body_y, r.w, body_h);
+            // The band the bar could occupy at its WIDEST, on whichever
+            // edge the theme puts it: a bar that grows under the pointer
+            // must not shrink out from under it and start flickering.
+            let reach = look.w_hover.max(look.w) + look.margin;
+            let band = match look.edge {
+                crate::view::scroll::ScrollbarEdge::Left => {
+                    Rect::new(area.x, area.y, reach, area.h)
+                }
+                crate::view::scroll::ScrollbarEdge::Right => {
+                    Rect::new(area.right() - reach, area.y, reach, area.h)
+                }
+            };
+            let hovered = band.contains(mouse.0, mouse.1);
+            scroll_geom = crate::view::scroll::scrollbar(
+                area,
+                &look,
+                s.scroll.offset(),
+                body_h,
+                content,
+                hovered || s.scroll.dragging(),
+            );
+            s.extent.bar = scroll_geom.as_ref().map(|g| (g.track, g.thumb));
+            bar_look = Some((look, hovered));
+        }
+    }
+
+    // From here on the state is only READ, which is what lets the order
+    // be borrowed for the whole of the drawing below.
+    let order: &[usize] = match state.as_deref() {
+        Some(s) if s.order().len() == rows.len() => s.order(),
+        _ => &[],
+    };
+    // `order[d]` when there is one, `d` when there is not: an identity
+    // permutation is not worth a vector per frame.
+    let model_of = |d: usize| -> usize { order.get(d).copied().unwrap_or(d) };
+    let sort = state.as_deref().and_then(|s| s.sort);
+    let pressed_head = state.as_deref().and_then(|s| s.pressed_head());
+    let overrides: &[Option<f32>] = state.as_deref().map(|s| &s.widths[..]).unwrap_or(&[]);
+    let selected_key: Option<&str> = state.as_deref().and_then(|s| s.selected.as_deref());
+    let dragging_thumb = state.as_deref().is_some_and(|s| s.scroll.dragging());
+    let now = sf.now();
+    let bar_alpha = match (state.as_deref(), &bar_look) {
+        (Some(s), Some((look, hovered))) => {
+            if *hovered || dragging_thumb {
+                1.0
+            } else {
+                s.scroll.fade_alpha(now, look.auto_hide, look.fade_ms)
+            }
+        }
+        _ => 1.0,
+    };
 
     // Fixed columns are measured from their WIDEST CELL (u2 §2.7), not
     // from their heading — measuring from headings is what made `PID` as
     // narrow as the word and ellipsised every five-digit pid. `Heading`
     // keeps the old rule for a column that asks for it; the elastic one
-    // absorbs whatever is left either way. Beside each width, the slack
-    // it can give back when the panel is narrow: a bar cell's track
-    // reservation (the track is a second reading of a number that
-    // stays), and the content measure's excess over the heading.
-    let col_gap = t.px(tok(&COL_GAP, "table.col_gap")) * st.shrink;
-    let cell_pad = t.px(tok(&CELL_PAD, "table.cell_pad")) * st.shrink;
-    let bar_w = t.px(tok(&BAR_W, "table.bar_w")) * st.shrink;
-    let extra = col_gap + cell_pad;
-    let mut widths: Vec<f32> = Vec::with_capacity(columns.len());
-    let mut bar_slack: Vec<f32> = vec![0.0; columns.len()];
-    let mut content_slack: Vec<f32> = vec![0.0; columns.len()];
+    // absorbs whatever is left either way.
+    let col_gap = sf.px("table.col_gap") * st.shrink;
+    let cell_pad = sf.px("table.cell_pad") * st.shrink;
+    let bar_w = sf.px("table.bar_w") * st.shrink;
+    let tokens = crate::view::table::TableTokens {
+        col_gap,
+        cell_pad,
+        bar_w,
+        // Raw, not shrunk — the asymmetry this function has always had.
+        elastic_min_w: sf.px("table.elastic_min_w"),
+        col_min_w: sf.px("table.col_min_w"),
+    };
+    // The rows the measure looks at: what the body is about to show.
+    // Without a window that is `take(shown.max(1))`, exactly as before.
+    let measured_span = if scrolling {
+        window.first..window.first + window.count
+    } else {
+        0..shown.max(1).min(rows.len().max(1))
+    };
+    let mut measured: Vec<crate::view::table::ColMeasure> = Vec::with_capacity(columns.len());
     for (i, c) in columns.iter().enumerate() {
-        let head = ctx.fonts.measure(FONT_UI, head_px, &c.title, head_track);
-        let mut w = head;
+        let head = sf.measure(head_px, &c.title, head_track);
+        let mut content = head;
         if c.width == ColWidth::Content && i != st.elastic {
-            for row in rows.iter().take(shown.max(1)) {
+            for d in measured_span.clone() {
+                let Some(row) = rows.get(model_of(d)) else { continue };
                 let slot = sev_slot(row);
                 if let Some(text) = row.get(cell_of(slot, i)) {
-                    w = w.max(ctx.fonts.measure(FONT_UI, cell_px, text, cell_track));
+                    content = content.max(sf.measure(cell_px, text, cell_track));
                 }
             }
-            content_slack[i] = w - head;
         }
-        if matches!(c.kind, CellKind::Bar { .. }) && i != st.elastic {
-            bar_slack[i] = bar_w + col_gap;
-            w += bar_w + col_gap;
-        }
-        widths.push(w + extra);
+        measured.push(crate::view::table::ColMeasure {
+            head,
+            content,
+            bar: matches!(c.kind, CellKind::Bar { .. }),
+        });
     }
-    let sum_fixed = |ws: &[f32]| -> f32 {
-        ws.iter()
-            .enumerate()
-            .filter(|(i, _)| *i != st.elastic)
-            .map(|(_, w)| *w)
-            .sum()
-    };
-    // The elastic column carries prose — u2 §2.7's NAME — and a content
-    // measure that starves it drops whole strings, not just their tails
-    // (§2.7 items 1-2). Below `table.elastic_min_w` the fixed columns
-    // yield their slack, in a stated order: bar reservations first, then
-    // content measure back toward the heading — each rung proportionally,
-    // so the columns keep their relative widths on the way down.
-    static ELASTIC_MIN_W: OnceLock<TokenId> = OnceLock::new();
-    let elastic_min = t.px(tok(&ELASTIC_MIN_W, "table.elastic_min_w")) + extra;
-    let mut deficit = elastic_min - (r.w - sum_fixed(&widths));
-    for slack in [&bar_slack, &content_slack] {
-        if deficit <= 0.0 {
-            break;
-        }
-        let total: f32 = slack.iter().sum();
-        if total <= 0.0 {
-            continue;
-        }
-        let k = (deficit / total).min(1.0);
-        for (w, s) in widths.iter_mut().zip(slack.iter()) {
-            *w -= s * k;
-        }
-        deficit -= total * k;
-    }
-    let leftover = r.w - sum_fixed(&widths);
-    if let Some(w) = widths.get_mut(st.elastic) {
-        // Whatever the yield freed — floored so the column shows a
-        // trimmed string, never a bare ellipsis, even when the panel is
-        // narrower than the headings themselves.
-        *w = leftover.max(t.px(tok(&COL_MIN_W, "table.col_min_w")) + extra);
-    }
+    let widths = crate::view::table::solve_widths(&measured, r.w, st.elastic, overrides, &tokens);
 
     // Every column's width reserved `col_gap + cell_pad` beyond its
     // content, so every cell draws inside the CONTENT SPAN — a
@@ -940,38 +1038,144 @@ pub fn table(ctx: &mut Ctx, r: Rect, columns: &[Column], rows: &[Vec<String>], s
 
     // The heading row, its rule, then the body.
     {
-        let head_c = col(&HEAD_C, "component.table.head");
+        let head_c = sf.color("component.table.head");
+        let glyph = sf.px("table.sort_glyph") * st.shrink;
+        let glyph_gap = sf.px("table.sort_glyph_gap") * st.shrink;
+        let grip = sf.px("table.resize_grip") * st.shrink;
+        let mouse = sf.mouse();
+        let band_h = head_gap.max(0.0);
         let mut x = r.x;
-        for (c, w) in columns.iter().zip(widths.iter()) {
-            let shown = fit_end_tracked(ctx, head_px, &c.title, trim_w(*w), head_track);
-            draw_cell_text(ctx, x, y, span(*w), c.align, head_px, &shown, head_c, head_track);
+        for (i, (c, w)) in columns.iter().zip(widths.iter()).enumerate() {
+            let band = Rect::new(x, r.y, *w, band_h);
+            let sorted = sort.map(|(sc, _)| sc) == Some(i);
+            // The class ladder answers only for a heading the pointer
+            // can actually reach; a table without `interactive` draws
+            // the resting heading it has always drawn.
+            let mut text_c = head_c;
+            if interactive {
+                let hovered = band.contains(mouse.0, mouse.1);
+                let rung = match (pressed_head == Some(i), hovered, sorted) {
+                    (true, _, _) => Some(theme::parse::State::Press),
+                    (_, true, true) => Some(theme::parse::State::SelectedHover),
+                    (_, true, false) => Some(theme::parse::State::Hover),
+                    (_, false, true) => Some(theme::parse::State::Selected),
+                    _ => None,
+                };
+                if let Some(rung) = rung {
+                    let style = sf.class_state("table.head", rung);
+                    if style.fill.a > 0.0 {
+                        sf.rect(band, style.fill);
+                    }
+                    if style.text.a > 0.0 {
+                        text_c = style.text;
+                    }
+                }
+                if let Some(h) = hits.as_deref_mut() {
+                    h.push(band, crate::view::Hit::TableHead { id: view_id, col: i });
+                    // The grip straddles the join, so both neighbours
+                    // reach it; recorded AFTER the heading because the
+                    // last rectangle drawn is the one that takes the
+                    // press.
+                    if grip > 0.0 && i + 1 < columns.len() {
+                        h.push(
+                            Rect::new(x + w - grip, r.y, grip * 2.0, band_h),
+                            crate::view::Hit::TableDivider { id: view_id, col: i },
+                        );
+                    }
+                }
+            }
+            // The sort marker takes its room out of the trim budget, so
+            // a sorted heading is trimmed rather than overdrawn. It
+            // reports the ORDER, so it is drawn whenever there is one —
+            // a script that opened the table sorted says so even where
+            // the user cannot re-sort it.
+            let marker = if sorted { glyph + glyph_gap } else { 0.0 };
+            let budget = (trim_w(*w) - marker).max(1.0);
+            let cell_w = (span(*w) - marker).max(1.0);
+            let text = paint::fit_end(sf, head_px, &c.title, budget, head_track);
+            // A heading the ellipsis cut short finishes its sentence when
+            // the pointer rests on it (F2 §8.1). Only a TRIMMED one asks:
+            // a tooltip that repeats what is already legible is noise.
+            if explain && band.contains(mouse.0, mouse.1) && text != c.title {
+                sf.tooltip(crate::object::tooltip::cell_key(view_id, i, ""), band, &c.title);
+            }
+            paint::cell_text(sf, x, r.y, cell_w, c.align, head_px, &text, text_c, head_track);
+            if marker > 0.0 {
+                if let Some((_, dir)) = sort {
+                    paint::sort_marker(sf, x + span(*w) - glyph, r.y, glyph, head_px, dir, text_c);
+                }
+            }
             x += w;
         }
     }
-    y += t.px(tok(&HEAD_GAP, "table.head_gap")) * st.shrink;
-    ctx.dl.line(
-        r.x,
-        y,
-        r.right(),
-        y,
-        t.px(tok(&RULE_W, "table.rule")),
-        col(&RULE_C, "component.table.rule"),
-    );
-    y += t.px(tok(&HEAD_GAP_BELOW, "table.head_gap_below")) * st.shrink;
-    let row_c = col(&ROW_C, "component.table.row");
-    let zebra_every = t.px(tok(&ZEBRA_EVERY, "script.table_zebra_every")).max(0.0) as usize;
-    let bar_h = t.px(tok(&BAR_H, "script.meter_bar_h")) * st.shrink;
-    let vgap = t.px(tok(&VALUE_GAP, "meter.value_gap")) * st.shrink;
-    for (ri, row) in rows.iter().take(shown).enumerate() {
-        if st.zebra && zebra_every > 0 && (ri + 1) % zebra_every == 0 {
-            ctx.dl
-                .rect(r.x, y, r.w, row_h, bed(&ZEBRA_C, "component.table.zebra"));
+    let mut y = r.y + head_gap;
+    let rule_w = sf.px("table.rule");
+    let rule_c = sf.color("component.table.rule");
+    sf.line(r.x, y, r.right(), y, rule_w, rule_c);
+    y += head_gap_below;
+    let row_c = sf.color("component.table.row");
+    let zebra_c = sf.bed("component.table.zebra");
+    let zebra_every = sf.px("script.table_zebra_every").max(0.0) as usize;
+    let bar_h = sf.px("script.meter_bar_h") * st.shrink;
+    let vgap = sf.px("meter.value_gap") * st.shrink;
+    let mouse = sf.mouse();
+    // A window that starts part-way down a row needs the body clipped,
+    // or the first row paints over the rule above it.
+    let clipped = scrolling && sf.clip(Rect::new(r.x, body_y, r.w, body_h));
+    for d in window.first..window.first + window.count {
+        let Some(row) = rows.get(model_of(d)) else { continue };
+        let row_y = if scrolling { body_y + window.y_of(d, row_h) } else { y };
+        let rect = Rect::new(r.x, row_y, r.w, row_h);
+        // Zebra follows the DISPLAY position, not the loop counter, so
+        // the stripes stay put while the body scrolls under them.
+        if st.zebra && zebra_every > 0 && (d + 1) % zebra_every == 0 {
+            sf.rect(rect, zebra_c);
         }
         let slot = sev_slot(row);
-        let sev = slot
-            .and_then(|sc| row.get(sc))
-            .map(|w| sev_of(w).unwrap_or_else(sev_fallback));
-        let color = sev.map(sev_text).unwrap_or(row_c);
+        // The row's identity: the key column's text, or its place in the
+        // model when the script named none.
+        let key = match key_col.and_then(|k| row.get(cell_of(slot, k))) {
+            Some(k) => k.clone(),
+            None => model_of(d).to_string(),
+        };
+        if select {
+            let hovered = rect.contains(mouse.0, mouse.1)
+                && mouse.1 >= body_y
+                && mouse.1 < body_y + body_h;
+            let chosen = selected_key == Some(key.as_str());
+            let rung = match (chosen, hovered) {
+                (true, true) => Some(theme::parse::State::SelectedHover),
+                (true, false) => Some(theme::parse::State::Selected),
+                (false, true) => Some(theme::parse::State::Hover),
+                _ => None,
+            };
+            if let Some(rung) = rung {
+                // `script.row` — the class the master already declares
+                // for "a selectable row a script widget draws". No new
+                // selection colour exists, or needs to.
+                let style = sf.class_state("script.row", rung);
+                if style.fill.a > 0.0 {
+                    sf.rect(rect, style.fill);
+                }
+            }
+        }
+        // Recorded whatever `select` says: a row rectangle is also how
+        // the wheel finds out WHICH view the pointer is over, and a
+        // table that scrolls without selecting still has to answer that.
+        if let Some(h) = hits.as_deref_mut() {
+            h.push(rect, crate::view::Hit::Row { id: view_id, key: key.clone() });
+        }
+        let sev = match slot.and_then(|sc| row.get(sc)) {
+            Some(w) => Some(match sev_of(w) {
+                Some(s) => s,
+                None => paint::sev_fallback(sf),
+            }),
+            None => None,
+        };
+        let color = match sev {
+            Some(s) => paint::sev_text(sf, s),
+            None => row_c,
+        };
         let mut x = r.x;
         for (i, (c, w)) in columns.iter().zip(widths.iter()).enumerate() {
             let Some(text) = row.get(cell_of(slot, i)) else {
@@ -980,33 +1184,60 @@ pub fn table(ctx: &mut Ctx, r: Rect, columns: &[Column], rows: &[Vec<String>], s
             };
             match c.kind {
                 CellKind::Text => {
-                    let shown = fit_end_tracked(ctx, cell_px, text, trim_w(*w), cell_track);
-                    draw_cell_text(ctx, x, y, span(*w), c.align, cell_px, &shown, color, cell_track);
+                    let shown = paint::fit_end(sf, cell_px, text, trim_w(*w), cell_track);
+                    // The elastic column is the one the ellipsis usually
+                    // reaches, but any column can be cut short by a
+                    // dragged width, so the test is what HAPPENED rather
+                    // than which column it was.
+                    // The pointer test comes first: only one cell in the
+                    // table can be under it, and comparing the drawn
+                    // text with the whole of it for every cell of every
+                    // visible row to answer a question about one of them
+                    // is work the body loop does not need.
+                    if explain {
+                        let cell = Rect::new(x, row_y, *w, row_h);
+                        if cell.contains(mouse.0, mouse.1)
+                            && mouse.1 >= body_y
+                            && mouse.1 < body_y + body_h
+                            && shown != *text
+                        {
+                            let id = crate::object::tooltip::cell_key(view_id, i, &key);
+                            sf.tooltip(id, cell, text);
+                        }
+                    }
+                    paint::cell_text(
+                        sf, x, row_y, span(*w), c.align, cell_px, &shown, color, cell_track,
+                    );
                 }
                 CellKind::Bar { of } => {
                     // The number is unchanged; the track behind it is a
                     // second reading of the same value (u2 §2.7).
-                    let tw = ctx.fonts.measure(FONT_UI, cell_px, text, cell_track);
+                    let tw = sf.measure(cell_px, text, cell_track);
                     let avail = (span(*w) - tw - vgap).max(0.0).min(bar_w);
                     if avail > 1.0 && of > 0.0 {
-                        let v = leading_number(text).unwrap_or(0.0);
+                        let v = paint::leading_number(text).unwrap_or(0.0);
                         let bar = Rect::new(
                             x + span(*w) - tw - vgap - avail,
-                            y + (row_h - bar_h).max(0.0) / 2.0,
+                            row_y + (row_h - bar_h).max(0.0) / 2.0,
                             avail,
                             bar_h.min(row_h),
                         );
-                        meter(ctx, bar, v / of, sev, true);
+                        paint::meter(sf, bar, v / of, sev, true);
                     }
-                    ctx.dl.text_right(
-                        ctx.fonts, FONT_UI, cell_px, x + span(*w), y, text, color,
+                    sf.text(
+                        cell_px,
+                        x + span(*w),
+                        row_y,
+                        text,
+                        color,
                         cell_track,
+                        Align::Right,
                     );
                 }
                 CellKind::Badge => {
-                    badge(
-                        ctx,
-                        Rect::new(x, y, span(*w), row_h),
+                    paint::badge(
+                        sf,
+                        Rect::new(x, row_y, span(*w), row_h),
                         text,
                         sev,
                         BadgeStyle::FromTheme,
@@ -1017,44 +1248,31 @@ pub fn table(ctx: &mut Ctx, r: Rect, columns: &[Column], rows: &[Vec<String>], s
             }
             x += w;
         }
-        y += row_h;
-    }
-}
-
-/// One aligned run in a table cell — shared by heading and body rows.
-#[allow(clippy::too_many_arguments)]
-fn draw_cell_text(
-    ctx: &mut Ctx,
-    x: f32,
-    y: f32,
-    w: f32,
-    align: Align,
-    px: f32,
-    text: &str,
-    color: Color,
-    track: f32,
-) {
-    match align {
-        Align::Center => {
-            ctx.dl.text_center(ctx.fonts, FONT_UI, px, x + w / 2.0, y, text, color, track);
-        }
-        Align::Left => {
-            ctx.dl.text(ctx.fonts, FONT_UI, px, x, y, text, color, track);
-        }
-        Align::Right => {
-            ctx.dl.text_right(ctx.fonts, FONT_UI, px, x + w, y, text, color, track);
+        if !scrolling {
+            y += row_h;
         }
     }
-}
-
-/// The number at the front of a formatted cell (`"41.2%"` → 41.2), for a
-/// bar cell reading the value it also prints. `None` when the cell does
-/// not start with one — a bar of nothing is drawn empty, never invented.
-fn leading_number(text: &str) -> Option<f32> {
-    let end = text
-        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
-        .unwrap_or(text.len());
-    text[..end].parse::<f32>().ok().filter(|v| v.is_finite())
+    if clipped {
+        sf.unclip();
+    }
+    // The bar last (u2 §2.10), over the rows it covers — which is why
+    // its rectangles are recorded last too: the pointer points at what
+    // it can see.
+    if let (Some(geom), Some((_, hovered))) = (scroll_geom, bar_look) {
+        paint::scrollbar(sf, &geom, bar_alpha, hovered, dragging_thumb);
+        if let Some(h) = hits.as_deref_mut() {
+            let mid = geom.thumb.y + geom.thumb.h / 2.0;
+            h.push(
+                Rect::new(geom.track.x, geom.track.y, geom.track.w, mid - geom.track.y),
+                crate::view::Hit::Track { id: view_id, toward_end: false },
+            );
+            h.push(
+                Rect::new(geom.track.x, mid, geom.track.w, geom.track.bottom() - mid),
+                crate::view::Hit::Track { id: view_id, toward_end: true },
+            );
+            h.push(geom.thumb, crate::view::Hit::Thumb { id: view_id });
+        }
+    }
 }
 
 /// One cell of a `columns` strip: a small label, a larger value, and the
@@ -1273,75 +1491,7 @@ pub fn badge(
     align: Align,
     shrink: f32,
 ) -> f32 {
-    static ROLE: OnceLock<TokenId> = OnceLock::new();
-    static H: OnceLock<TokenId> = OnceLock::new();
-    static PAD_X: OnceLock<TokenId> = OnceLock::new();
-    static CORNER: OnceLock<TokenId> = OnceLock::new();
-    static BORDER: OnceLock<TokenId> = OnceLock::new();
-    static FROM_SEV: OnceLock<TokenId> = OnceLock::new();
-    static FILL_C: OnceLock<TokenId> = OnceLock::new();
-    static EDGE_C: OnceLock<TokenId> = OnceLock::new();
-    static TEXT_C: OnceLock<TokenId> = OnceLock::new();
-    static SOLID_FILL_C: OnceLock<TokenId> = OnceLock::new();
-    static SOLID_TEXT_C: OnceLock<TokenId> = OnceLock::new();
-    let t = theme::resolved();
-    let role = bound_role(&ROLE, "script.badge_role");
-    let px = role.px(ctx, shrink);
-    let track = role.tracking_px(px);
-    let tw = ctx.fonts.measure(FONT_UI, px, text, track);
-    let pad = t.px(tok(&PAD_X, "badge.pad_x")) * shrink;
-    let h = (t.px(tok(&H, "badge.h")) * shrink).min(r.h).max(1.0);
-    let w = (tw + 2.0 * pad).min(r.w).max(1.0);
-    let x = match align {
-        Align::Left => r.x,
-        Align::Center => r.x + (r.w - w) / 2.0,
-        Align::Right => r.right() - w,
-    };
-    let y = r.y + (r.h - h) / 2.0;
-    let solid = match style {
-        BadgeStyle::Solid => true,
-        BadgeStyle::Hollow => false,
-        BadgeStyle::FromTheme => match sev {
-            Some(s) if t.flag(tok(&FROM_SEV, "badge.style_from_severity")) => {
-                word_of(sev_tok(s).badge_style) == "solid"
-            }
-            _ => false,
-        },
-    };
-    let (fill, edge, ink) = match (sev, solid) {
-        (Some(s), true) => (sev_text(s), sev_text(s), sev_on(s)),
-        (Some(s), false) => (sev_fill(s), sev_edge(s), sev_text(s)),
-        (None, true) => (
-            bed(&SOLID_FILL_C, "component.badge.solid_fill"),
-            bed(&SOLID_FILL_C, "component.badge.solid_fill"),
-            col(&SOLID_TEXT_C, "component.badge.solid_text"),
-        ),
-        (None, false) => (
-            bed(&FILL_C, "component.badge.fill"),
-            col(&EDGE_C, "component.badge.edge"),
-            col(&TEXT_C, "component.badge.text"),
-        ),
-    };
-    let corner = t.px(tok(&CORNER, "badge.corner"));
-    if corner > 0.0 {
-        let cut = corner.min(h / 2.0) * shrink;
-        ctx.dl.chamfer_fill(x, y, w, h, cut, fill);
-        let bw = t.px(tok(&BORDER, "badge.border"));
-        if bw > 0.0 && !solid {
-            ctx.dl.chamfer_frame(x, y, w, h, cut, bw, edge);
-        }
-    } else {
-        // `pill` is a negative sentinel until R5 lands: square it is.
-        ctx.dl.rect(x, y, w, h, fill);
-        let bw = t.px(tok(&BORDER, "badge.border"));
-        if bw > 0.0 && !solid {
-            ctx.dl.rect_outline(x, y, w, h, bw, edge);
-        }
-    }
-    let ty = center_line_y(y, h, px, role.leading());
-    ctx.dl
-        .text_center(ctx.fonts, FONT_UI, px, x + w / 2.0, ty, text, ink, track);
-    w
+    paint::badge(&mut CtxSurface::new(ctx), r, text, sev, style, align, shrink)
 }
 
 // ---------------------------------------------------------------- rule
@@ -1377,7 +1527,7 @@ pub fn group_header(ctx: &mut Ctx, r: Rect, label: &str, shrink: f32) {
     let role = bound_role(&ROLE, "script.group_label_role");
     let px = role.px(ctx, shrink);
     let track = role.tracking_px(px);
-    let ty = center_line_y(r.y, r.h, px, role.leading());
+    let ty = center_line_y(ctx, r.y, r.h, px, role.leading());
     ctx.dl.text(
         ctx.fonts, FONT_UI, px, r.x, ty, label,
         col(&LABEL_C, "component.script.label"), track,

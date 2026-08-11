@@ -515,6 +515,14 @@ pub struct Ctx<'a> {
     /// a caller draws without one (tests, an embedder with no keyboard)
     /// — every control treats that as "never focused".
     pub focus: Option<&'a mut FocusCtl>,
+    /// Where a control files "the pointer is resting on me and there is
+    /// more to say than what I drew" ([`crate::object::tooltip`]).
+    /// Owned by the application, which draws the manager LAST — the
+    /// tooltip covers whatever it explains, so nothing may be drawn over
+    /// it. None while a caller draws without one: a request is then
+    /// simply not made, which is what a headless test and a plugin's
+    /// own surface both want.
+    pub tips: Option<&'a mut crate::object::tooltip::Tooltips>,
 }
 
 impl<'a> Ctx<'a> {

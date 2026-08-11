@@ -14,7 +14,8 @@ use crate::runtime::{
     ActionC, CellC, ChromeC, ColorC, HostApi, PluginApi, RectC, TermReqC, TermSelectC, TermViewC,
     ABI_VERSION, CELL_HAS_BG, CELL_SELECTED, CELL_SIZE_MIN, CELL_UNDERLINE, TERM_REQ_SIZE_MIN,
     TERM_SELECT_SIZE_MIN, TERM_VIEW_SIZE_MIN, VIEW_CURSOR, VIEW_LIVE, VIEW_TRUNCATED,
-    ACTION_BYTES, ACTION_EXIT, SIZING_ROWS, ACTION_NONE, ACTION_OPEN_DIR, ACTION_OPEN_FILE,
+    ACTION_BYTES, ACTION_CAPTURE, ACTION_EXIT, SIZING_ROWS, ACTION_NONE, ACTION_OPEN_DIR,
+    ACTION_OPEN_FILE,
     ACTION_OPEN_SETTINGS, ACTION_PASTE_PRIMARY, ACTION_SCROLL_TERMINAL, ACTION_SELECT_TAB,
     ACTION_TERM_SELECT, CHROME_BUTTONS_CLOSE, CHROME_BUTTONS_MIN_CLOSE,
     CHROME_BUTTONS_MIN_MAX_CLOSE, DRAG_BEGIN, DRAG_END, DRAG_MOVE, MASK_QUAD_ADD,
@@ -326,6 +327,25 @@ extern "C" fn h_mask_quad(p: *mut c_void, pts: *const f32, uv: *const f32, c: Co
     );
 }
 
+/// The clip pair, forwarding [`DrawList::push_clip`](crate::draw::DrawList::push_clip)
+/// straight across the boundary — the nesting, the intersection and the
+/// run boundary are all the draw list's, so a plugin's clip behaves
+/// exactly like the host's own. A widget that early-returns between the
+/// two leaves the stack deep; `PluginWidget::draw` unwinds it, which is
+/// why this function needs no bookkeeping of its own.
+extern "C" fn h_push_clip(p: *mut c_void, r: RectC) {
+    let Some(ctx) = (unsafe { ctx_of(p) }) else { return };
+    ctx.dl.push_clip(r.x, r.y, r.w, r.h);
+}
+
+extern "C" fn h_pop_clip(p: *mut c_void) {
+    let Some(ctx) = (unsafe { ctx_of(p) }) else { return };
+    // Popping more than was pushed is the plugin's error, not a reason
+    // to lose the host's own clip: the draw list forgives an empty pop,
+    // and the depth check around `draw` catches the imbalance.
+    ctx.dl.pop_clip();
+}
+
 // The two v4 theme entries. Append-only means they stay at their table
 // positions forever and keep answering what the retired seven-field
 // bridge answered: `accent.primary` and `surface.base`.
@@ -625,6 +645,8 @@ pub fn host_api() -> &'static HostApi {
         theme_epoch: h_theme_epoch,
         theme_enum_word: h_theme_enum_word,
         mask_quad: h_mask_quad,
+        push_clip: h_push_clip,
+        pop_clip: h_pop_clip,
     };
     &API
 }
@@ -686,6 +708,7 @@ fn action_in(a: &ActionC) -> Action {
             }
         }
         ACTION_PASTE_PRIMARY => Action::PastePrimary,
+        ACTION_CAPTURE => Action::Capture,
         _ => Action::None,
     }
 }
@@ -813,9 +836,25 @@ impl Drop for PluginWidget {
 
 impl Widget for PluginWidget {
     fn draw(&mut self, ctx: &mut Ctx, r: Rect, host: &Host) {
+        // ABI 6 lets a plugin clip (`push_clip`/`pop_clip`), and a clip
+        // stack is shared state: one left deep would clip every panel
+        // drawn after this one, and one popped too far would take away
+        // the clip its neighbours were drawn under. So the host holds
+        // the stack it handed over and puts it back, whatever happened
+        // in between — said once, because a broken plugin says it every
+        // frame otherwise.
+        let saved = ctx.dl.clip_stack();
         let c = ctx as *mut Ctx as *mut c_void;
         let h = host as *const Host as *const c_void;
         (self.api.draw)(self.instance, c, h, rect_out(r));
+        if ctx.dl.clip_stack() != saved {
+            crate::ui::warn_once(
+                "plugin.clip",
+                "a plugin widget left its clip stack unbalanced — the host \
+                 restored it; the plugin's own clipping may be wrong",
+            );
+            ctx.dl.restore_clips(&saved);
+        }
     }
 
     fn chrome(&mut self, ctx: &mut Ctx, host: &Host) -> crate::widget::Chrome {
@@ -1020,22 +1059,82 @@ mod tests {
     #[test]
     fn the_host_table_grows_at_the_end_only() {
         use crate::runtime::{
-            HOST_API_HAS_ENUM_WORD, HOST_API_HAS_MASK_QUAD, HOST_API_SIZE_MIN,
+            HOST_API_HAS_CLIP, HOST_API_HAS_ENUM_WORD, HOST_API_HAS_MASK_QUAD,
+            HOST_API_SIZE_MIN,
         };
         let api = host_api();
         assert_eq!(api.api_size as usize, std::mem::size_of::<HostApi>());
         assert!(api.has_theme_enum_word());
         assert!(api.has_mask_quad());
+        assert!(api.has_clip());
         // The appended entries sit past the mandatory prefix, in order,
-        // with `mask_quad` the current end of the table.
+        // with the clip pair the current end of the table.
         assert!(HOST_API_SIZE_MIN < HOST_API_HAS_ENUM_WORD);
         assert!(HOST_API_HAS_ENUM_WORD < HOST_API_HAS_MASK_QUAD);
-        assert_eq!(HOST_API_HAS_MASK_QUAD, std::mem::size_of::<HostApi>());
-        // A host that stopped at the version-6 minimum answers neither,
-        // which is what a plugin's `has_*` gate is for.
+        assert!(HOST_API_HAS_MASK_QUAD < HOST_API_HAS_CLIP);
+        assert_eq!(HOST_API_HAS_CLIP, std::mem::size_of::<HostApi>());
+        // A host that stopped at the version-6 minimum answers none of
+        // them, which is what a plugin's `has_*` gate is for.
         let old = HostApi { api_size: HOST_API_SIZE_MIN as u32, ..*api };
         assert!(!old.has_theme_enum_word());
         assert!(!old.has_mask_quad());
+        assert!(!old.has_clip());
+        // A host from before the clip pair — the whole of ABI 6 as it
+        // stood — still answers everything it did answer.
+        let pre_clip = HostApi { api_size: HOST_API_HAS_MASK_QUAD as u32, ..*api };
+        assert!(pre_clip.has_theme_enum_word());
+        assert!(pre_clip.has_mask_quad());
+        assert!(!pre_clip.has_clip(), "the pair is gated as one, and it is not there");
+        // Half a pair is no pair: a table that reaches `push_clip` and
+        // stops must not be called for either.
+        let half = HostApi {
+            api_size: (std::mem::offset_of!(HostApi, pop_clip)) as u32,
+            ..*api
+        };
+        assert!(!half.has_clip());
+    }
+
+    /// The clip stack a plugin may reach is shared state, so the host
+    /// holds the one it handed over and puts it back — whether the
+    /// plugin left it too deep or popped what it never pushed. This is
+    /// the arithmetic `PluginWidget::draw` performs around every call;
+    /// the forwarding itself is two lines and needs a real context,
+    /// which a windowless test has no business building.
+    #[test]
+    fn an_unbalanced_plugin_cannot_take_its_neighbours_clip() {
+        let mut dl = crate::draw::DrawList::new();
+        // The host clips a panel, then hands the list over.
+        dl.push_clip(10.0, 10.0, 100.0, 100.0);
+        let saved = dl.clip_stack();
+        assert_eq!(saved, vec![[10.0, 10.0, 100.0, 100.0]]);
+
+        // A plugin that forgot its pop.
+        dl.push_clip(20.0, 20.0, 10.0, 10.0);
+        assert_ne!(dl.clip_stack(), saved);
+        dl.restore_clips(&saved);
+        assert_eq!(dl.clip_stack(), saved);
+
+        // A plugin that popped more than it pushed: without the restore
+        // every panel drawn after it would lose the host's clip.
+        dl.pop_clip();
+        dl.pop_clip();
+        assert!(dl.clip_stack().is_empty());
+        dl.restore_clips(&saved);
+        assert_eq!(dl.clip_stack(), saved);
+
+        // A balanced plugin costs nothing: the stack compares equal and
+        // no run is stamped for a restore that changes nothing.
+        let runs_before = dl.run_count();
+        dl.restore_clips(&saved);
+        assert_eq!(dl.run_count(), runs_before);
+    }
+
+    /// Neither clip entry dereferences a null context — the rule every
+    /// entry in this table follows.
+    #[test]
+    fn the_clip_entries_survive_a_null_context() {
+        h_push_clip(std::ptr::null_mut(), RectC { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
+        h_pop_clip(std::ptr::null_mut());
     }
 
     extern "C" fn t_create() -> *mut c_void {
@@ -1247,6 +1346,17 @@ mod tests {
         assert_eq!(
             action_in(&ActionC { kind: ACTION_PASTE_PRIMARY, ..empty_action() }),
             Action::PastePrimary
+        );
+        // So does the capture answer — the one reply that asks for
+        // nothing and still is not None, which is what tells the host
+        // to hold the pointer for the widget.
+        assert_eq!(
+            action_in(&ActionC { kind: ACTION_CAPTURE, ..empty_action() }),
+            Action::Capture
+        );
+        assert_ne!(
+            action_in(&ActionC { kind: ACTION_CAPTURE, ..empty_action() }),
+            Action::None
         );
     }
 

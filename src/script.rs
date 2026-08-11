@@ -22,19 +22,36 @@
 //! without invalidating scripts, unlike a binary interface where moving
 //! a field breaks every widget silently.
 //!
-//! Scripts are sandboxed by what they are given: `host` and the element
-//! and formatting functions, and nothing else. A widget cannot read a
-//! file, open a socket or run a program, because no such function
+//! Scripts are sandboxed by what they are given: `host`, `view`, and the
+//! element and formatting functions, and nothing else. A widget cannot
+//! read a file, open a socket or run a program, because no such function
 //! exists in its world.
+//!
+//! `view` is the second constant in that scope and the answer to a
+//! question the sandbox raises: if a script is a pure function of its
+//! data, where does the sort the user clicked live? Not in the script —
+//! in [`ViewState`], beside the widget, keyed by the `id` an interactive
+//! element names. The script writes the OPENING arrangement as options
+//! and reads what the user did to it back through `view`:
+//!
+//! ```text
+//! fn draw() {
+//!     let sel = view.procs.selected;      // () until a row is picked
+//!     [ table(headings, rows, 1, #{ id: "procs", interactive: true,
+//!                                   select: "row", key: 0, scroll: true }) ]
+//! }
+//! ```
 
 use crate::ui::{self, Align};
-use crate::widget::Sizing;
+use crate::view::{self, Hit};
+use crate::widget::{Action, DragPhase, Sizing};
 use crate::{Host, Widget};
 use crate::font::FONT_UI;
 use crate::telemetry::{fmt_bytes, fmt_rate, fmt_uptime};
 use crate::theme::{self, Color, TokenId};
 use crate::{Ctx, Rect};
 use rhai::{Array, Dynamic, Engine, Map, Scope, AST};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -246,6 +263,28 @@ fn engine() -> Engine {
     // table(headings, rows, elastic, #{ zebra, severity_col }) — u2 §3.1
     // #10. A heading may be [name, align] or [name, align, #{ kind,
     // width, of }], kind ∈ { text, bar, badge }.
+    //
+    // F2 §2.2 adds the VIEW options to the same map, none of which
+    // changes anything unless it is named:
+    //
+    //   id: "procs"      the view's identity between frames; without one
+    //                    it is the table's place among the answer's
+    //                    tables, which is stable only for a script that
+    //                    always returns the same elements
+    //   interactive: true   headings sort and answer the pointer
+    //   sort: 1, dir: "desc"   the OPENING arrangement; the user's
+    //                    clicks own it from then on
+    //   select: "row"    a row may be selected ("none" is the default)
+    //   key: 0           the column whose text identifies a row — the
+    //                    selection is by that string, never by index
+    //   scroll: true     an offset window instead of the truncation at
+    //                    the bottom edge
+    //   tooltip: true    a heading or a cell the ellipsis cut short
+    //                    explains itself when the pointer rests on it
+    //                    (F2 §8.1)
+    //
+    // The state they produce comes back to the script in the `view`
+    // constant: `view.procs.selected`, `.sort`, `.dir`, `.scroll`.
     engine.register_fn(
         "table",
         move |headings: Array, rows: Array, elastic: i64, opts: Map| {
@@ -258,6 +297,53 @@ fn engine() -> Engine {
             m
         },
     );
+    // list(items) / list(items, #{ id, select, scroll }) — F2 §3. The
+    // `[list]` section of the master has described this row since the
+    // theme engine landed and nothing has ever drawn it.
+    //
+    //   item: "label" | [label] | [label, status]
+    //       | #{ label, status, severity, bar: 0.42, key }
+    //
+    // `key` defaults to the label: selection is by STRING, so two rows
+    // that read the same must be told apart by the script.
+    // `select: "row"` lets one be picked, `scroll: true` gives the list
+    // an offset instead of a bottom edge; without either it is a fixed
+    // block of rows and draws through the same path it would anyway.
+    engine.register_fn("list", move |items: Array| {
+        let mut m = Map::new();
+        m.insert("kind".into(), "list".into());
+        m.insert("items".into(), Dynamic::from_array(items));
+        m
+    });
+    engine.register_fn("list", move |items: Array, opts: Map| {
+        let mut m = Map::new();
+        m.insert("kind".into(), "list".into());
+        m.insert("items".into(), Dynamic::from_array(items));
+        merge_opts(&mut m, opts);
+        m
+    });
+    // tree(nodes) / tree(nodes, #{ id, select }) — F2 §4. A tree is not
+    // a second view: the renderer FLATTENS it against the widget's
+    // expand set and draws the rows `list` draws.
+    //
+    //   node: #{ label, children: [ … ], status, severity, bar, key }
+    //
+    // The whole answer is bounded by `max_array_size`, so scripts hand
+    // over SMALL trees; a real file tree belongs to a plugin with a lazy
+    // TreeModel.
+    engine.register_fn("tree", move |nodes: Array| {
+        let mut m = Map::new();
+        m.insert("kind".into(), "tree".into());
+        m.insert("nodes".into(), Dynamic::from_array(nodes));
+        m
+    });
+    engine.register_fn("tree", move |nodes: Array, opts: Map| {
+        let mut m = Map::new();
+        m.insert("kind".into(), "tree".into());
+        m.insert("nodes".into(), Dynamic::from_array(nodes));
+        merge_opts(&mut m, opts);
+        m
+    });
     engine.register_fn("columns", move |cells: Array| {
         let mut m = Map::new();
         m.insert("kind".into(), "columns".into());
@@ -520,6 +606,67 @@ fn sev_opt(m: &Map, key: &str) -> Option<ui::Sev> {
     }))
 }
 
+/// A number a script wrote either way round: rhai keeps `1` an integer
+/// and `1.0` a float, and a fraction is a fraction whichever the author
+/// typed.
+fn num_of(v: &Dynamic) -> Option<f32> {
+    v.as_float()
+        .ok()
+        .map(|f| f as f32)
+        .or_else(|| v.as_int().ok().map(|i| i as f32))
+        .filter(|f| f.is_finite())
+}
+
+/// One `list` item — or one `tree` node's own row — in any of the forms
+/// the elements accept.
+///
+/// The map form is the whole vocabulary; the string and array forms are
+/// the shorthands a script reaches for when a row is only a label, and
+/// they exist for the same reason `rows` accepts `[label, value]`.
+fn list_item(v: &Dynamic) -> view::RowBuf {
+    let mut row = view::RowBuf::new();
+    if let Some(m) = v.read_lock::<Map>() {
+        row.label = str_of(&m, "label");
+        row.status = str_of(&m, "status");
+        row.severity = sev_opt(&m, "severity");
+        row.bar = m.get("bar").and_then(num_of);
+        row.key = str_of(&m, "key");
+    } else if let Some(a) = v.read_lock::<Array>() {
+        row.label = a.first().map(|x| x.to_string()).unwrap_or_default();
+        row.status = a.get(1).map(|x| x.to_string()).unwrap_or_default();
+    } else {
+        row.label = v.to_string();
+    }
+    // The key defaults to the label: a row has to have an identity, and
+    // the only one a bare string carries is what it says.
+    if row.key.is_empty() {
+        row.key = row.label.clone();
+    }
+    row
+}
+
+/// How deep a `tree` element's nesting is followed.
+///
+/// A rhai map cannot be cyclic, so this is not a safety net against a
+/// loop; it is a bound on a script that builds a thousand-deep spine by
+/// accident, where the indent alone would have pushed every label off
+/// the panel long before.
+const TREE_MAX_DEPTH: usize = 32;
+
+/// One `tree` node: a list row, plus whatever `children` it declares.
+fn tree_node(v: &Dynamic, depth: usize) -> view::tree::MemNode {
+    let row = list_item(v);
+    let mut children = Vec::new();
+    if depth < TREE_MAX_DEPTH {
+        if let Some(m) = v.read_lock::<Map>() {
+            if let Some(a) = m.get("children").and_then(|c| c.read_lock::<Array>()) {
+                children = a.iter().map(|c| tree_node(c, depth + 1)).collect();
+            }
+        }
+    }
+    view::tree::MemNode { row, children }
+}
+
 /// The role an element names for itself, if any. An unknown role name
 /// warns once and falls back to `body` inside [`ui::role`].
 fn role_opt(m: &Map, key: &str) -> Option<ui::Role> {
@@ -598,20 +745,199 @@ fn nearest_role(ctx: &Ctx, target: f32) -> ui::Role {
     best
 }
 
+/// What a script's INTERACTIVE elements keep between frames.
+///
+/// A script is a pure function of its data — that is the sandbox, and it
+/// is what lets the answer be cached per frame — so the sort a user
+/// chose, the row they picked and the offset they scrolled to cannot
+/// live in the script. They live here, keyed by the element's `id`, and
+/// the script READS them back through the `view` constant.
+/// A `tree` element's state.
+///
+/// The list state every row view has, plus the flattener that turns the
+/// script's nested answer into rows. The EXPANSION lives on the
+/// flattener and is keyed by path, so the script rebuilding its nodes
+/// every frame — which it does — leaves the shape the user opened
+/// exactly where it was (F2 §4).
+#[derive(Default)]
+struct TreeView {
+    list: view::ListState,
+    flat: view::FlatTree<view::tree::MemTree>,
+}
+
+#[derive(Default)]
+pub struct ViewState {
+    /// One state per interactive `table`, by its `id`.
+    tables: BTreeMap<String, view::TableState>,
+    /// One per interactive `list`.
+    lists: BTreeMap<String, view::ListState>,
+    /// One per `tree`.
+    trees: BTreeMap<String, TreeView>,
+    /// The rectangles the last draw recorded, for the input that arrives
+    /// between frames.
+    hits: view::Hits,
+    /// `ids[n]` is the id of the nth view of the last answer — a `Hit`
+    /// carries the ordinal, because a u32 crosses an ABI and a String
+    /// does not.
+    ids: Vec<String>,
+    /// Where the pointer was at the last draw. A wheel event carries no
+    /// coordinates, and a widget with two scrolling tables has to know
+    /// which one the pointer is over.
+    mouse: (f32, f32),
+    /// What a press landed on, remembered until the drag that follows
+    /// it. The GRAB itself waits for the first `Move` (see
+    /// [`ScriptWidget::drag`]).
+    press: Option<(Hit, f32, f32)>,
+}
+
+impl ViewState {
+    /// The sum of every view's interaction epoch: a number that changes
+    /// whenever anything the user did changed, and the second half of
+    /// the element cache's key.
+    fn epoch(&self) -> u64 {
+        let tables = self
+            .tables
+            .values()
+            .fold(0u64, |a, t| a.wrapping_add(t.interact_epoch));
+        let lists = self
+            .lists
+            .values()
+            .fold(0u64, |a, l| a.wrapping_add(l.interact_epoch));
+        self.trees
+            .values()
+            .fold(tables.wrapping_add(lists), |a, t| {
+                a.wrapping_add(t.list.interact_epoch)
+            })
+    }
+
+    /// A new draw: the rectangles of the last one are stale the moment
+    /// the model can have changed under them.
+    fn begin(&mut self, mouse: (f32, f32)) {
+        self.hits.clear();
+        self.ids.clear();
+        self.mouse = mouse;
+    }
+
+    /// The table a hit's ordinal names, if the last draw drew one.
+    fn table_of(&mut self, ordinal: u32) -> Option<&mut view::TableState> {
+        let id = self.ids.get(ordinal as usize)?.clone();
+        self.tables.get_mut(&id)
+    }
+
+    /// The list state a hit's ordinal names — a `list`'s own, or the one
+    /// inside a `tree`, since a tree scrolls and selects as a list.
+    fn list_of(&mut self, ordinal: u32) -> Option<&mut view::ListState> {
+        let id = self.ids.get(ordinal as usize)?.clone();
+        if self.lists.contains_key(&id) {
+            return self.lists.get_mut(&id);
+        }
+        self.trees.get_mut(&id).map(|t| &mut t.list)
+    }
+
+    /// The tree a hit's ordinal names — only an expander asks.
+    fn tree_of(&mut self, ordinal: u32) -> Option<&mut TreeView> {
+        let id = self.ids.get(ordinal as usize)?.clone();
+        self.trees.get_mut(&id)
+    }
+
+    /// Every gesture-scoped state let go. Called when a gesture ends and
+    /// again when the next one starts: a host may deliver a press whose
+    /// release lands somewhere else entirely (outside the panel, on
+    /// another window), and a heading stuck in its `press` rung for the
+    /// rest of the session is worse than a heading that lets go early.
+    fn release_all(&mut self) {
+        for t in self.tables.values_mut() {
+            t.release_head();
+            t.release_divider();
+            t.scroll.release();
+        }
+        for l in self.lists.values_mut() {
+            l.scroll.release();
+        }
+        for t in self.trees.values_mut() {
+            t.list.scroll.release();
+        }
+        self.press = None;
+    }
+
+    /// What the script sees as the `view` constant: one entry per view,
+    /// under the id the script named it by.
+    fn as_map(&self) -> Map {
+        let mut out = Map::new();
+        for (id, t) in self.tables.iter() {
+            let mut m = Map::new();
+            m.insert(
+                "selected".into(),
+                match &t.selected {
+                    Some(k) => Dynamic::from(k.clone()),
+                    None => Dynamic::UNIT,
+                },
+            );
+            match t.sort {
+                Some((c, d)) => {
+                    m.insert("sort".into(), Dynamic::from_int(c as i64));
+                    m.insert("dir".into(), Dynamic::from(d.word().to_string()));
+                }
+                None => {
+                    m.insert("sort".into(), Dynamic::UNIT);
+                    m.insert("dir".into(), Dynamic::UNIT);
+                }
+            }
+            m.insert("scroll".into(), Dynamic::from_float(t.scroll.offset() as f64));
+            out.insert(id.as_str().into(), Dynamic::from_map(m));
+        }
+        for (id, l) in self.lists.iter() {
+            out.insert(id.as_str().into(), Dynamic::from_map(list_map(l)));
+        }
+        for (id, t) in self.trees.iter() {
+            let mut m = list_map(&t.list);
+            // A tree also tells the script what is OPEN, so a script can
+            // fetch only the branches that are showing — the seam a lazy
+            // model would grow through.
+            m.insert(
+                "expanded".into(),
+                Dynamic::from_array(
+                    t.flat.expansion().into_iter().map(Dynamic::from).collect(),
+                ),
+            );
+            out.insert(id.as_str().into(), Dynamic::from_map(m));
+        }
+        out
+    }
+}
+
+/// What a `list` (and the list half of a `tree`) tells the script back.
+fn list_map(l: &view::ListState) -> Map {
+    let mut m = Map::new();
+    m.insert(
+        "selected".into(),
+        match &l.selected {
+            Some(k) => Dynamic::from(k.clone()),
+            None => Dynamic::UNIT,
+        },
+    );
+    m.insert("scroll".into(), Dynamic::from_float(l.scroll.offset() as f64));
+    m
+}
+
 /// A widget drawn by its script.
 pub struct ScriptWidget {
     script: Script,
-    /// What the script last answered, and the moment it answered.
+    /// What the script last answered, the moment it answered and the
+    /// interaction epoch it answered under.
     /// A frame asks twice — once to measure, once to draw — and the
     /// script is not cheap: running it again would double the cost and
     /// let the two answers disagree, which is worse. Time comes from
-    /// the host, so a new frame is a new answer.
-    cached: Option<(f64, Array)>,
+    /// the host, so a new frame is a new answer; the epoch is there so a
+    /// click that lands WITHIN a frame invalidates the answer too,
+    /// instead of showing the state from before it.
+    cached: Option<(f64, u64, Array)>,
+    views: ViewState,
 }
 
 impl ScriptWidget {
     pub fn new(script: Script) -> Self {
-        ScriptWidget { script, cached: None }
+        ScriptWidget { script, cached: None, views: ViewState::default() }
     }
 }
 
@@ -624,20 +950,25 @@ impl ScriptWidget {
         if self.script.failed {
             return None;
         }
-        if let Some((t, elements)) = &self.cached {
-            if *t == host.t {
+        let epoch = self.views.epoch();
+        if let Some((t, e, elements)) = &self.cached {
+            if *t == host.t && *e == epoch {
                 return Some(elements.clone());
             }
         }
         let mut scope = Scope::new();
         scope.push_constant("host", host_shared(host));
+        // The other half of the conversation: what the user has done to
+        // the views this widget drew. A script that shows a detail panel
+        // for the selected row reads it from here.
+        scope.push_constant("view", Dynamic::from_map(self.views.as_map()));
         let result: Result<Array, _> =
             self.script
                 .engine
                 .call_fn(&mut scope, &self.script.ast, "draw", ());
         match result {
             Ok(a) => {
-                self.cached = Some((host.t, a.clone()));
+                self.cached = Some((host.t, epoch, a.clone()));
                 Some(a)
             }
             Err(e) => {
@@ -652,7 +983,29 @@ impl ScriptWidget {
 impl Widget for ScriptWidget {
     fn draw(&mut self, ctx: &mut Ctx, r: Rect, host: &Host) {
         let Some(elements) = self.elements(host) else { return };
-        render(ctx, r, &elements);
+        self.views.begin(ctx.mouse);
+        let mut pass = ViewPass {
+            state: &mut self.views,
+            generation: host.snap.generation,
+            unnamed: 0,
+        };
+        render(ctx, r, &elements, &mut pass);
+        if pass.unnamed > 1 {
+            // §11's trap: without an `id` a view is known by its place
+            // among the answer's views, and a script that changes how
+            // many it returns hands one view's state to another.
+            let who = chrome_of(&elements).title.unwrap_or_else(|| "(untitled)".into());
+            ui::warn_once(
+                &format!("script.view_id.{who}"),
+                &format!(
+                    "script widget {who}: {} interactive views (table / list / tree) \
+                     with no `id` — their state is keyed by position and will be \
+                     swapped the moment the script returns a different number of \
+                     them; give each one an id",
+                    pass.unnamed
+                ),
+            );
+        }
     }
 
     /// The script's `title` element, read as a chrome declaration: the
@@ -681,6 +1034,171 @@ impl Widget for ScriptWidget {
             Sizing::Rows
         } else {
             Sizing::Content(fixed)
+        }
+    }
+
+    /// A click, tested against the rectangles the last draw recorded —
+    /// the filesystem widget's pattern, with a typed hit instead of an
+    /// index. Always [`Action::None`]: a sort, a selection and a scroll
+    /// are state INSIDE this view, never a request to the application.
+    fn click(&mut self, x: f32, y: f32, _r: Rect, host: &Host) -> Action {
+        // A press that ended in a click is over, whatever it was aimed
+        // at — nothing may outlive the gesture that started it.
+        self.views.release_all();
+        let Some(hit) = self.views.hits.at(x, y).cloned() else { return Action::None };
+        match hit {
+            Hit::TableHead { id, col } => {
+                if let Some(t) = self.views.table_of(id) {
+                    t.click_head(col);
+                }
+            }
+            Hit::TableDivider { id, col } => {
+                // A CLICK on a grip (as opposed to a drag through it)
+                // hands the column back to the measure. The usual
+                // gesture for that is a double click, and a widget is
+                // not told about those — the host owns click counting —
+                // so the single click is what this has.
+                if let Some(t) = self.views.table_of(id) {
+                    t.set_width(col, None);
+                }
+            }
+            Hit::Row { id, key } => {
+                // A row belongs to whichever view recorded it; the two
+                // families answer the same way, which is the point of
+                // selecting by key rather than by index.
+                if let Some(t) = self.views.table_of(id) {
+                    let already = t.is_selected(&key);
+                    t.select((!already).then_some(key));
+                } else if let Some(l) = self.views.list_of(id) {
+                    let already = l.is_selected(&key);
+                    l.select((!already).then_some(key));
+                }
+            }
+            Hit::Disclosure { id, key } => {
+                // The expander opens and closes; the SELECTION is not
+                // touched, because a user opening a folder has not
+                // stopped looking at the file they had picked.
+                if let Some(t) = self.views.tree_of(id) {
+                    t.flat.toggle(&key);
+                    // The flat list is about to be a different length,
+                    // and the per-frame answer cache has to know within
+                    // the frame the click landed in — the expansion is
+                    // the tree's half of what `interact_epoch` counts.
+                    t.list.interact_epoch = t.list.interact_epoch.wrapping_add(1);
+                }
+            }
+            Hit::Track { id, toward_end } => {
+                if let Some(t) = self.views.table_of(id) {
+                    let page = t.extent.viewport;
+                    t.scroll.page(toward_end, page, host.t);
+                } else if let Some(l) = self.views.list_of(id) {
+                    let page = l.extent.viewport;
+                    l.scroll.page(toward_end, page, host.t);
+                }
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// The wheel turned. A wheel event carries no position, so the view
+    /// it moves is the one the pointer was over at the last draw —
+    /// `ctx.mouse`, recorded then, exactly as the hover states are read.
+    fn wheel(&mut self, dy: f32, _r: Rect, host: &Host) -> Action {
+        let mouse = self.views.mouse;
+        let Some(hit) = self.views.hits.at(mouse.0, mouse.1).cloned() else {
+            return Action::None;
+        };
+        let phys = view::scroll::ScrollPhysics::from_theme();
+        if let Some(t) = self.views.table_of(hit.id()) {
+            if t.extent.scrollable {
+                // Positive `dy` scrolls toward the START of the content,
+                // whichever way the platform spells its deltas — the
+                // sign the filesystem widget has always used.
+                t.scroll.wheel(-dy, &phys, host.t);
+            }
+        } else if let Some(l) = self.views.list_of(hit.id()) {
+            if l.extent.scrollable {
+                l.scroll.wheel(-dy, &phys, host.t);
+            }
+        }
+        Action::None
+    }
+
+    /// A pointer drag. `Begin` only REMEMBERS what is under the press:
+    /// the grab itself waits for the first `Move`, because a host that
+    /// declines the capture never sends one — and a grab taken on a
+    /// press that is never released would freeze the view it took.
+    fn drag(&mut self, p: DragPhase, x: f32, y: f32, _r: Rect, _host: &Host) -> Action {
+        match p {
+            DragPhase::Begin => {
+                self.views.release_all();
+                self.views.press = self.views.hits.at(x, y).cloned().map(|h| (h, x, y));
+                if let Some((Hit::TableHead { id, col }, _, _)) = self.views.press.clone() {
+                    if let Some(t) = self.views.table_of(id) {
+                        t.press_head(col);
+                    }
+                }
+                // Declined: the press falls through to the ordinary
+                // click delivery, which is where sorting and selection
+                // happen. The grabs below only ever run under a host
+                // that grants the capture anyway.
+                Action::None
+            }
+            DragPhase::Move => {
+                let Some((hit, px, py)) = self.views.press.clone() else {
+                    return Action::None;
+                };
+                match hit {
+                    Hit::Thumb { id } => {
+                        let thumb = self.views.hits.rect_of(&Hit::Thumb { id });
+                        if let (Some(thumb), Some(t)) = (thumb, self.views.table_of(id)) {
+                            // Grabbed where the PRESS landed, not where
+                            // the pointer is now: by the first Move it
+                            // may already have left the thumb, and the
+                            // grab has to remember how far down it.
+                            if !t.scroll.dragging() {
+                                t.scroll.press_thumb(py, thumb);
+                            }
+                            if let Some((track, _)) = t.extent.bar {
+                                let (v, c) = (t.extent.viewport, t.extent.content);
+                                t.scroll.drag(y, v, c, track);
+                            }
+                        } else if let (Some(thumb), Some(l)) =
+                            (thumb, self.views.list_of(id))
+                        {
+                            if !l.scroll.dragging() {
+                                l.scroll.press_thumb(py, thumb);
+                            }
+                            if let Some((track, _)) = l.extent.bar {
+                                let (v, c) = (l.extent.viewport, l.extent.content);
+                                l.scroll.drag(y, v, c, track);
+                            }
+                        }
+                    }
+                    Hit::TableDivider { id, col } => {
+                        static COL_MIN_W: OnceLock<TokenId> = OnceLock::new();
+                        let min_w = theme::resolved().px(tok(&COL_MIN_W, "table.col_min_w"));
+                        let w0 = self
+                            .views
+                            .hits
+                            .rect_of(&Hit::TableHead { id, col })
+                            .map(|r| r.w);
+                        if let (Some(w0), Some(t)) = (w0, self.views.table_of(id)) {
+                            if t.dragging_divider() != Some(col) {
+                                t.grab_divider(col, px, w0);
+                            }
+                            t.drag_divider(x, min_w);
+                        }
+                    }
+                    _ => {}
+                }
+                Action::None
+            }
+            DragPhase::End => {
+                self.views.release_all();
+                Action::None
+            }
         }
     }
 }
@@ -720,6 +1238,13 @@ struct Metrics {
     spacer: f32,
     rule_block: f32,
     group_gap: f32,
+    /// `list.row_h` and `list.gap`: what a `list` element measures at.
+    /// The measure pass runs a frame before there is a draw list, so it
+    /// reads the two tokens here rather than through a
+    /// [`view::Surface`], and [`view::list::height`] is the one place
+    /// the arithmetic lives.
+    list_row_h: f32,
+    list_gap: f32,
     /// A multiplier on the type size, not a length — never scaled.
     text_leading: f32,
     min_flex_h: f32,
@@ -733,6 +1258,8 @@ fn metrics() -> Metrics {
     static SPACER: OnceLock<TokenId> = OnceLock::new();
     static RULE_BLOCK: OnceLock<TokenId> = OnceLock::new();
     static GROUP_GAP: OnceLock<TokenId> = OnceLock::new();
+    static LIST_ROW_H: OnceLock<TokenId> = OnceLock::new();
+    static LIST_GAP: OnceLock<TokenId> = OnceLock::new();
     static TEXT_LEADING: OnceLock<TokenId> = OnceLock::new();
     static MIN_FLEX_H: OnceLock<TokenId> = OnceLock::new();
     static MIN_FLEX_H_MIN: OnceLock<TokenId> = OnceLock::new();
@@ -745,6 +1272,8 @@ fn metrics() -> Metrics {
         spacer: t.px(tok(&SPACER, "script.spacer")),
         rule_block: t.px(tok(&RULE_BLOCK, "script.rule_block")),
         group_gap: t.px(tok(&GROUP_GAP, "script.group_gap")),
+        list_row_h: t.px(tok(&LIST_ROW_H, "list.row_h")),
+        list_gap: t.px(tok(&LIST_GAP, "list.gap")),
         text_leading: t.px(tok(&TEXT_LEADING, "script.text_leading")),
         min_flex_h: t
             .px(tok(&MIN_FLEX_H, "script.min_flex_h"))
@@ -763,6 +1292,8 @@ impl Metrics {
             spacer: self.spacer * k,
             rule_block: self.rule_block * k,
             group_gap: self.group_gap * k,
+            list_row_h: self.list_row_h * k,
+            list_gap: self.list_gap * k,
             text_leading: self.text_leading,
             min_flex_h: self.min_flex_h * k,
         }
@@ -776,6 +1307,13 @@ impl Metrics {
             self.row_h
         }
     }
+}
+
+/// How many items a `list` element carries.
+fn list_len(m: &Map) -> usize {
+    m.get("items")
+        .and_then(|v| v.read_lock::<Array>().map(|a| a.len()))
+        .unwrap_or(0)
 }
 
 /// Lines a `rows` element occupies: its items flowed row-major into its
@@ -832,6 +1370,14 @@ fn measure(ctx: &Ctx, maps: &[Map], met: &Metrics) -> (f32, usize) {
                 fixed += text_role_of(ctx, m).px(ctx, 1.0) * met.text_leading;
             }
             "runs" => fixed += runs_px(ctx, m) * met.text_leading,
+            // A `list` that does not scroll is exactly its rows, the way
+            // `rows` is exactly its lines; one that does takes whatever
+            // it is given, like a table. A `tree` is ALWAYS flexible: how
+            // tall it is depends on what the user has opened, which lives
+            // in the widget's state and not in the element.
+            "list" if !bool_of(m, "scroll", false) => {
+                fixed += view::list::height(met.list_row_h, met.list_gap, list_len(m))
+            }
             "columns" => fixed += met.columns_block,
             "meter" => fixed += met.row_h,
             "badge" => fixed += met.row_h,
@@ -891,7 +1437,7 @@ fn stack_fit(
 }
 
 /// Draws the element list a script returned.
-fn render(ctx: &mut Ctx, r: Rect, elements: &Array) {
+fn render(ctx: &mut Ctx, r: Rect, elements: &Array, v: &mut ViewPass) {
     let t = theme::resolved();
     let px = ctx.font_px(1.0);
     let met = metrics();
@@ -951,7 +1497,7 @@ fn render(ctx: &mut Ctx, r: Rect, elements: &Array) {
         met: met.scaled(scale),
     };
     let y = ui::block_top(&r, (fixed + share * flexible as f32) * scale);
-    draw_stack(ctx, &r, y, &maps, &pass);
+    draw_stack(ctx, &r, y, &maps, &pass, v);
     if clipped {
         ctx.dl.pop_clip();
     }
@@ -972,9 +1518,49 @@ struct Pass {
     met: Metrics,
 }
 
+/// What the INTERACTIVE elements of one answer need while they draw.
+///
+/// Separate from [`Pass`] because it is `&mut`: the views write their
+/// hit rectangles and read their own state, where `Pass` is the same
+/// handful of numbers for everyone.
+struct ViewPass<'a> {
+    state: &'a mut ViewState,
+    /// The snapshot's rewrite counter, which is what tells a table's
+    /// sort cache "new data" from "the same data again".
+    generation: u64,
+    /// How many views of this answer named no `id` — two of them share
+    /// an ordinal identity, and that is worth saying once (§11).
+    unnamed: usize,
+}
+
+impl ViewPass<'_> {
+    /// Claims the next view slot for `id`, answering the ordinal a
+    /// [`Hit`] will carry. The DEFAULT id is that ordinal, which is
+    /// stable for a script that always returns the same elements and
+    /// treacherous for one that does not — hence the count.
+    fn claim(&mut self, id: &str) -> (String, u32) {
+        let ordinal = self.state.ids.len() as u32;
+        let id = if id.is_empty() {
+            self.unnamed += 1;
+            ordinal.to_string()
+        } else {
+            id.to_string()
+        };
+        self.state.ids.push(id.clone());
+        (id, ordinal)
+    }
+}
+
 /// Draws one element list downwards from `y`; returns the y below the
 /// last element. `group` re-enters with its children.
-fn draw_stack(ctx: &mut Ctx, r: &Rect, mut y: f32, maps: &[Map], p: &Pass) -> f32 {
+fn draw_stack(
+    ctx: &mut Ctx,
+    r: &Rect,
+    mut y: f32,
+    maps: &[Map],
+    p: &Pass,
+    v: &mut ViewPass,
+) -> f32 {
     let t = theme::resolved();
     let (px, share, scale) = (p.px, p.share, p.scale);
     let met = &p.met;
@@ -1165,7 +1751,7 @@ fn draw_stack(ctx: &mut Ctx, r: &Rect, mut y: f32, maps: &[Map], p: &Pass) -> f3
                     .and_then(|v| v.read_lock::<Array>())
                     .map(|a| a.iter().filter_map(|e| e.clone().try_cast::<Map>()).collect())
                     .unwrap_or_default();
-                y = draw_stack(ctx, r, y, &children, p);
+                y = draw_stack(ctx, r, y, &children, p, v);
             }
             "meter" => {
                 static LABEL: OnceLock<TokenId> = OnceLock::new();
@@ -1369,7 +1955,141 @@ fn draw_stack(ctx: &mut Ctx, r: &Rect, mut y: f32, maps: &[Map], p: &Pass) -> f3
                         .map(|i| i as usize),
                     shrink: scale,
                 };
-                ui::table(ctx, Rect::new(r.x, y, r.w, share), &cols, &rows, &st);
+                // The interactive options (F2 §2.2). Every one of them
+                // is OFF by default, so a script written before this
+                // phase draws through the same path it always did.
+                let interactive = bool_of(m, "interactive", false);
+                let select = str_of(m, "select") == "row";
+                let scroll = bool_of(m, "scroll", false);
+                // A tooltip needs no state of its own, but it does need
+                // the view path — the plain `ui::table` has nowhere to
+                // file a request from — so it opens that path like the
+                // rest of them.
+                let tooltip = bool_of(m, "tooltip", false);
+                let rect = Rect::new(r.x, y, r.w, share);
+                if interactive || select || scroll || tooltip {
+                    let key_col = m
+                        .get("key")
+                        .and_then(|v| v.as_int().ok())
+                        .filter(|i| *i >= 0)
+                        .map(|i| i as usize);
+                    // The script's OPENING arrangement — read once, when
+                    // the state is made. After that the user's clicks
+                    // own it, or a script would undo them every frame.
+                    let opening = m
+                        .get("sort")
+                        .and_then(|v| v.as_int().ok())
+                        .filter(|i| *i >= 0)
+                        .map(|i| {
+                            (i as usize, view::SortDir::from_word(&str_of(m, "dir")))
+                        });
+                    let (id, ordinal) = v.claim(&str_of(m, "id"));
+                    let generation = v.generation;
+                    let ViewState { tables, hits, .. } = &mut *v.state;
+                    let state = tables.entry(id).or_insert_with(|| {
+                        let mut s = view::TableState::new();
+                        s.sort = opening;
+                        s
+                    });
+                    ui::table_view(
+                        ctx,
+                        rect,
+                        &cols,
+                        &rows,
+                        &st,
+                        ui::TableView {
+                            state,
+                            hits,
+                            id: ordinal,
+                            generation,
+                            interactive,
+                            select,
+                            key_col,
+                            scroll,
+                            tooltip,
+                        },
+                    );
+                } else {
+                    ui::table(ctx, rect, &cols, &rows, &st);
+                }
+                y += share;
+            }
+            "list" => {
+                let items: Vec<view::RowBuf> = m
+                    .get("items")
+                    .and_then(|v| v.read_lock::<Array>())
+                    .map(|a| a.iter().map(list_item).collect())
+                    .unwrap_or_default();
+                let select = str_of(m, "select") == "row";
+                let scroll = bool_of(m, "scroll", false);
+                // A list that does not scroll took a FIXED height in the
+                // measure and takes the same one here; one that does is a
+                // flexible element and takes the share.
+                let h = if scroll {
+                    share
+                } else {
+                    view::list::height(met.list_row_h, met.list_gap, items.len())
+                };
+                let model = view::Rows::new(items).with_generation(v.generation);
+                let st = view::list::ListStyle { shrink: scale };
+                let rect = Rect::new(r.x, y, r.w, h);
+                if select || scroll {
+                    let (id, ordinal) = v.claim(&str_of(m, "id"));
+                    let ViewState { lists, hits, .. } = &mut *v.state;
+                    let state = lists.entry(id).or_default();
+                    view::list::list(
+                        &mut view::CtxSurface::new(ctx),
+                        rect,
+                        &model,
+                        &st,
+                        Some(view::list::ListView {
+                            state,
+                            hits,
+                            id: ordinal,
+                            select,
+                            scroll,
+                            tree: false,
+                        }),
+                    );
+                } else {
+                    view::list::list(&mut view::CtxSurface::new(ctx), rect, &model, &st, None);
+                }
+                y += h;
+            }
+            "tree" => {
+                let roots: Vec<view::tree::MemNode> = m
+                    .get("nodes")
+                    .and_then(|v| v.read_lock::<Array>())
+                    .map(|a| a.iter().map(|n| tree_node(n, 0)).collect())
+                    .unwrap_or_default();
+                let select = str_of(m, "select") == "row";
+                let scroll = bool_of(m, "scroll", false);
+                let rect = Rect::new(r.x, y, r.w, share);
+                let (id, ordinal) = v.claim(&str_of(m, "id"));
+                let generation = v.generation;
+                let ViewState { trees, hits, .. } = &mut *v.state;
+                let tv = trees.entry(id).or_default();
+                // The script rebuilds its nodes every frame — it is a
+                // pure function of its data — and the expansion lives
+                // HERE, keyed by path, so the shape the user opened
+                // survives every rebuild (F2 §4).
+                tv.flat
+                    .set_model(view::tree::MemTree::new(roots).with_generation(generation));
+                tv.flat.sync();
+                view::list::list(
+                    &mut view::CtxSurface::new(ctx),
+                    rect,
+                    &tv.flat,
+                    &view::list::ListStyle { shrink: scale },
+                    Some(view::list::ListView {
+                        state: &mut tv.list,
+                        hits,
+                        id: ordinal,
+                        select,
+                        scroll,
+                        tree: true,
+                    }),
+                );
                 y += share;
             }
             "columns" => {
@@ -1442,6 +2162,12 @@ mod tests {
     }
 
     fn run(src: &str) -> Result<Array, String> {
+        run_with_views(src, &ViewState::default())
+    }
+
+    /// The real scope a script draws in: `host` and `view`. A first
+    /// frame's `view` is empty, which is what `run` passes.
+    fn run_with_views(src: &str, views: &ViewState) -> Result<Array, String> {
         let engine = engine();
         let ast = engine.compile(src).map_err(|e| e.to_string())?;
         let snap = snapshot();
@@ -1456,6 +2182,7 @@ mod tests {
         };
         let mut scope = Scope::new();
         scope.push_constant("host", host_shared(&host));
+        scope.push_constant("view", Dynamic::from_map(views.as_map()));
         engine
             .call_fn::<Array>(&mut scope, &ast, "draw", ())
             .map_err(|e| e.to_string())
@@ -1694,5 +2421,345 @@ mod tests {
         assert_eq!(share, 100.0 - 45.4);
         assert_eq!(scale, 1.0);
         assert!(!clipped);
+    }
+
+    /// The view options of F2 §2.2 ride on the table's map beside the
+    /// old ones, and a script that names none of them gets none — the
+    /// condition for every table written before this phase drawing
+    /// through the path it always did.
+    #[test]
+    fn the_view_options_ride_on_the_table_element() {
+        let out = run(r#"
+            fn draw() {
+                [
+                    table([["PID", "right"], ["NAME", "left"]],
+                          [["1471", "firefox"]], 1,
+                          #{ id: "procs", interactive: true, sort: 1, dir: "desc",
+                             select: "row", key: 0, scroll: true, tooltip: true,
+                             zebra: true }),
+                    table([["A", "left"]], [["x"]], 0),
+                ]
+            }
+        "#)
+        .unwrap();
+        let live = out[0].read_lock::<Map>().unwrap();
+        assert_eq!(str_of(&live, "id"), "procs");
+        assert!(bool_of(&live, "interactive", false));
+        assert!(bool_of(&live, "scroll", false));
+        assert!(bool_of(&live, "zebra", false), "the old options are untouched");
+        assert_eq!(int_of(&live, "sort", -1), 1);
+        assert_eq!(str_of(&live, "dir"), "desc");
+        assert_eq!(str_of(&live, "select"), "row");
+        assert_eq!(int_of(&live, "key", -1), 0);
+        assert!(bool_of(&live, "tooltip", false));
+        // The plain three-argument form: not one of them is set, so
+        // `draw_stack` takes the `ui::table` branch.
+        let plain = out[1].read_lock::<Map>().unwrap();
+        assert_eq!(str_of(&plain, "id"), "");
+        assert!(!bool_of(&plain, "interactive", false));
+        assert!(!bool_of(&plain, "scroll", false));
+        assert_eq!(str_of(&plain, "select"), "");
+        assert!(!bool_of(&plain, "tooltip", false));
+    }
+
+    /// The `view` constant is the other half of the conversation: the
+    /// script writes options, the user's clicks write state, and the
+    /// script reads that state back on the next frame.
+    #[test]
+    fn a_script_reads_its_views_back_through_the_view_constant() {
+        let mut views = ViewState::default();
+        let mut t = view::TableState::new();
+        t.select(Some("1471".into()));
+        t.click_head(1);
+        t.click_head(1);
+        t.scroll.set_offset(312.0);
+        views.tables.insert("procs".into(), t);
+
+        let out = run_with_views(
+            r#"
+            fn draw() {
+                let v = view.procs;
+                [ text(`${v.selected}/${v.sort}/${v.dir}/${v.scroll}`) ]
+            }
+        "#,
+            &views,
+        )
+        .unwrap();
+        let m = out[0].read_lock::<Map>().unwrap();
+        assert_eq!(str_of(&m, "content"), "1471/1/desc/312.0");
+
+        // A first frame has no state at all, and a script asking for a
+        // view it has not drawn yet must get nothing rather than an
+        // error — the widget would go quiet for good.
+        let empty = run_with_views(
+            r#"fn draw() { [ text(if view.procs == () { "none" } else { "some" }) ] }"#,
+            &ViewState::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            str_of(&empty[0].read_lock::<Map>().unwrap(), "content"),
+            "none"
+        );
+    }
+
+    /// A view named by the script keeps its state under that name; one
+    /// that is not is known by its place in the answer, and two of those
+    /// are counted so the widget can say so once.
+    #[test]
+    fn a_view_without_an_id_is_known_by_its_place() {
+        let mut state = ViewState::default();
+        state.begin((0.0, 0.0));
+        let mut pass = ViewPass { state: &mut state, generation: 7, unnamed: 0 };
+        assert_eq!(pass.claim("procs"), ("procs".to_string(), 0));
+        assert_eq!(pass.claim(""), ("1".to_string(), 1));
+        assert_eq!(pass.claim(""), ("2".to_string(), 2));
+        assert_eq!(pass.unnamed, 2, "two views the script did not name");
+        assert_eq!(state.ids, vec!["procs", "1", "2"]);
+        // The ordinal a Hit carries finds the state back.
+        state.tables.insert("1".into(), view::TableState::new());
+        assert!(state.table_of(1).is_some());
+        assert!(state.table_of(0).is_none(), "no state made for `procs` yet");
+        assert!(state.table_of(9).is_none(), "an ordinal from a stale frame");
+    }
+
+    /// The element cache is keyed by the frame AND by what the user has
+    /// done: a click inside a frame must not be answered with the list
+    /// from before it.
+    #[test]
+    fn the_interaction_epoch_is_part_of_the_element_cache_key() {
+        let mut state = ViewState::default();
+        assert_eq!(state.epoch(), 0);
+        let mut t = view::TableState::new();
+        t.click_head(0);
+        let after_click = t.interact_epoch;
+        assert!(after_click > 0);
+        state.tables.insert("a".into(), t);
+        assert_eq!(state.epoch(), after_click);
+        // A second view's interactions count too, or a click on one
+        // table would be answered with an answer built for the other.
+        let mut u = view::TableState::new();
+        u.select(Some("x".into()));
+        state.tables.insert("b".into(), u);
+        assert!(state.epoch() > after_click);
+    }
+
+    // ------------------------------------------------------ list / tree
+
+    /// Every shorthand a `list` item may be written in, and the map form
+    /// that carries the rest. The key falls back to the label, because a
+    /// row selected by string has to have one.
+    #[test]
+    fn a_list_item_is_read_in_every_form_the_element_accepts() {
+        let out = run(r#"
+            fn draw() {
+                [ list([
+                    "plain",
+                    [ "arrayed" ],
+                    [ "with", "status" ],
+                    #{ label: "full", status: "done", severity: "warning",
+                       bar: 0.25, key: "k7" },
+                    #{ label: "int bar", bar: 1 },
+                ]) ]
+            }
+        "#).unwrap();
+        let m = out[0].read_lock::<Map>().unwrap();
+        assert_eq!(str_of(&m, "kind"), "list");
+        let items = m.get("items").unwrap().read_lock::<Array>().unwrap();
+        assert_eq!(items.len(), 5);
+        let rows: Vec<view::RowBuf> = items.iter().map(list_item).collect();
+        assert_eq!(rows[0].label, "plain");
+        assert_eq!(rows[0].key, "plain", "the key falls back to the label");
+        assert_eq!(rows[1].label, "arrayed");
+        assert_eq!(rows[2].label, "with");
+        assert_eq!(rows[2].status, "status");
+        assert_eq!(rows[3].key, "k7");
+        assert_eq!(rows[3].status, "done");
+        assert_eq!(rows[3].severity, ui::sev_of("warning"));
+        assert_eq!(rows[3].bar, Some(0.25));
+        assert_eq!(rows[4].bar, Some(1.0), "`1` is a number too");
+        assert_eq!(rows[0].bar, None, "a row that states no fraction gets no bar");
+    }
+
+    /// The old, argument-only forms of every element this phase touched
+    /// still answer exactly what they answered — the options are an
+    /// addition, never a replacement.
+    #[test]
+    fn a_list_without_options_declares_none() {
+        let out = run(r#"fn draw() { [ list(["a", "b"]) ] }"#).unwrap();
+        let m = out[0].read_lock::<Map>().unwrap();
+        assert_eq!(list_len(&m), 2);
+        assert!(!m.contains_key("select") && !m.contains_key("scroll"));
+        assert_eq!(str_of(&m, "id"), "");
+        // Without `scroll` a list is a FIXED block: as many rows as it
+        // has, at the row height, with the gaps between them.
+        assert_eq!(view::list::height(20.0, 2.0, list_len(&m)), 42.0);
+    }
+
+    #[test]
+    fn a_tree_element_nests_and_the_renderer_flattens_it() {
+        use view::RowModel as _;
+        let out = run(r#"
+            fn draw() {
+                [ tree([
+                    #{ label: "usr", children: [
+                        #{ label: "share", children: [ #{ label: "fonts" } ] },
+                        #{ label: "lib" },
+                    ] },
+                    #{ label: "etc", severity: "warning" },
+                ], #{ id: "fs", select: "row" }) ]
+            }
+        "#).unwrap();
+        let m = out[0].read_lock::<Map>().unwrap();
+        assert_eq!(str_of(&m, "kind"), "tree");
+        assert_eq!(str_of(&m, "id"), "fs");
+        assert_eq!(str_of(&m, "select"), "row");
+        let roots: Vec<view::tree::MemNode> = m
+            .get("nodes")
+            .unwrap()
+            .read_lock::<Array>()
+            .unwrap()
+            .iter()
+            .map(|n| tree_node(n, 0))
+            .collect();
+        let mut flat = view::FlatTree::new(view::tree::MemTree::new(roots));
+        flat.sync();
+        assert_eq!(flat.len(), 2, "a tree opens closed");
+        flat.expand("usr");
+        flat.expand("usr/share");
+        flat.sync();
+        let paths: Vec<String> = (0..flat.len()).map(|i| flat.key(i)).collect();
+        assert_eq!(paths, vec!["usr", "usr/share", "usr/share/fonts", "usr/lib", "etc"]);
+    }
+
+    /// The requirement of §4, at the level the script actually works at:
+    /// the script is a pure function of its data and hands over a WHOLE
+    /// new set of nodes every frame, and neither the expansion nor the
+    /// selection may notice.
+    #[test]
+    fn expanding_a_tree_survives_the_script_rebuilding_its_nodes() {
+        use view::RowModel as _;
+        fn nodes(src: &str) -> Vec<view::tree::MemNode> {
+            let out = run(src).unwrap();
+            let m = out[0].clone().try_cast::<Map>().unwrap();
+            let arr = m.get("nodes").unwrap().clone().try_cast::<Array>().unwrap();
+            arr.iter().map(|n| tree_node(n, 0)).collect()
+        }
+        let first = r#"
+            fn draw() {
+                [ tree([
+                    #{ label: "usr", children: [
+                        #{ label: "share", children: [ #{ label: "fonts" } ] },
+                    ] },
+                    #{ label: "etc" },
+                ]) ]
+            }
+        "#;
+        // The same shape a moment later: a new leaf under `share`, a new
+        // status on `etc` — the everyday case of a widget refreshing.
+        let second = r#"
+            fn draw() {
+                [ tree([
+                    #{ label: "usr", children: [
+                        #{ label: "share", children: [
+                            #{ label: "fonts" }, #{ label: "icons" },
+                        ] },
+                    ] },
+                    #{ label: "etc", status: "changed" },
+                ]) ]
+            }
+        "#;
+        let mut tv = TreeView::default();
+        tv.flat.set_model(view::tree::MemTree::new(nodes(first)).with_generation(1));
+        tv.flat.sync();
+        tv.flat.expand("usr");
+        tv.flat.expand("usr/share");
+        tv.flat.sync();
+        tv.list.select(Some("usr/share/fonts".into()));
+        let epoch = tv.list.interact_epoch;
+        let before: Vec<String> = (0..tv.flat.len()).map(|i| tv.flat.key(i)).collect();
+        assert_eq!(before, vec!["usr", "usr/share", "usr/share/fonts", "etc"]);
+
+        // The refresh — exactly what `draw_stack` does every frame.
+        tv.flat.set_model(view::tree::MemTree::new(nodes(second)).with_generation(2));
+        tv.flat.sync();
+        let after: Vec<String> = (0..tv.flat.len()).map(|i| tv.flat.key(i)).collect();
+        assert_eq!(
+            after,
+            vec!["usr", "usr/share", "usr/share/fonts", "usr/share/icons", "etc"],
+            "the tree stayed open exactly where it was"
+        );
+        assert!(tv.list.is_selected("usr/share/fonts"), "and the row stayed picked");
+        assert_eq!(tv.list.interact_epoch, epoch, "a refresh is not an interaction");
+        let mut buf = view::RowBuf::new();
+        tv.flat.row(4, &mut buf);
+        assert_eq!(buf.status, "changed", "but the DATA is the new data");
+
+        // Collapsing takes the descendants away and leaves the rest
+        // alone, including a selection that is no longer on screen: the
+        // user has not stopped having picked it.
+        tv.flat.collapse("usr");
+        tv.flat.sync();
+        let closed: Vec<String> = (0..tv.flat.len()).map(|i| tv.flat.key(i)).collect();
+        assert_eq!(closed, vec!["usr", "etc"]);
+        assert!(tv.list.is_selected("usr/share/fonts"));
+        tv.flat.expand("usr");
+        tv.flat.sync();
+        assert_eq!(tv.flat.len(), 5, "and reopening puts the whole shape back");
+    }
+
+    #[test]
+    fn a_script_reads_its_lists_and_trees_back_through_the_view_constant() {
+        let mut views = ViewState::default();
+        let mut l = view::ListState::new();
+        l.select(Some("beta".into()));
+        l.scroll.set_offset(48.0);
+        views.lists.insert("tasks".into(), l);
+        let mut tv = TreeView::default();
+        tv.list.select(Some("usr/lib".into()));
+        tv.flat.set_expansion(["usr".to_string(), "usr/share".to_string()]);
+        views.trees.insert("fs".into(), tv);
+
+        let out = run_with_views(
+            r#"
+            fn draw() {
+                [ text(`${view.tasks.selected}/${view.tasks.scroll}`),
+                  text(`${view.fs.selected}/${view.fs.expanded}`) ]
+            }
+        "#,
+            &views,
+        )
+        .unwrap();
+        assert_eq!(
+            str_of(&out[0].read_lock::<Map>().unwrap(), "content"),
+            "beta/48.0"
+        );
+        assert_eq!(
+            str_of(&out[1].read_lock::<Map>().unwrap(), "content"),
+            "usr/lib/[\"usr\", \"usr/share\"]"
+        );
+    }
+
+    /// Every view's interactions count toward the element cache's key,
+    /// whichever family the view belongs to.
+    #[test]
+    fn a_list_or_a_tree_moves_the_interaction_epoch_too() {
+        let mut state = ViewState::default();
+        assert_eq!(state.epoch(), 0);
+        let mut l = view::ListState::new();
+        l.select(Some("x".into()));
+        state.lists.insert("a".into(), l);
+        let after_list = state.epoch();
+        assert!(after_list > 0);
+        let mut tv = TreeView::default();
+        tv.list.select(Some("y".into()));
+        state.trees.insert("b".into(), tv);
+        assert!(state.epoch() > after_list);
+        // And the ordinal a Hit carries finds either family back.
+        state.ids = vec!["a".into(), "b".into()];
+        assert!(state.list_of(0).is_some());
+        assert!(state.list_of(1).is_some(), "a tree scrolls as a list");
+        assert!(state.tree_of(0).is_none(), "but only a tree has an expander");
+        assert!(state.tree_of(1).is_some());
+        assert!(state.table_of(0).is_none());
     }
 }

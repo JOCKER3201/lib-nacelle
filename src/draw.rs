@@ -294,6 +294,42 @@ impl DrawList {
         });
     }
 
+    /// The clip stack as it stands. The host takes one of these before
+    /// handing the list to a foreign drawer (a plugin across the ABI)
+    /// and puts it back with [`DrawList::restore_clips`] afterwards: a
+    /// plugin that pushes without popping — or pops what it never
+    /// pushed — must not decide what its NEIGHBOURS are clipped to.
+    /// Costs no allocation in the ordinary case, where the stack is
+    /// empty.
+    pub fn clip_stack(&self) -> Vec<[f32; 4]> {
+        self.clips.clone()
+    }
+
+    /// How many runs the list has recorded — the renderer's draw calls,
+    /// and the cheapest measure of "did that change the state the runs
+    /// carry?".
+    pub fn run_count(&self) -> usize {
+        self.runs.len()
+    }
+
+    /// Forces the clip stack back to `saved`. The rectangles are already
+    /// intersected — this list produced them — so nothing is intersected
+    /// again. A caller that left the stack as it found it costs one
+    /// comparison and stamps no run.
+    pub fn restore_clips(&mut self, saved: &[[f32; 4]]) {
+        if self.clips == saved {
+            return;
+        }
+        self.clips.clear();
+        self.clips.extend_from_slice(saved);
+        let clip = self.clips.last().copied();
+        self.runs.push(DrawRun {
+            image: self.runs.last().and_then(|r| r.image),
+            end: self.verts.len() as u32,
+            clip,
+        });
+    }
+
     /// Makes sure the vertices about to be pushed extend a run that
     /// samples `image`, starting a new run when the texture changes.
     fn run_for(&mut self, image: Option<ImageId>) {
