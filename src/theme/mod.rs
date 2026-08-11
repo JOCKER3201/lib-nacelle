@@ -1,15 +1,11 @@
 //! Theming.
 //!
-//! Two engines live here for one release. [`legacy`] is the seven-field
-//! `Theme` the program was built on — an eDEX-shaped placeholder — and
-//! everything it exports is re-exported from this module, so no caller
-//! notices the move. Beside it is the real engine: a `.theme` file format,
-//! a cascade over a master `default.theme`, and a resolved struct with no
-//! strings and no per-frame lookups.
-//!
-//! The old engine is deleted once the application draws through the new
-//! one. Until then this module is additive on purpose: the program must
-//! keep running while the thing under it is replaced.
+//! One engine: a `.theme` file format, a cascade over a master
+//! `default.theme`, and a resolved struct with no strings and no per-frame
+//! lookups. The seven-field eDEX-shaped `Theme` the program was built on is
+//! gone; `theme::Color` — the four-`f32` colour every draw call takes — is
+//! [`color::Color`], exactly as [`color`]'s docs promised when the two
+//! engines still shared this module.
 //!
 //! # `default.theme` is the schema
 //!
@@ -54,9 +50,6 @@
 //! §6's `ensure()` — so `enforce.rs` is a pass over baked values and nothing
 //! here has to move for it. The engine is complete and useful without all five.
 
-mod legacy;
-pub use legacy::*;
-
 pub mod bake;
 pub mod cascade;
 pub mod color;
@@ -68,6 +61,7 @@ pub mod resolve;
 pub use bake::{BakeInput, ResolvedTheme, Viewport};
 pub use plate::Plate;
 pub use cascade::{Schema, ThemeSpec, TokenId};
+pub use color::Color;
 pub use color::Color as ThemeColor;
 pub use expr::{Expr, Kind, Value};
 pub use parse::{Diagnostic, Level, Span};
@@ -878,51 +872,6 @@ fn report(meta: &ThemeDiagnostics) {
 /// Everything outside this list goes through [`ResolvedTheme::id`] at widget
 /// init and is cached by the caller. Nothing here is a hard-coded value — only
 /// a hard-coded *question*.
-/// The legacy [`Theme`] built from the resolved token table.
-///
-/// The program still draws through the seven-field struct, and will until every
-/// draw site names a token of its own. Until then this is the seam: the whole
-/// interface takes its colours from the new engine — from `default.theme` and
-/// from whichever of the shipped themes is selected — without a single caller
-/// changing. It is the cheapest possible way to make eight themes real, and it
-/// deletes itself when the last `ctx.theme.base` is gone.
-///
-/// The mapping is the honest one. `base` was "the accent" and is
-/// `accent.primary`; `bg` was "the background of the whole UI" and is
-/// `surface.base`; `grey` was the grid and hairline colour and is
-/// `border.subtle`. The terminal's three and its sixteen come across by name.
-pub fn legacy_theme() -> Theme {
-    let t = resolved();
-    // The engine's kind default, exactly what a migrated tok() read answers
-    // for a missing token. Theme::tron() may not be anybody's fallback (the
-    // governing principle names this case): a master that fails to declare a
-    // name must look RAW through the bridge too, never like the old design.
-    let named = |name: &str| {
-        let c = t.color(id(name).unwrap_or(TokenId::MISSING));
-        Color { r: c.r, g: c.g, b: c.b, a: c.a }
-    };
-    let grey = Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 };
-    let mut out = Theme {
-        base: grey,
-        bg: Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
-        grey,
-        term_fg: grey,
-        term_bg: Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
-        cursor: grey,
-        ansi: [grey; 16],
-    };
-    out.base = named("accent.primary");
-    out.bg = named("surface.base");
-    out.grey = named("border.subtle");
-    out.term_fg = named("term.fg");
-    out.term_bg = named("term.bg");
-    out.cursor = named("term.cursor");
-    for i in 0..16 {
-        out.ansi[i] = named(&format!("term.ansi[{i}]"));
-    }
-    out
-}
-
 pub mod ids {
     use super::TokenId;
     use std::sync::OnceLock;
@@ -1506,19 +1455,13 @@ decor.enabled    = false
     }
 
     #[test]
-    fn the_legacy_api_still_works_because_the_program_calls_it() {
-        // `theme::Color` is still legacy's, and the five methods the program
-        // uses are unchanged.
+    fn the_draw_colour_api_still_works_because_the_program_calls_it() {
+        // `theme::Color` is [`color::Color`] now, and the five methods the
+        // draw calls were built on are unchanged.
         let c = Color::rgb8(170, 207, 209);
         assert_eq!(c.to_array()[3], 1.0);
         assert!(Color::from_hex("#05080d").is_some());
         assert_eq!(c.alpha(0.5).a, 0.5);
         let _ = c.dim(0.5);
-        let t = Theme::tron();
-        assert_eq!(t.ansi.len(), 16);
-        // and the new Color converts to and from it for free
-        let n: ThemeColor = c.into();
-        let back: Color = n.into();
-        assert_eq!(back, c);
     }
 }

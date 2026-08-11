@@ -1,17 +1,12 @@
 //! Terminal emulation: character grid + VT sequence handling (parser: vte).
 
 use std::collections::VecDeque;
-use crate::theme::{self, xterm_256, Color, Theme, ThemeColor, TokenId};
+use crate::theme::{self, Color, TokenId};
 use std::sync::OnceLock;
 use unicode_width::UnicodeWidthChar;
 
 fn tok(cell: &'static OnceLock<TokenId>, name: &'static str) -> TokenId {
     *cell.get_or_init(|| theme::id(name).unwrap_or(TokenId::MISSING))
-}
-
-/// The engine's colour, in this file's legacy signature.
-fn legacy(c: ThemeColor) -> Color {
-    Color { r: c.r, g: c.g, b: c.b, a: c.a }
 }
 
 pub const FLAG_BOLD: u8 = 1;
@@ -41,10 +36,10 @@ pub const FLAG_WIDE_LEAD: u8 = 32;
 /// rules elsewhere is a shade that is quietly wrong. How far each rule
 /// reaches — the dim factor, whether bold brightens, what inverse does —
 /// belongs to the theme.
-pub fn resolve(cell: &Cell, theme: &Theme) -> (Color, Option<Color>) {
+pub fn resolve(cell: &Cell) -> (Color, Option<Color>) {
     let t = theme::resolved();
     let mut fg = match cell.fg {
-        CellColor::Default => theme.term_fg,
+        CellColor::Default => t.color(theme::ids::term_fg()),
         CellColor::Indexed(i) => {
             static BOLD_IS_BRIGHT: OnceLock<TokenId> = OnceLock::new();
             let i = if cell.flags & FLAG_BOLD != 0
@@ -55,13 +50,13 @@ pub fn resolve(cell: &Cell, theme: &Theme) -> (Color, Option<Color>) {
             } else {
                 i
             };
-            indexed(i, theme)
+            indexed(i)
         }
         CellColor::Rgb(r, g, b) => Color::rgb8(r, g, b),
     };
     let mut bg = match cell.bg {
         CellColor::Default => None,
-        CellColor::Indexed(i) => Some(indexed(i, theme)),
+        CellColor::Indexed(i) => Some(indexed(i)),
         CellColor::Rgb(r, g, b) => Some(Color::rgb8(r, g, b)),
     };
     if cell.flags & FLAG_DIM != 0 {
@@ -86,18 +81,14 @@ pub fn resolve(cell: &Cell, theme: &Theme) -> (Color, Option<Color>) {
             static SELECTION: OnceLock<TokenId> = OnceLock::new();
             let wash = t.color(tok(&SELECTION, "term.selection"));
             bg = Some(match bg {
-                Some(b) => legacy(ThemeColor::over(
-                    wash,
-                    ThemeColor::new(b.r, b.g, b.b, b.a),
-                )),
-                None => legacy(wash),
+                Some(b) => Color::over(wash, b),
+                None => wash,
             });
         } else {
             // swap — and any word this build does not know falls back here,
             // because an unreadable inverse cell is worse than a plain one.
-            static TERM_BG: OnceLock<TokenId> = OnceLock::new();
             let old_fg = fg;
-            fg = bg.unwrap_or_else(|| legacy(t.color(tok(&TERM_BG, "term.bg"))));
+            fg = bg.unwrap_or_else(|| t.color(theme::ids::term_bg()));
             bg = Some(old_fg);
         }
     }
@@ -111,14 +102,15 @@ pub fn resolve(cell: &Cell, theme: &Theme) -> (Color, Option<Color>) {
 /// dead at index 15 and a modern TUI snaps back to foreign colour.
 /// Explicit truecolour is never touched; neither is the sixteen, which the
 /// theme already owns outright.
-fn indexed(i: u8, theme: &Theme) -> Color {
-    let c = xterm_256(i, &theme.ansi);
+fn indexed(i: u8) -> Color {
+    let t = theme::resolved();
     if i < 16 {
-        return c;
+        // The sixteen are the theme's own, token by token.
+        return t.color(theme::ids::term_ansi(i as usize));
     }
+    let c = xterm_gen(i);
     static CUBE_TINT: OnceLock<TokenId> = OnceLock::new();
     static GREY_TINT: OnceLock<TokenId> = OnceLock::new();
-    let t = theme::resolved();
     let pull = if i >= 232 {
         t.px(tok(&GREY_TINT, "term.ansi.grey_tint"))
     } else {
@@ -131,9 +123,9 @@ fn indexed(i: u8, theme: &Theme) -> Color {
     static HUE_ACCENT: OnceLock<TokenId> = OnceLock::new();
     static CHROMA_ACCENT: OnceLock<TokenId> = OnceLock::new();
     let hue = t.px(tok(&HUE_ACCENT, "hue.accent"));
-    // xterm_256 hands the generated range back sRGB-encoded; OKLab wants
+    // xterm_gen hands the generated range back sRGB-encoded; OKLab wants
     // linear light, and the caller expects the encoding it gave us.
-    let mut p = ThemeColor::new(c.r, c.g, c.b, c.a).to_linear().to_oklch();
+    let mut p = c.to_linear().to_oklch();
     if p.c < 1e-4 {
         // A neutral has no hue to walk: pulling it toward the accent
         // means granting it accent chroma, scaled by the pull.
@@ -147,7 +139,28 @@ fn indexed(i: u8, theme: &Theme) -> Color {
         }
         p.h += d * pull;
     }
-    legacy(ThemeColor::from_oklch(p).to_srgb())
+    Color::from_oklch(p).to_srgb()
+}
+
+/// The generated half of the xterm 256-colour palette — the 6x6x6 colour
+/// cube (16..=231) and the grey ramp (232..=255), exactly as xterm
+/// computes them. The first sixteen are the theme's own and never come
+/// here.
+fn xterm_gen(idx: u8) -> Color {
+    match idx {
+        16..=231 => {
+            let i = idx as u32 - 16;
+            let steps = [0u8, 95, 135, 175, 215, 255];
+            let r = steps[(i / 36) as usize];
+            let g = steps[((i / 6) % 6) as usize];
+            let b = steps[(i % 6) as usize];
+            Color::rgb8(r, g, b)
+        }
+        _ => {
+            let v = 8 + (idx as u32).saturating_sub(232) * 10;
+            Color::rgb8(v as u8, v as u8, v as u8)
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]

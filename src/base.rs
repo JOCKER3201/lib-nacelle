@@ -3,7 +3,6 @@
 
 use crate::draw::DrawList;
 use crate::font::{FontSystem, FONT_UI};
-use crate::theme::Theme;
 use std::sync::{OnceLock, RwLock};
 
 #[derive(Clone, Copy, Debug)]
@@ -494,7 +493,6 @@ impl Layout {
 pub struct Ctx<'a> {
     pub dl: &'a mut DrawList,
     pub fonts: &'a mut FontSystem,
-    pub theme: &'a Theme,
     /// Window width/height in px.
     pub w: f32,
     pub h: f32,

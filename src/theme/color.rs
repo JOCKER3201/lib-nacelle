@@ -22,12 +22,10 @@
 //!
 //! ### Relationship to `theme::Color`
 //!
-//! `nacelle::theme::Color` is still [`super::legacy::Color`] — the whole program
-//! calls it and this stage does not move it. The type here has the same layout,
-//! the same public fields and the same five methods (`rgb8`, `from_hex`, `alpha`,
-//! `dim`, `to_array`), plus everything the engine needs, and converts to and from
-//! the legacy type for free. When the old engine is deleted, `pub use
-//! color::Color` replaces `legacy`'s and no call site changes.
+//! `nacelle::theme::Color` IS this type: with the old engine deleted,
+//! `pub use color::Color` replaced the legacy seven-field engine's colour and
+//! no call site changed. The five methods the program was built on (`rgb8`,
+//! `from_hex`, `alpha`, `dim`, `to_array`) keep their names and semantics.
 //!
 //! Not in this stage: `encode.rs`. The sRGB-encode / leave-linear decision keyed
 //! on the live swapchain format (§6.3) is a swapchain-format dependency, so
@@ -145,9 +143,9 @@ impl Color {
     }
 
     /// Per-channel multiply. **Cut from the derivation functions** (§6.1): in
-    /// sRGB it makes red vanish while green survives. Retained only because the
-    /// legacy `Color` exposes it and the program still calls it; authors get
-    /// `lum()`, which is the same intent done in OKLCh.
+    /// sRGB it makes red vanish while green survives. Retained only because
+    /// the program still calls it; authors get `lum()`, which is the same
+    /// intent done in OKLCh.
     pub fn dim(self, f: f32) -> Self {
         Color { r: self.r * f, g: self.g * f, b: self.b * f, a: self.a }
     }
@@ -364,20 +362,6 @@ pub fn linear_to_srgb(v: f32) -> f32 {
     if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
 }
 
-// ------------------------------------------------- bridge to the legacy type
-
-impl From<super::legacy::Color> for Color {
-    fn from(c: super::legacy::Color) -> Self {
-        Color { r: c.r, g: c.g, b: c.b, a: c.a }
-    }
-}
-
-impl From<Color> for super::legacy::Color {
-    fn from(c: Color) -> Self {
-        super::legacy::Color { r: c.r, g: c.g, b: c.b, a: c.a }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,13 +491,5 @@ mod tests {
         assert_eq!(c.fade(4.0).a, 1.0); // clamped
         // and neither touches rgb — straight alpha, never premultiplied
         assert_eq!(c.fade(0.5).r, 1.0);
-    }
-
-    #[test]
-    fn legacy_bridge_is_lossless() {
-        let a = Color::rgb8(1, 2, 3).alpha(0.4);
-        let b: super::super::legacy::Color = a.into();
-        let c: Color = b.into();
-        assert_eq!(a, c);
     }
 }

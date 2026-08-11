@@ -20,7 +20,7 @@ use crate::runtime::{
 };
 use crate::font::FONT_COUNT;
 use crate::term::{Cell, FLAG_UNDERLINE, FLAG_WIDE_LEAD, FLAG_WIDE_SPACER};
-use crate::theme::{Color, Theme};
+use crate::theme::Color;
 use crate::widget::Sizing;
 use crate::{Action, Ctx, Host, Rect, Widget};
 use std::ffi::c_void;
@@ -286,18 +286,15 @@ extern "C" fn h_theme_epoch(_p: *mut c_void) -> u32 {
     crate::theme::epoch()
 }
 
-extern "C" fn h_theme_base(p: *mut c_void) -> ColorC {
-    let Some(ctx) = (unsafe { ctx_of(p) }) else {
-        return ColorC { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
-    };
-    color_out(ctx.theme.base)
+// The two v4 theme entries. Append-only means they stay at their table
+// positions forever and keep answering what the retired seven-field
+// bridge answered: `accent.primary` and `surface.base`.
+extern "C" fn h_theme_base(_p: *mut c_void) -> ColorC {
+    color_out(crate::theme::resolved().color(crate::theme::ids::accent_primary()))
 }
 
-extern "C" fn h_theme_bg(p: *mut c_void) -> ColorC {
-    let Some(ctx) = (unsafe { ctx_of(p) }) else {
-        return ColorC { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
-    };
-    color_out(ctx.theme.bg)
+extern "C" fn h_theme_bg(_p: *mut c_void) -> ColorC {
+    color_out(crate::theme::resolved().color(crate::theme::ids::surface_base()))
 }
 
 extern "C" fn h_vh(p: *mut c_void, v: f32) -> f32 {
@@ -375,8 +372,8 @@ const GRID_MAX: f32 = 4096.0;
 /// bound, `from_raw_parts` on a bad count is a multi-gigabyte read.
 const POLYLINE_MAX: u32 = 8192;
 
-fn cell_out(cell: &Cell, theme: &Theme) -> CellC {
-    let (fg, bg) = crate::term::resolve(cell, theme);
+fn cell_out(cell: &Cell) -> CellC {
+    let (fg, bg) = crate::term::resolve(cell);
     let mut flags = 0u32;
     if cell.flags & FLAG_UNDERLINE != 0 {
         flags |= CELL_UNDERLINE;
@@ -400,7 +397,9 @@ fn cell_out(cell: &Cell, theme: &Theme) -> CellC {
         // The FLAG says whether there is a background; this value is
         // only ever read when it does, so nothing depends on what goes
         // here when there is none.
-        bg: color_out(bg.unwrap_or(theme.term_bg)),
+        bg: color_out(bg.unwrap_or_else(|| {
+            crate::theme::resolved().color(crate::theme::ids::term_bg())
+        })),
     }
 }
 
@@ -438,7 +437,7 @@ extern "C" fn h_term_view(
     let cell_w = ctx.fonts.mono_advance(px).max(1.0);
     let (ascent, line_h) = ctx.fonts.line_metrics(crate::font::FONT_MONO, px);
     let cell_h = line_h.max(1.0);
-    let theme = ctx.theme;
+    let t = crate::theme::resolved();
 
     let mut v = TermViewC::empty();
     v.cell_w = cell_w;
@@ -447,8 +446,8 @@ extern "C" fn h_term_view(
     v.ascent = ascent;
     v.cols = (r.area.w / cell_w).floor().max(2.0).min(GRID_MAX) as u32;
     v.rows = (r.area.h / cell_h).floor().max(2.0).min(GRID_MAX) as u32;
-    v.cursor_bg = color_out(theme.cursor);
-    v.cursor_fg = color_out(theme.term_bg);
+    v.cursor_bg = color_out(t.color(crate::theme::ids::term_cursor()));
+    v.cursor_fg = color_out(t.color(crate::theme::ids::term_bg()));
     v.cursor_ch = b' ' as u32;
 
     let mut written = 0u32;
@@ -501,7 +500,7 @@ extern "C" fn h_term_view(
                     // An absent cell draws nothing, which is exactly
                     // what breaking out of the row used to produce.
                     let c = match row.and_then(|rw| rw.get(x)) {
-                        Some(cell) => cell_out(cell, theme),
+                        Some(cell) => cell_out(cell),
                         None => CellC::absent(),
                     };
                     unsafe {

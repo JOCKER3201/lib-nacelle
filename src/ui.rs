@@ -24,7 +24,7 @@ fn tok(cell: &'static OnceLock<TokenId>, name: &'static str) -> TokenId {
     *cell.get_or_init(|| theme::id(name).unwrap_or(TokenId::MISSING))
 }
 
-/// A colour token, delivered in the legacy `Color` the draw calls take.
+/// A colour token, delivered in the `Color` the draw calls take.
 fn col(cell: &'static OnceLock<TokenId>, name: &'static str) -> Color {
     let c = theme::resolved().color(tok(cell, name));
     Color { r: c.r, g: c.g, b: c.b, a: c.a }
