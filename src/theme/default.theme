@@ -318,9 +318,10 @@ subtle   = alpha(@accent.primary, 0.30)
                     # (m3 M5: was 0.22; raised with border.default so the two-stroke double edge still reads as one halo)
 default  = alpha(@accent.primary, 0.78)
                     # THE 1 px GLOWING PANEL EDGE — family A's signature · 1-6 · colour with straight alpha 0..1 · accent.primary at 0.78
-                    # (m3 M5: was 0.55. Every image calls the edge the brightest line in the picture, and there is no glow
-                    # primitive in the renderer today — the glow classes bake to nothing — so the edge carries the whole
-                    # signature alone. Measured: crimson's panel ring 3.00 -> 4.60, aurora's 6.17 -> 8.33, pure's 5.61 -> 9.18)
+                    # (m3 M5: was 0.55. Every image calls the edge the brightest line in the picture; the raise predates P7,
+                    # when no glow primitive existed and the edge carried the whole signature alone. Since P7 glow.panel_edge
+                    # RENDERS and rides this colour, and the raised value still measures right under it.
+                    # Measured: crimson's panel ring 3.00 -> 4.60, aurora's 6.17 -> 8.33, pure's 5.61 -> 9.18)
 strong   = @accent.primary
                     # emphasised and alarmed frames · 4 (the all-red console) · colour · accent.primary at full alpha
 focus    = @accent.focus
@@ -1857,6 +1858,7 @@ seed                 = 0                      # RNG seed of the trace walk; a th
 enabled              = false                  # draw a baked measuring grid on the backdrop plate · 9 · bool · no derivation; the instrument theme turns this on
 spacing              = 4.4u                   # distance between minor grid lines · 9 · len (u) · no derivation; ~24px @1440p
 width                = @stroke.hair           # grid line width · 9 · str (stroke ladder) · @stroke.hair = 1 device px at 1080p and 1440p (5.4)
+color                = @text.primary          # grid line colour; minor and major share it, only the alphas differ · 9 · colour · @text.primary, so the grid is ruled in the theme's own ink (r1's table omits this token — adopted, see notes)
 alpha                = 0.05                   # minor grid line opacity · 9 · frac 0..1 · no derivation; a hint of a grid, not a graph
 major_every          = 4                      # every Nth line is drawn as a major line · 9 · n, >= 2 · no derivation; 4 minor cells per major cell
 major_alpha          = 0.09                   # major grid line opacity · 9 · frac 0..1 · no derivation; roughly twice the minor lines

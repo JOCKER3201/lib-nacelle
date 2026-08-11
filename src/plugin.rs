@@ -16,9 +16,10 @@ use crate::runtime::{
     VIEW_CURSOR, VIEW_LIVE, VIEW_TRUNCATED, ACTION_BYTES, ACTION_EXIT, SIZING_ROWS,
     ACTION_NONE, ACTION_OPEN_DIR, ACTION_OPEN_FILE, ACTION_OPEN_SETTINGS, ACTION_SCROLL_TERMINAL,
     ACTION_SELECT_TAB, CHROME_BUTTONS_CLOSE, CHROME_BUTTONS_MIN_CLOSE,
-    CHROME_BUTTONS_MIN_MAX_CLOSE, PLUGIN_API_HAS_CHROME, PLUGIN_API_SIZE_MIN, StateStyleC,
+    CHROME_BUTTONS_MIN_MAX_CLOSE, MASK_QUAD_ADD, PLUGIN_API_HAS_CHROME, PLUGIN_API_SIZE_MIN,
+    StateStyleC,
 };
-use crate::font::FONT_COUNT;
+use crate::font::{FontSystem, FONT_COUNT};
 use crate::term::{Cell, FLAG_UNDERLINE, FLAG_WIDE_LEAD, FLAG_WIDE_SPACER};
 use crate::theme::Color;
 use crate::widget::Sizing;
@@ -286,6 +287,43 @@ extern "C" fn h_theme_epoch(_p: *mut c_void) -> u32 {
     crate::theme::epoch()
 }
 
+// ---- ABI 6, appended: the enum WORD, and the mask sprite ------------------
+// Past HOST_API_SIZE_MIN; a plugin asks `HostApi::has_*` before calling.
+
+extern "C" fn h_theme_enum_word(_p: *mut c_void, id: u32, buf: *mut u8, cap: u32) -> u32 {
+    if buf.is_null() || cap == 0 {
+        return 0;
+    }
+    let Some(word) = crate::theme::enum_word_of(tid(id)) else { return 0 };
+    let n = word.len().min(cap as usize);
+    unsafe { std::ptr::copy_nonoverlapping(word.as_ptr(), buf, n) };
+    n as u32
+}
+
+/// The plugin half of the sprite glow/shadow path: four corners, four
+/// sprite-space texcoords, one colour. The mapping into the atlas's mask
+/// band happens in [`DrawList::mask_quad`](crate::draw::DrawList::mask_quad),
+/// on this side of the boundary, so the numbers a plugin passes can
+/// address the soft disk and nothing else.
+extern "C" fn h_mask_quad(p: *mut c_void, pts: *const f32, uv: *const f32, c: ColorC, flags: u32) {
+    let Some(ctx) = (unsafe { ctx_of(p) }) else { return };
+    if pts.is_null() || uv.is_null() {
+        return;
+    }
+    let pv = unsafe { std::slice::from_raw_parts(pts, 8) };
+    let tv = unsafe { std::slice::from_raw_parts(uv, 8) };
+    let corners = |s: &[f32]| -> [[f32; 2]; 4] {
+        std::array::from_fn(|i| [s[i * 2], s[i * 2 + 1]])
+    };
+    ctx.dl.mask_quad(
+        corners(pv),
+        corners(tv),
+        FontSystem::mask_soft_uv(),
+        color_in(c),
+        flags & MASK_QUAD_ADD != 0,
+    );
+}
+
 // The two v4 theme entries. Append-only means they stay at their table
 // positions forever and keep answering what the retired seven-field
 // bridge answered: `accent.primary` and `surface.base`.
@@ -536,6 +574,7 @@ extern "C" fn h_term_view(
 pub fn host_api() -> &'static HostApi {
     static API: HostApi = HostApi {
         abi_version: ABI_VERSION,
+        api_size: std::mem::size_of::<HostApi>() as u32,
         emit_sound: h_emit_sound,
         panel_count: h_panel_count,
         rect: h_rect,
@@ -564,6 +603,8 @@ pub fn host_api() -> &'static HostApi {
         theme_class: h_theme_class,
         theme_class_state: h_theme_class_state,
         theme_epoch: h_theme_epoch,
+        theme_enum_word: h_theme_enum_word,
+        mask_quad: h_mask_quad,
     };
     &API
 }
@@ -825,6 +866,68 @@ mod tests {
             ColorC { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
             false,
         );
+
+        // The mask quad with no context and no arrays: nothing, not a
+        // read through null (the geometry itself is DrawList's test).
+        h_mask_quad(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            ColorC { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+            MASK_QUAD_ADD,
+        );
+    }
+
+    /// The enum WORD crosses like `shell_cwd` does: UTF-8 into the
+    /// caller's buffer, a short buffer gets a prefix, and every bad
+    /// input answers 0 rather than crashing.
+    #[test]
+    fn an_enum_word_crosses_as_bytes() {
+        let _ = crate::theme::resolved(); // first use loads the master
+        let name = b"type.title.window.case";
+        let id = h_theme_token(name.as_ptr(), name.len() as u32);
+        assert_ne!(id, u32::MAX, "the master must declare type.title.window.case");
+        let expect = crate::theme::enum_word_of(tid(id)).expect("an enum token has a word");
+        assert!(!expect.is_empty());
+
+        let mut buf = [0u8; 64];
+        let n = h_theme_enum_word(std::ptr::null_mut(), id, buf.as_mut_ptr(), 64) as usize;
+        assert_eq!(&buf[..n], expect.as_bytes());
+
+        // A buffer with less room than the word gets its prefix.
+        let mut small = [0u8; 2];
+        let n = h_theme_enum_word(std::ptr::null_mut(), id, small.as_mut_ptr(), 2) as usize;
+        assert_eq!(n, expect.len().min(2));
+        assert_eq!(&small[..n], &expect.as_bytes()[..n]);
+
+        // Null buffer, no room, unknown id: 0, never a crash.
+        assert_eq!(h_theme_enum_word(std::ptr::null_mut(), id, std::ptr::null_mut(), 64), 0);
+        assert_eq!(h_theme_enum_word(std::ptr::null_mut(), id, buf.as_mut_ptr(), 0), 0);
+        assert_eq!(h_theme_enum_word(std::ptr::null_mut(), u32::MAX, buf.as_mut_ptr(), 64), 0);
+    }
+
+    /// The host table grows at the END only, and its `api_size` is what
+    /// says how far it reaches — the version-6 growth contract, from the
+    /// side that fills the table.
+    #[test]
+    fn the_host_table_grows_at_the_end_only() {
+        use crate::runtime::{
+            HOST_API_HAS_ENUM_WORD, HOST_API_HAS_MASK_QUAD, HOST_API_SIZE_MIN,
+        };
+        let api = host_api();
+        assert_eq!(api.api_size as usize, std::mem::size_of::<HostApi>());
+        assert!(api.has_theme_enum_word());
+        assert!(api.has_mask_quad());
+        // The appended entries sit past the mandatory prefix, in order,
+        // with `mask_quad` the current end of the table.
+        assert!(HOST_API_SIZE_MIN < HOST_API_HAS_ENUM_WORD);
+        assert!(HOST_API_HAS_ENUM_WORD < HOST_API_HAS_MASK_QUAD);
+        assert_eq!(HOST_API_HAS_MASK_QUAD, std::mem::size_of::<HostApi>());
+        // A host that stopped at the version-6 minimum answers neither,
+        // which is what a plugin's `has_*` gate is for.
+        let old = HostApi { api_size: HOST_API_SIZE_MIN as u32, ..*api };
+        assert!(!old.has_theme_enum_word());
+        assert!(!old.has_mask_quad());
     }
 
     extern "C" fn t_create() -> *mut c_void {

@@ -165,9 +165,10 @@ glass.wash = alpha(@surface.void, 0.58)        # a deep wash: the board beneath 
 edge.color = alpha(@accent.primary, 0.90)
 
 # ---------------------------------------------------------------- glow
-# "Generous Gaussian glow." Kept moderate on purpose: until additive blend
-# lands, alpha glow over a BRIGHT backdrop reads as a milky film rather than
-# light (5.13), and family B is exactly the bright-backdrop case.
+# "Generous Gaussian glow." Kept moderate on purpose: the glow is ADDITIVE
+# (P7's ADD_ATLAS), and family B is exactly the bright-backdrop case where
+# added light saturates toward white first (5.13) — a moderate alpha keeps
+# the halo reading as light instead of burning out the pane edge.
 [glow]
 panel_edge.enabled     = true    # the halo on every pane edge in images 7 and 10
 panel_edge.radius      = 1.6u

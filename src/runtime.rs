@@ -80,14 +80,22 @@ pub const ACTION_SCROLL_TERMINAL: u32 = 7;
 /// The functions a plugin uses to reach the host's shared state.
 ///
 /// Adding a field to the END of this struct is compatible with plugins
-/// built against an older version, as long as [`ABI_VERSION`] goes up
-/// and the host keeps answering the old calls. Reordering or removing a
-/// field is not: that is what the version check exists to catch.
+/// built against an older version. Through version 5 that cost an
+/// [`ABI_VERSION`] bump; from 6 on `api_size` says how much of the table
+/// the host filled, so an APPENDED entry needs no bump — a plugin asks
+/// (`has_theme_enum_word`, `has_mask_quad`) before calling one its host
+/// may end before, and treats an absent entry like a MISSING token:
+/// degrade, don't demand. Reordering or removing a field is still a
+/// break: that is what the version check exists to catch.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct HostApi {
     /// Version of this interface, checked before anything else is used.
     pub abi_version: u32,
+    /// The host's own `sizeof(HostApi)`. A plugin treats an entry past
+    /// this size as absent — the mirror of [`PluginApi::api_size`], and
+    /// what lets THIS table grow by appending without a version break.
+    pub api_size: u32,
     /// Reports a sound event into the host's queue.
     pub emit_sound: extern "C" fn(event: u32),
     /// Number of registered widgets in the host.
@@ -233,6 +241,76 @@ pub struct HostApi {
     /// Bumped on every theme swap (reload, mood, resize). A plugin caching
     /// resolved values invalidates when this moves.
     pub theme_epoch: extern "C" fn(ctx: *mut c_void) -> u32,
+
+    // ------------------------------------------------------------------
+    // Appended past the version-6 minimum. `api_size` gates each entry:
+    // a plugin asks `has_*` first, and an absent entry degrades like a
+    // MISSING token — the widget draws without it, never through it.
+    // ------------------------------------------------------------------
+    /// The WORD an enum token currently resolves to, written into `buf`
+    /// as UTF-8; returns the bytes written — `min(word, cap)`, so a
+    /// short buffer gets a prefix, exactly like `shell_cwd` — and 0 for
+    /// a token with no word. The compiled twin of the script renderer's
+    /// `theme_word`: an OPEN word set (a role binding, a corner mode)
+    /// names a word rather than a member of a closed list, so the caller
+    /// wants the text itself where [`HostApi::theme_enum`] answers the
+    /// index. Init-time, like [`HostApi::theme_token`]: call at widget
+    /// init, cache, invalidate on [`HostApi::theme_epoch`] — never
+    /// inside a draw loop.
+    pub theme_enum_word:
+        extern "C" fn(ctx: *mut c_void, id: u32, buf: *mut u8, cap: u32) -> u32,
+    /// One quad sampling the soft-mask sprite — the piece of the host's
+    /// sprite glow and shadow path a plugin can reach, so a plugin panel
+    /// can glow the way `object::window::panel_edge_glow` does. `pts` is
+    /// four corners, eight floats, exactly like [`HostApi::quad`]; `uv`
+    /// is eight floats in the SPRITE's own 0..1 space, clamped by the
+    /// host and mapped into the atlas's mask band — the atlas layout
+    /// never crosses the boundary, and glyph texels are unreachable
+    /// whatever numbers arrive. `flags`: [`MASK_QUAD_ADD`] renders the
+    /// quad additively (light — the glow path); without it the quad
+    /// covers (the shadow path). The sprite is the 64-texel soft radial
+    /// disk whose stretchable middle is texels 31..33, so strips lie
+    /// exactly as the host's own nine-slice lays them.
+    pub mask_quad: extern "C" fn(
+        ctx: *mut c_void,
+        pts: *const f32,
+        uv: *const f32,
+        c: ColorC,
+        flags: u32,
+    ),
+}
+
+/// The prefix of [`HostApi`] every version-6 host must fill — everything
+/// up to and including `theme_epoch`. [`attach`] refuses a table shorter
+/// than this; entries appended after it are optional by `api_size`.
+pub const HOST_API_SIZE_MIN: usize = std::mem::offset_of!(HostApi, theme_enum_word);
+
+/// The prefix that includes `theme_enum_word`; a host whose `api_size`
+/// reaches this far answers it.
+pub const HOST_API_HAS_ENUM_WORD: usize =
+    std::mem::offset_of!(HostApi, theme_enum_word) + std::mem::size_of::<usize>();
+
+/// The prefix that includes `mask_quad`.
+pub const HOST_API_HAS_MASK_QUAD: usize =
+    std::mem::offset_of!(HostApi, mask_quad) + std::mem::size_of::<usize>();
+
+/// [`HostApi::mask_quad`]: blend additively — the quad adds light, the
+/// way the host's own glow does. Without it the quad covers, the way its
+/// shadows do.
+pub const MASK_QUAD_ADD: u32 = 1;
+
+impl HostApi {
+    /// Whether this host's table reaches `theme_enum_word` at all.
+    /// Asked once, at attach or first use, never per frame.
+    pub fn has_theme_enum_word(&self) -> bool {
+        self.api_size as usize >= HOST_API_HAS_ENUM_WORD
+    }
+
+    /// Whether this host's table reaches `mask_quad`. Absent: no glow —
+    /// the same degradation the renderer's texture-miss failsafe applies.
+    pub fn has_mask_quad(&self) -> bool {
+        self.api_size as usize >= HOST_API_HAS_MASK_QUAD
+    }
 }
 
 /// What a plugin exports: how to make one of its widgets, draw it and
@@ -579,12 +657,14 @@ pub struct StateStyleC {
     pub elevation: f32,
 }
 
-// 6: `PluginApi` gained `api_size` (so the host can measure a plugin's
-// table) and the appended `chrome` entry — the host-drawn container of
-// u2 §4. Inserting `api_size` moved every later field, which is exactly
-// the break the version number exists to name; from here on an APPENDED
-// `PluginApi` entry needs no bump, because `api_size` says how much of
-// the table a plugin actually filled.
+// 6: BOTH tables gained `api_size` right after `abi_version` — the host
+// measures a plugin's table, a plugin measures the host's. Inserting a
+// field moved every later one, which is exactly the break the version
+// number exists to name; from here on an APPENDED entry on either side
+// needs no bump, because `api_size` says how much of a table its writer
+// actually filled. `PluginApi` grows past `chrome` that way, `HostApi`
+// past `theme_epoch` (`theme_enum_word` and `mask_quad` are the first,
+// gated by `HostApi::has_*` on the plugin side).
 pub const ABI_VERSION: u32 = 6;
 
 /// A widget's container declaration, crossing the boundary (u2 §4.3).
@@ -680,6 +760,12 @@ pub unsafe fn attach(api: *const HostApi) -> bool {
     if api.is_null() || (*api).abi_version < ABI_VERSION {
         return false;
     }
+    // A version-6 table carries `api_size`. One that does not even reach
+    // the version's mandatory prefix is malformed rather than merely
+    // old, and reading any entry from it would run off its end.
+    if ((*api).api_size as usize) < HOST_API_SIZE_MIN {
+        return false;
+    }
     API.store(api as *mut HostApi, Ordering::Release);
     ATTACHED.store(true, Ordering::Release);
     true
@@ -736,6 +822,18 @@ mod tests {
     /// what keeps the ordinary case free of ceremony.
     #[test]
     fn a_plain_program_owns_its_state() {
+        assert!(is_host());
+    }
+
+    /// A right-versioned table still has to reach the version's own
+    /// mandatory prefix: `api_size` is how a truncated or garbage table
+    /// is caught before any entry is read off its end.
+    #[test]
+    fn a_host_table_shorter_than_the_minimum_is_refused() {
+        let mut wrong = *crate::plugin::host_api();
+        wrong.api_size = 8;
+        assert!(!unsafe { attach(&wrong) }, "a truncated host table must be refused");
+        assert!(api().is_none());
         assert!(is_host());
     }
 

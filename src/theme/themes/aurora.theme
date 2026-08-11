@@ -64,7 +64,7 @@ hexcell.fill_top = alpha(@accent.secondary, 0.38)
 # hue with a soft outer glow", and photographed in image 2 as a bloom
 # thrown onto the wall behind the monitor. `default` ships every glow class
 # off (5.13); a theme that wants any must name the classes it wants, and
-# aurora wants three. Colour stays `element` throughout: the glow is the
+# aurora wants four. Colour stays `element` throughout: the glow is the
 # thing's own colour, so it re-skins with the palette like everything else.
 [glow]
 
@@ -91,6 +91,18 @@ text_alert.enabled   = true
 text_alert.radius    = 0.90u
 text_alert.alpha     = 0.40
 text_alert.mode      = text4
+
+# The launcher grid's resting cells: image 1 puts "each icon in its own
+# bordered square" (5.18's icon_tile preset), and each square's mint ring
+# blooms like the panel edges around it — glow.icon_idle's own citation
+# (5.13: "the resting icons of the launcher grid; images 1, 8"). The tile
+# ring wears the class through `shape.icon_tile.glow`, already
+# @glow.icon_idle in the master. Fainter and tighter than panel_edge: a
+# grid of small squares is many rings close together, and image 1 reads
+# them as texture beside the panels, not as a second row of panels.
+icon_idle.enabled    = true
+icon_idle.radius     = 0.55u
+icon_idle.alpha      = 0.28
 
 
 # ---------------------------------------------------------------- decor

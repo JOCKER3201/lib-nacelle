@@ -58,8 +58,8 @@ exist. Regression test:
 
 `enforce.rs` (contrast floors and separation repair), `encode.rs` (output encoding per
 swapchain format — `bake.rs` does the sRGB encode inline meanwhile), `abi.rs` (the
-nineteen appended `HostApi` entries), `mask.rs` and `plate.rs` (both need renderer
-work from Appendix B). The structured views of §7.1 — `ClassStyle[49][7]`,
+nineteen appended `HostApi` entries) and `mask.rs` (needs renderer work from
+Appendix B). `plate.rs` exists — see "The decoration plates" below. The structured views of §7.1 — `ClassStyle[49][7]`,
 `SeverityStyle`, `Motion`, `Type`, `ShapeSpec`, `Gradient`, `IconDef` — are not
 materialised; `ResolvedTheme` is the flat form. `em` lengths bake to their bare
 multiplier until `Ctx` carries a per-panel type cache. §5.10's severity generation and
@@ -75,10 +75,23 @@ draws the additive sprite ring after every panel-class stroke it owns —
 `window::frame` (settings, editor, popups) and `winframe`'s outer ring.
 Three deferrals, each deliberate:
 
-- **Plugin panels can't glow yet.** The four widget plugins draw their frames
-  with `polyline` over the ABI; the sprite path needs the mask uv and the
-  additive image handle, neither of which crosses ABI 5. This joins the
-  enum-word gap on the ABI 6 list.
+- **Plugin rings glow over ABI 6 now** (11.08, was: "plugin panels can't
+  glow yet"). `HostApi::mask_quad` carries the sprite path across the
+  boundary, and the filesystem plugin is the worked example: its tile ring
+  wears the class `shape.icon_tile.glow` names — the reference read as a
+  WORD through `theme_enum_word`, the class's `enabled`/`radius`/`alpha`
+  resolved from it, `glow.alpha_scale` folded, tint from the rung's own
+  edge (the `element` rule) — and extrudes its chamfer octagon by the
+  radius, one additive quad per segment, `glow_ring`'s 31..33 strip in the
+  sprite's own space. `aurora` opts `icon_idle` in (image 1's bordered
+  launcher squares); every other shipped default stays off, so `default`
+  renders pixel-identical. The same entry closed the enum-word gap the
+  badge pills documented: the shell's SCROLL pill and the filesystem's
+  I/O-error pill now follow `severity.<r>.badge_style`'s word
+  (solid/hollow, `hatched`/`hollow_dashed` degrading to hollow as
+  `ui::badge` degrades them) instead of hardcoding the master's
+  arrangement. The panel FRAMES themselves stayed the host's (u2 §4), so
+  the original sentence's subject no longer exists.
 - **`focus_ring` waits for the focus system.** `winframe` swaps its edge
   colour on focus (§5.21) and the glow follows that colour through the
   `element` rule, but the separate `[glow] focus_ring` class has no consumer
@@ -86,3 +99,48 @@ Three deferrals, each deliberate:
 - **`panel_edge.color` only honours `element`.** The master types the token
   by its default, a bare word; the colour arm of the union is unimplemented
   and no shipped theme uses it.
+
+## The decoration plates (plate.rs v2, 11.08)
+
+Both of §8's plates are baked: `bake_backdrop` (traces, grid, starfield, bottom
+vignette — z 0, inside the glass snapshot) and `bake_overlay` (scanlines, noise, top
+vignette — z 70, one quad after everything themed). `nacelle-desktop` bakes both on
+one worker per (theme epoch × surface size) key and owns one texture per plate.
+
+**Tokens read, per layer** — every one from `default.theme`'s `[decor.*]` blocks;
+a bake happens only under `decor.enabled = true` AND `performance.decor != none`,
+and a layer only under its own `enabled = true`:
+
+- `decor.traces.*`: `cell`, `density`, `width`, `color`, `alpha`, `via_radius`,
+  `via_alpha`, `seed`.
+- `decor.grid.*`: `spacing`, `width`, `alpha`, `major_every`, `major_alpha`, and
+  `color` — **a token r1's table omits**, adopted into the master as
+  `@text.primary` so the grid draws in the theme's own ink instead of the RAW
+  fallback grey. A theme wanting an accent-ruled grid overrides one token.
+- `decor.starfield.*`: `count`, `size_min`/`size_max`, `alpha_min`/`alpha_max`,
+  `color`, `seed`. A star under one device pixel keeps one texel and folds its
+  size into alpha by its squared diameter, as the size token's comment states.
+- `decor.vignette.*`: `strength`, `radius`, `color`, `shape`, and `layer` — now
+  honoured: `backdrop` bakes behind the panels, `overlay` (the master's default
+  word) over them. v1 forced everything onto the backdrop; crimson and lockdown,
+  whose comments already said "overlay", got their image-4/5 look the moment the
+  word started to matter.
+- `decor.scanlines.*`: `period`, `duty`, `alpha`, `color`. **`drift` is NOT a bake
+  input** — it is per-frame UV motion of the overlay quad (host accumulator over
+  `image_uv`, quantised to whole texels) and is deferred with the motion pass; the
+  bake is the pattern at rest, which is exactly `drift = 0.0`, the master's value.
+  No shipped theme enables scanlines.
+- `decor.noise.*`: `alpha`, `grain`, `chroma`, `seed`. Grain under one device
+  pixel clamps to per-pixel cells.
+
+Every `seed = 0` derives from the theme's localised name (FNV-1a), so two silent
+themes differ; a non-zero seed pins the pattern bit for bit.
+
+**For the adoption agent — what a theme must set to see each layer:**
+`decor.enabled = true` plus the layer's `enabled = true`; nothing else, every
+parameter has a master default. `backdrop.source` is NOT consulted by the host
+yet — either plate's quad is drawn whenever any of its layers is on (azure and
+instrument write `source = plate` for §5.15 conformance, and the day the host
+honours the token they are already correct). Shipped users today: azure
+(starfield), instrument (grid + traces), aurora/crimson/lockdown (traces),
+crimson/lockdown (vignette, overlay layer).

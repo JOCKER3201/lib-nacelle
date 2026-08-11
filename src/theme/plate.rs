@@ -1,48 +1,47 @@
-//! The decoration plate — the CPU rasteriser of DECISION M10 / r1 §8.
+//! The decoration plates — the CPU rasteriser of DECISION M10 / r1 §8.
 //!
-//! All STATIC decoration is baked once, on the CPU, into one screen-sized
-//! RGBA image — the BACKDROP plate: z 0, under every panel, inside the
-//! glass snapshot. Per frame it costs one image quad (6 verts); the bake
+//! All STATIC decoration is baked once, on the CPU, into TWO screen-sized
+//! RGBA images. Per frame each costs one image quad (6 verts); the bake
 //! itself runs only when the theme or the surface size changes, never per
 //! frame. The application registers the pixels through the renderer's
 //! ordinary image path (`create_texture` / `update_texture`) and draws
-//! them with `DrawList::image` before anything else.
+//! them with `DrawList::image`:
 //!
-//! v1 bakes the three backdrop layers the console family uses, in the
-//! z-order the master documents for `backdrop.plate.layers = []`
-//! (traces, grid, starfield, vignette):
+//! * the BACKDROP plate — z 0, before anything else and therefore inside
+//!   the glass snapshot. Layers, in the master's stated order:
+//!   `decor.traces.*` (PCB traces: a seeded random walk on a cell grid),
+//!   `decor.grid.*` (the measuring grid, minor and major lines),
+//!   `decor.starfield.*` (image 6's seeded stars), and the vignette when
+//!   `decor.vignette.layer = backdrop`.
+//! * the OVERLAY plate (v2) — z 70, one quad after everything themed:
+//!   `decor.scanlines.*`, `decor.noise.*` (film grain), and the vignette
+//!   when `decor.vignette.layer = overlay` — the master's own word, the
+//!   one that darkens the panels too, as image 4 shows.
 //!
-//! * `decor.traces.*`  — PCB traces: a seeded random walk on a cell grid.
-//!   The `seed` token pins the pattern; `0` derives it from the theme's
-//!   name, so two themes differ without either authoring a number.
-//! * `decor.grid.*`    — the measuring grid, minor and major lines.
-//! * `decor.vignette.*`— the corner darkening. The master lets a theme
-//!   put it on either plate; until the OVERLAY plate exists (v2) both
-//!   words land here, on the backdrop — behind the panels instead of
-//!   over them, stated rather than silent.
+//! Every `seed` token pins its layer's pattern; `0` derives it from the
+//! theme's name, so two silent themes still differ without either
+//! authoring a number.
 //!
-//! NOT plates, deliberately:
-//!
-//! * `decor.scanlines.*` and `decor.noise.*` belong to the overlay plate
-//!   (z 70, over the panels) and scanline drift is per-frame UV motion —
-//!   r1 §8.2 moves both to tiny `REPEAT` tiles. v2, with the overlay.
-//! * `decor.ribbons.*` are the ONLY animated decoration: real geometry
-//!   every frame, drawn by the host inside its panel, never baked.
-//! * `decor.starfield.*` is a backdrop layer (between grid and vignette
-//!   in the stated order) but no v1 theme enables it. v2.
+//! NOT a plate, deliberately: `decor.ribbons.*` are the ONLY animated
+//! decoration — real geometry every frame, drawn by the host inside its
+//! panel, never baked. `decor.scanlines.drift` is per-frame UV motion of
+//! the overlay quad and is the HOST's accumulator, not the bake's; this
+//! bake is the pattern at rest (see theme-engine-notes.md).
 //!
 //! Every colour and length below comes from a `decor.*` token; a token
 //! the master does not declare degrades through the engine's per-kind
 //! fallback (grey ink, zero, false) exactly like every other draw site —
 //! there is no design constant in this file. With every layer off — which
-//! is `default.theme`'s shipped state — [`bake_backdrop`] returns `None`
-//! and the program draws no plate at all: the governing principle's raw
-//! run grows no decoration.
+//! is `default.theme`'s shipped state — [`bake_backdrop`] and
+//! [`bake_overlay`] return `None` and the program draws no plate at all:
+//! the governing principle's raw run grows no decoration.
 //!
 //! Measured cost (Ryzen 7 9800X3D, release): a 2560x1440 bake with
-//! aurora's traces on lands in ~5 ms; all three layers stay inside the
-//! tens-of-ms budget. The application runs it on a worker thread
-//! besides, so even a slow bake never blocks a frame.
+//! aurora's traces on lands in ~5 ms; every layer stays inside the
+//! tens-of-ms budget r1 §8 states per layer (the starfield is the
+//! cheapest of all — a few hundred tiny discs). The application runs the
+//! bakes on a worker thread besides, so even a slow bake never blocks a
+//! frame.
 
 use super::bake::ResolvedTheme;
 use super::color::Color;
@@ -69,6 +68,19 @@ pub fn bake_backdrop(w: u32, h: u32) -> Option<Plate> {
         return None;
     }
     Some(bake_params(&p, w, h))
+}
+
+/// Bake the overlay plate — z 70, the quad OVER everything themed:
+/// scanlines, grain, the top vignette. Same contract as
+/// [`bake_backdrop`]: `None` when nothing is enabled, one theme read at
+/// entry.
+pub fn bake_overlay(w: u32, h: u32) -> Option<Plate> {
+    let t = super::resolved();
+    let p = gather_overlay(t);
+    if p.is_empty() || w == 0 || h == 0 {
+        return None;
+    }
+    Some(bake_overlay_params(&p, w, h))
 }
 
 // ------------------------------------------------------------ parameters
@@ -103,6 +115,17 @@ struct GridP {
 }
 
 #[derive(Clone, Copy)]
+struct StarfieldP {
+    count: u32,
+    size_min: f32,
+    size_max: f32,
+    alpha_min: f32,
+    alpha_max: f32,
+    color: Color,
+    seed: u64,
+}
+
+#[derive(Clone, Copy)]
 struct VignetteP {
     strength: f32,
     radius: f32,
@@ -110,39 +133,127 @@ struct VignetteP {
     shape: Falloff,
 }
 
+#[derive(Clone, Copy)]
+struct ScanlinesP {
+    period: f32,
+    duty: f32,
+    alpha: f32,
+    color: Color,
+}
+
+#[derive(Clone, Copy)]
+struct NoiseP {
+    alpha: f32,
+    grain: f32,
+    chroma: f32,
+    seed: u64,
+}
+
+/// The backdrop plate's layers, in the master's stated z-order.
 #[derive(Default)]
 struct Params {
     traces: Option<TracesP>,
     grid: Option<GridP>,
+    starfield: Option<StarfieldP>,
     vignette: Option<VignetteP>,
 }
 
 impl Params {
     fn is_empty(&self) -> bool {
-        self.traces.is_none() && self.grid.is_none() && self.vignette.is_none()
+        self.traces.is_none()
+            && self.grid.is_none()
+            && self.starfield.is_none()
+            && self.vignette.is_none()
     }
 }
 
-/// The cold-path token reads. Runs on a rebake only, so the by-name
-/// lookups are fine here — this is exactly the "resolve at init, not in
-/// the draw loop" split, with the bake standing in for init.
-fn gather(t: &ResolvedTheme) -> Params {
-    let id = |name: &str| super::id(name).unwrap_or(TokenId::MISSING);
-    let mut out = Params::default();
+/// The overlay plate's layers, in the master's stated z-order.
+#[derive(Default)]
+struct OverlayParams {
+    scanlines: Option<ScanlinesP>,
+    noise: Option<NoiseP>,
+    vignette: Option<VignetteP>,
+}
 
-    // The master switch, and the user's ceiling over the theme:
-    // `performance.decor = none` means no plates at all.
+impl OverlayParams {
+    fn is_empty(&self) -> bool {
+        self.scanlines.is_none() && self.noise.is_none() && self.vignette.is_none()
+    }
+}
+
+/// The master switch, and the user's ceiling over the theme:
+/// `performance.decor = none` means no plates at all.
+fn decor_off(t: &ResolvedTheme) -> bool {
+    let id = |name: &str| super::id(name).unwrap_or(TokenId::MISSING);
     if !t.flag(id("decor.enabled")) {
-        return out;
+        return true;
     }
     if let Some(perf) = super::id("performance.decor") {
         if super::enum_index(perf, "none") == Some(t.enum_of(perf)) {
-            return out;
+            return true;
         }
+    }
+    false
+}
+
+/// A layer's `seed` token: `0` derives from the theme's name, as the
+/// token's own comment specifies — two silent themes still differ.
+fn seed_or_theme_name(seed: f32) -> u64 {
+    if seed != 0.0 {
+        seed as u64
+    } else {
+        fnv(super::diagnostics().localised_name("").as_bytes())
+    }
+}
+
+/// The vignette, IF the theme enables it and `decor.vignette.layer`
+/// names the plate being gathered. The unmatched arm of the layer word
+/// is `overlay` — index 0 of the enum's word list, the master's own
+/// declared word — so a themeless run darkens over the panels, exactly
+/// as image 4 does.
+fn gather_vignette(t: &ResolvedTheme, overlay: bool) -> Option<VignetteP> {
+    let id = |name: &str| super::id(name).unwrap_or(TokenId::MISSING);
+    if !t.flag(id("decor.vignette.enabled")) {
+        return None;
+    }
+    let layer = super::id("decor.vignette.layer");
+    let le = layer.map(|l| t.enum_of(l));
+    let on_backdrop =
+        le.is_some() && le == layer.and_then(|l| super::enum_index(l, "backdrop"));
+    if on_backdrop == overlay {
+        return None;
+    }
+    let shape = super::id("decor.vignette.shape");
+    let e = shape.map(|s| t.enum_of(s));
+    let word = |w: &str| shape.and_then(|s| super::enum_index(s, w));
+    Some(VignetteP {
+        strength: t.px(id("decor.vignette.strength")),
+        radius: t.px(id("decor.vignette.radius")),
+        color: t.color(id("decor.vignette.color")),
+        // Index 0 of an enum's word list is the master's own declared
+        // word (`cos2`), so the unmatched arm IS the kind fallback.
+        shape: if e.is_some() && e == word("linear") {
+            Falloff::Linear
+        } else if e.is_some() && e == word("quad") {
+            Falloff::Quad
+        } else {
+            Falloff::Cos2
+        },
+    })
+}
+
+/// The cold-path token reads for the BACKDROP plate. Runs on a rebake
+/// only, so the by-name lookups are fine here — this is exactly the
+/// "resolve at init, not in the draw loop" split, with the bake standing
+/// in for init.
+fn gather(t: &ResolvedTheme) -> Params {
+    let id = |name: &str| super::id(name).unwrap_or(TokenId::MISSING);
+    let mut out = Params::default();
+    if decor_off(t) {
+        return out;
     }
 
     if t.flag(id("decor.traces.enabled")) {
-        let seed = t.px(id("decor.traces.seed"));
         out.traces = Some(TracesP {
             cell: t.px(id("decor.traces.cell")),
             density: t.px(id("decor.traces.density")),
@@ -151,20 +262,11 @@ fn gather(t: &ResolvedTheme) -> Params {
             alpha: t.px(id("decor.traces.alpha")),
             via_radius: t.px(id("decor.traces.via_radius")),
             via_alpha: t.px(id("decor.traces.via_alpha")),
-            // seed = 0 derives from the theme's name, as the token's own
-            // comment specifies — two silent themes still differ.
-            seed: if seed != 0.0 {
-                seed as u64
-            } else {
-                fnv(super::diagnostics().localised_name("").as_bytes())
-            },
+            seed: seed_or_theme_name(t.px(id("decor.traces.seed"))),
         });
     }
 
     if t.flag(id("decor.grid.enabled")) {
-        // The master declares no `decor.grid.color`; the read degrades
-        // through the engine's kind fallback (RAW ink) rather than any
-        // constant of this file's choosing.
         out.grid = Some(GridP {
             spacing: t.px(id("decor.grid.spacing")),
             width: t.px(id("decor.grid.width")),
@@ -175,26 +277,52 @@ fn gather(t: &ResolvedTheme) -> Params {
         });
     }
 
-    if t.flag(id("decor.vignette.enabled")) {
-        let shape = super::id("decor.vignette.shape");
-        let e = shape.map(|s| t.enum_of(s));
-        let word = |w: &str| shape.and_then(|s| super::enum_index(s, w));
-        out.vignette = Some(VignetteP {
-            strength: t.px(id("decor.vignette.strength")),
-            radius: t.px(id("decor.vignette.radius")),
-            color: t.color(id("decor.vignette.color")),
-            // Index 0 of an enum's word list is the master's own declared
-            // word (`cos2`), so the unmatched arm IS the kind fallback.
-            shape: if e.is_some() && e == word("linear") {
-                Falloff::Linear
-            } else if e.is_some() && e == word("quad") {
-                Falloff::Quad
-            } else {
-                Falloff::Cos2
-            },
+    if t.flag(id("decor.starfield.enabled")) {
+        out.starfield = Some(StarfieldP {
+            count: t.px(id("decor.starfield.count")).round().max(0.0) as u32,
+            size_min: t.px(id("decor.starfield.size_min")),
+            size_max: t.px(id("decor.starfield.size_max")),
+            alpha_min: t.px(id("decor.starfield.alpha_min")),
+            alpha_max: t.px(id("decor.starfield.alpha_max")),
+            color: t.color(id("decor.starfield.color")),
+            seed: seed_or_theme_name(t.px(id("decor.starfield.seed"))),
         });
     }
 
+    out.vignette = gather_vignette(t, false);
+    out
+}
+
+/// The cold-path token reads for the OVERLAY plate.
+fn gather_overlay(t: &ResolvedTheme) -> OverlayParams {
+    let id = |name: &str| super::id(name).unwrap_or(TokenId::MISSING);
+    let mut out = OverlayParams::default();
+    if decor_off(t) {
+        return out;
+    }
+
+    if t.flag(id("decor.scanlines.enabled")) {
+        out.scanlines = Some(ScanlinesP {
+            period: t.px(id("decor.scanlines.period")),
+            duty: t.px(id("decor.scanlines.duty")),
+            alpha: t.px(id("decor.scanlines.alpha")),
+            color: t.color(id("decor.scanlines.color")),
+            // `decor.scanlines.drift` is the HOST's per-frame UV
+            // accumulator over this quad, not a bake input: the plate is
+            // the pattern at rest (theme-engine-notes.md).
+        });
+    }
+
+    if t.flag(id("decor.noise.enabled")) {
+        out.noise = Some(NoiseP {
+            alpha: t.px(id("decor.noise.alpha")),
+            grain: t.px(id("decor.noise.grain")),
+            chroma: t.px(id("decor.noise.chroma")),
+            seed: seed_or_theme_name(t.px(id("decor.noise.seed"))),
+        });
+    }
+
+    out.vignette = gather_vignette(t, true);
     out
 }
 
@@ -230,7 +358,39 @@ fn bake_params(p: &Params, w: u32, h: u32) -> Plate {
         rasterise_grid(&mut cov, wi, hi, g);
         composite_coverage(&mut rgba, &cov, g.color);
     }
-    // (v2: decor.starfield sits here, between grid and vignette.)
+    if let Some(s) = &p.starfield {
+        cov.fill(0);
+        rasterise_starfield(&mut cov, wi, hi, s);
+        composite_coverage(&mut rgba, &cov, s.color);
+    }
+    if let Some(v) = &p.vignette {
+        rasterise_vignette(&mut rgba, wi, hi, v);
+    }
+
+    Plate {
+        w,
+        h,
+        rgba,
+        bake_ms: t0.elapsed().as_secs_f32() * 1000.0,
+    }
+}
+
+fn bake_overlay_params(p: &OverlayParams, w: u32, h: u32) -> Plate {
+    let t0 = std::time::Instant::now();
+    let (wi, hi) = (w as usize, h as usize);
+    let mut rgba = vec![0u8; wi * hi * 4];
+
+    // Same z-order the master states for the overlay: scanlines, noise,
+    // top vignette. Scanlines share the coverage-then-composite scheme;
+    // noise is per-pixel colour and blends directly, like the vignette.
+    if let Some(s) = &p.scanlines {
+        let mut cov = vec![0u8; wi * hi];
+        rasterise_scanlines(&mut cov, wi, hi, s);
+        composite_coverage(&mut rgba, &cov, s.color);
+    }
+    if let Some(n) = &p.noise {
+        rasterise_noise(&mut rgba, wi, hi, n);
+    }
     if let Some(v) = &p.vignette {
         rasterise_vignette(&mut rgba, wi, hi, v);
     }
@@ -478,6 +638,90 @@ fn rasterise_grid(cov: &mut [u8], w: usize, h: usize, p: &GridP) {
     }
 }
 
+fn rasterise_starfield(cov: &mut [u8], w: usize, h: usize, p: &StarfieldP) {
+    let a_lo = p.alpha_min.clamp(0.0, 1.0);
+    let a_hi = p.alpha_max.clamp(0.0, 1.0);
+    if p.count == 0 || a_lo.max(a_hi) <= 0.0 {
+        return;
+    }
+    let mut rng = Rng(p.seed);
+    // A fixed draw order per star — x, y, size, alpha — so the field is
+    // a pure function of the seed, and raising `count` adds stars to the
+    // same sky instead of reshuffling it.
+    for _ in 0..p.count {
+        let x = rng.frac() * w as f32;
+        let y = rng.frac() * h as f32;
+        let d = p.size_min + (p.size_max - p.size_min) * rng.frac();
+        let a = a_lo + (a_hi - a_lo) * rng.frac();
+        if d >= 1.0 {
+            fill_disc(cov, w, h, x, y, d * 0.5, (a * 255.0).round() as u8);
+        } else {
+            // Below a device pixel the size becomes alpha alone, as the
+            // token's own comment states: one texel at the star's alpha
+            // scaled by its squared diameter — the disc's area ratio.
+            let v = (a * (d * d).clamp(0.0, 1.0) * 255.0).round() as u8;
+            stamp_max(cov, w, h, x.floor() as i64, y.floor() as i64, v);
+        }
+    }
+}
+
+fn rasterise_scanlines(cov: &mut [u8], w: usize, h: usize, p: &ScanlinesP) {
+    let period = p.period;
+    let alpha = p.alpha.clamp(0.0, 1.0);
+    if !(period > 0.0) || alpha <= 0.0 {
+        return;
+    }
+    let dark = p.duty.clamp(0.0, 1.0) * period;
+    // The pattern is hard-edged, but its period (~2.3 px at 1080p) does
+    // not land on texel rows, so each ROW takes the exact length of dark
+    // band inside it — the resample the fixed texel grid forces, not an
+    // antialiasing choice. `dark_below(t)` is the total dark length in
+    // [0, t); a row's coverage is the difference across it.
+    let dark_below =
+        |t: f32| (t / period).floor() * dark + (t - (t / period).floor() * period).min(dark);
+    for y in 0..h {
+        let f = dark_below(y as f32 + 1.0) - dark_below(y as f32);
+        let v = (alpha * f.clamp(0.0, 1.0) * 255.0).round() as u8;
+        if v > 0 {
+            fill_box(cov, w, h, 0, y as i64, w as i64, y as i64 + 1, v);
+        }
+    }
+}
+
+fn rasterise_noise(rgba: &mut [u8], w: usize, h: usize, p: &NoiseP) {
+    let alpha = p.alpha.clamp(0.0, 1.0);
+    if alpha <= 0.0 {
+        return;
+    }
+    // Sub-pixel grain (0.14u is under a device pixel at 1080p) is
+    // per-pixel grain: a cell can never be smaller than a texel.
+    let g = p.grain.max(1.0);
+    let cols = ((w as f32 / g).ceil() as usize).max(1);
+    let rows = ((h as f32 / g).ceil() as usize).max(1);
+    let chroma = p.chroma.clamp(0.0, 1.0);
+    let mut rng = Rng(p.seed);
+    for cy in 0..rows {
+        let y0 = (cy as f32 * g).round() as i64;
+        let y1 = (((cy + 1) as f32 * g).round() as i64).min(h as i64);
+        for cx in 0..cols {
+            // Four draws per cell whatever `chroma` says, so sliding the
+            // token between 0 and 1 fades one grain field between
+            // monochrome and per-channel instead of reshuffling it.
+            let mono = rng.frac();
+            let (cr, cg, cb) = (rng.frac(), rng.frac(), rng.frac());
+            let mix = |c: f32| mono + (c - mono) * chroma;
+            let x0 = (cx as f32 * g).round() as i64;
+            let x1 = (((cx + 1) as f32 * g).round() as i64).min(w as i64);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = y as usize * w + x as usize;
+                    blend_px(rgba, i, mix(cr), mix(cg), mix(cb), alpha);
+                }
+            }
+        }
+    }
+}
+
 fn rasterise_vignette(rgba: &mut [u8], w: usize, h: usize, p: &VignetteP) {
     let strength = p.strength.clamp(0.0, 1.0);
     if strength <= 0.0 {
@@ -569,6 +813,111 @@ mod tests {
         let plate = bake_params(&p, 128, 128);
         let max_a = plate.rgba.chunks(4).map(|px| px[3]).max().unwrap();
         assert!(max_a <= (0.25f32 * 255.0).round() as u8 + 1, "alpha {max_a}");
+    }
+
+    /// The starfield is a pure function of its seed: same seed, same
+    /// sky, byte for byte; a different seed is a different sky.
+    #[test]
+    fn the_starfield_is_reproducible_from_its_seed() {
+        let p = |seed| Params {
+            starfield: Some(StarfieldP {
+                count: 120,
+                size_min: 0.8,
+                size_max: 1.6,
+                alpha_min: 0.2,
+                alpha_max: 0.8,
+                color: grey(1.0),
+                seed,
+            }),
+            ..Default::default()
+        };
+        let a = bake_params(&p(6), 320, 180);
+        let b = bake_params(&p(6), 320, 180);
+        let c = bake_params(&p(9), 320, 180);
+        assert_eq!(a.rgba, b.rgba);
+        assert_ne!(a.rgba, c.rgba, "two seeds baked one sky");
+        assert!(a.rgba.iter().any(|&v| v != 0), "the sky is starless");
+    }
+
+    /// No star exceeds `alpha_max`, and a sub-pixel star dims by its
+    /// squared diameter — the size token's "below a device pixel it
+    /// becomes alpha alone".
+    #[test]
+    fn a_star_never_exceeds_alpha_max_and_shrinks_into_alpha() {
+        let p = |size: f32| Params {
+            starfield: Some(StarfieldP {
+                count: 200,
+                size_min: size,
+                size_max: size,
+                alpha_min: 0.6,
+                alpha_max: 0.6,
+                color: grey(1.0),
+                seed: 42,
+            }),
+            ..Default::default()
+        };
+        let full = bake_params(&p(1.0), 160, 90);
+        let max_a = full.rgba.chunks(4).map(|px| px[3]).max().unwrap();
+        assert!(max_a <= (0.6f32 * 255.0).round() as u8 + 1, "alpha {max_a}");
+        let tiny = bake_params(&p(0.5), 160, 90);
+        let tiny_a = tiny.rgba.chunks(4).map(|px| px[3]).max().unwrap();
+        let want = (0.6f32 * 0.25 * 255.0).round() as u8;
+        assert!(tiny_a <= want + 1, "sub-pixel star too bright: {tiny_a}");
+        assert!(tiny_a > 0, "sub-pixel star vanished instead of dimming");
+    }
+
+    /// Scanlines: every texel row of one period carries exactly the dark
+    /// length that falls inside it, so a column sums to `duty` of the
+    /// pattern whatever the sub-pixel phase — and never exceeds `alpha`.
+    #[test]
+    fn scanlines_conserve_their_duty_across_texel_rows() {
+        let p = OverlayParams {
+            scanlines: Some(ScanlinesP {
+                period: 2.3,
+                duty: 0.34,
+                alpha: 0.8,
+                color: grey(1.0),
+            }),
+            ..Default::default()
+        };
+        // 230 rows = 100 whole periods, so the total dark length is exact.
+        let plate = bake_overlay_params(&p, 8, 230);
+        let col: f32 = (0..230)
+            .map(|y| plate.rgba[(y * 8) * 4 + 3] as f32 / 255.0)
+            .sum();
+        let want = 0.8 * 0.34 * 230.0;
+        assert!((col - want).abs() < 2.0, "column sum {col}, want ~{want}");
+        let max_a = plate.rgba.chunks(4).map(|px| px[3]).max().unwrap();
+        assert!(max_a <= (0.8f32 * 255.0).round() as u8 + 1, "alpha {max_a}");
+    }
+
+    /// Grain is seeded like every other layer — reproducible, never over
+    /// its own alpha — and `chroma = 0` is strictly monochrome.
+    #[test]
+    fn noise_is_seeded_and_monochrome_at_zero_chroma() {
+        let p = |seed, chroma| OverlayParams {
+            noise: Some(NoiseP {
+                alpha: 0.5,
+                grain: 1.0,
+                chroma,
+                seed,
+            }),
+            ..Default::default()
+        };
+        let a = bake_overlay_params(&p(3, 0.0), 64, 64);
+        let b = bake_overlay_params(&p(3, 0.0), 64, 64);
+        let c = bake_overlay_params(&p(4, 0.0), 64, 64);
+        assert_eq!(a.rgba, b.rgba);
+        assert_ne!(a.rgba, c.rgba, "two seeds baked one grain field");
+        for px in a.rgba.chunks(4) {
+            assert!(px[0] == px[1] && px[1] == px[2], "chroma leaked: {px:?}");
+            assert!(px[3] <= (0.5f32 * 255.0).round() as u8 + 1, "alpha {:?}", px[3]);
+        }
+        let d = bake_overlay_params(&p(3, 1.0), 64, 64);
+        assert!(
+            d.rgba.chunks(4).any(|px| px[0] != px[1] || px[1] != px[2]),
+            "chroma = 1 still monochrome"
+        );
     }
 
     /// The vignette is zero inside its radius and rises to `strength`

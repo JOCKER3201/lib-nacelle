@@ -689,6 +689,47 @@ impl DrawList {
         self.push_quad4(Some(id), p, uv, [tint.to_array(); 4]);
     }
 
+    /// One quad over the soft-mask sprite, adding or covering — the
+    /// "ADD_ATLAS with explicit UVs" endgame [`DrawList::image_uv`]'s
+    /// comment names, but with the coordinates in the SPRITE's own 0..1
+    /// space rather than the atlas's. Each uv is clamped to the unit
+    /// square and mapped into `band` (`FontSystem::mask_soft_uv()`,
+    /// passed by the caller — the list keeps no font-system state), so a
+    /// caller can address the disk's profile and nothing else: glyph
+    /// texels stay unreachable whatever numbers arrive, which is what
+    /// lets the plugin ABI expose this without policing its input. An
+    /// EMPTY band (u1 ≤ u0 or v1 ≤ v0) is the maskless degenerate
+    /// case and falls back to the atlas's white pixel — a solid quad,
+    /// raw but present, the same discipline as `soft_box`. `additive`
+    /// picks light (the ADD_ATLAS run — glow) over cover (the normal
+    /// atlas run — shadow).
+    pub fn mask_quad(
+        &mut self,
+        p: [[f32; 2]; 4],
+        uv: [[f32; 2]; 4],
+        band: (f32, f32, f32, f32),
+        color: Color,
+        additive: bool,
+    ) {
+        if color.a <= 0.0 {
+            return;
+        }
+        let (u0, v0, u1, v1) = band;
+        let m: [[f32; 2]; 4] = if u1 <= u0 || v1 <= v0 {
+            let (u, v) = FontSystem::white_uv();
+            [[u, v]; 4]
+        } else {
+            std::array::from_fn(|i| {
+                [
+                    u0 + (u1 - u0) * uv[i][0].clamp(0.0, 1.0),
+                    v0 + (v1 - v0) * uv[i][1].clamp(0.0, 1.0),
+                ]
+            })
+        };
+        let image = if additive { Some(ADD_ATLAS) } else { None };
+        self.push_quad4(image, p, m, [color.to_array(); 4]);
+    }
+
     /// Glow OUTSIDE the ring, in an additive run — through ADD_ATLAS the
     /// pipeline adds light instead of filming milk over a lit backdrop.
     ///
@@ -709,9 +750,9 @@ impl DrawList {
     /// An EMPTY `mask_uv` (u1 ≤ u0 or v1 ≤ v0) is the maskless
     /// degenerate case and falls back to the concentric-shell
     /// approximation below — a themeless run must still draw something
-    /// raw. Until the renderer binds ADD_ATLAS (r1 P7) both forms are
-    /// dropped by the texture-miss failsafe: the glow is absent, never
-    /// wrong.
+    /// raw. The renderer binds ADD_ATLAS since r1 P7, so both forms
+    /// RENDER; only an actual texture miss still drops the run — the
+    /// glow is then absent, never wrong.
     pub fn glow_ring(
         &mut self,
         r: Rect,
@@ -1344,6 +1385,47 @@ mod tests {
                 assert_eq!(dl.verts.len(), 54, "soft_box r={radius} rect={:?}", (r.w, r.h));
             }
         }
+    }
+
+    /// The plugin-facing mask quad: sprite-space uv is clamped into the
+    /// band, so whatever numbers cross the ABI the quad can sample the
+    /// soft disk and nothing else; `additive` picks the ADD_ATLAS run
+    /// over the normal one; an empty band degrades to the white pixel —
+    /// solid, raw, still present.
+    #[test]
+    fn mask_quad_stays_inside_the_band() {
+        let band = FontSystem::mask_soft_uv();
+        let (u0, v0, u1, v1) = band;
+        let p = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        let wild = [[-3.0, 0.5], [7.0, -2.0], [0.5, 9.0], [0.25, 0.75]];
+        let col = Color::rgb8(0, 255, 200);
+        let e = 1e-6;
+
+        let mut dl = DrawList::new();
+        dl.mask_quad(p, wild, band, col, true);
+        assert_eq!(dl.verts.len(), 6, "one quad, additive");
+        assert!(dl.runs.iter().any(|r| r.image == Some(ADD_ATLAS)));
+        for v in &dl.verts {
+            assert!(v.uv[0] >= u0 - e && v.uv[0] <= u1 + e, "u escaped the band: {}", v.uv[0]);
+            assert!(v.uv[1] >= v0 - e && v.uv[1] <= v1 + e, "v escaped the band: {}", v.uv[1]);
+        }
+
+        // Cover blend: the same geometry lands in the plain atlas run.
+        let mut dl = DrawList::new();
+        dl.mask_quad(p, wild, band, col, false);
+        assert_eq!(dl.verts.len(), 6);
+        assert!(dl.runs.iter().all(|r| r.image.is_none()));
+
+        // The maskless degenerate case: every vertex on the white pixel.
+        let mut dl = DrawList::new();
+        dl.mask_quad(p, wild, (0.0, 0.0, 0.0, 0.0), col, true);
+        let w = FontSystem::white_uv();
+        assert!(dl.verts.iter().all(|v| v.uv == [w.0, w.1]));
+
+        // A fully transparent colour draws nothing at all.
+        let mut dl = DrawList::new();
+        dl.mask_quad(p, wild, band, col.alpha(0.0), true);
+        assert!(dl.verts.is_empty());
     }
 
     /// The glow follows the corner it wraps: around a Round corner every
