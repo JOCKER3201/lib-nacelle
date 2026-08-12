@@ -180,17 +180,27 @@ const MENU_ITEM_ROLE: &str = "[menu]\nitem.role = caption\n";
 /// the roles the master binds today. `min_px` is written out with them:
 /// the floor belongs to the role, and a restatement that left it out would
 /// pass this stage for the wrong reason.
+///
+/// `face` is written out for exactly that reason too, and it is the key
+/// that made this stage fail the day the chrome stopped naming a font slot
+/// in Rust and started asking the role for one. A restatement missing its
+/// face is a role whose `face` nobody states, which is the interface slot
+/// by fallback — so the stage would have compared the master's `ui_medium`
+/// chrome against a `ui` one and blamed the binding. Each face is written
+/// as a reference to the role being restated rather than as a word, so
+/// this fixture cannot drift from the master the day a face moves there.
 fn restated(floor: &str) -> String {
     let mut s = String::from("[type]\n");
-    for (spare, size, track, case, lead) in [
-        ("spare0", "2.21u", "0.100em", "upper", "1.00"),
-        ("spare1", "2.47u", "0.140em", "smallcaps", "1.45"),
-        ("spare2", "2.99u", "0.120em", "smallcaps", "1.40"),
-        ("spare3", "2.47u", "0.020em", "none", "1.45"),
+    for (spare, size, track, case, lead, face) in [
+        ("spare0", "2.21u", "0.100em", "upper", "1.00", "@type.button.face"),
+        ("spare1", "2.47u", "0.140em", "smallcaps", "1.45", "@type.title.panel.face"),
+        ("spare2", "2.99u", "0.120em", "smallcaps", "1.40", "@type.title.window.face"),
+        ("spare3", "2.47u", "0.020em", "none", "1.45", "@type.body.face"),
     ] {
         s.push_str(&format!(
             "{spare}.size = {size}\n{spare}.min_px = {floor}\n{spare}.tracking = {track}\n\
-             {spare}.case = {case}\n{spare}.leading = {lead}\n{spare}.alpha = 1.0\n"
+             {spare}.case = {case}\n{spare}.leading = {lead}\n{spare}.alpha = 1.0\n\
+             {spare}.face = {face}\n"
         ));
     }
     s.push_str(
@@ -204,7 +214,8 @@ fn restated(floor: &str) -> String {
 /// of the role whose name used to be spelled in the code.
 const PANEL_ALPHA: &str = "[type]\nspare1.size = 2.47u\nspare1.min_px = @type.min_px\n\
                            spare1.tracking = 0.140em\nspare1.case = smallcaps\n\
-                           spare1.leading = 1.45\nspare1.alpha = 0.4\n\n\
+                           spare1.leading = 1.45\nspare1.alpha = 0.4\n\
+                           spare1.face = @type.title.panel.face\n\n\
                            [panel]\ntitle.role = spare1\n";
 
 /// A reordered row with a control dropped: close moves to the far left,

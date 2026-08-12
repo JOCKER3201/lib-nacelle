@@ -605,7 +605,23 @@ pub fn wrap_text(
     max_w: f32,
     track: f32,
 ) -> Vec<String> {
-    paint::wrap(&mut CtxSurface::new(ctx), face, px, text, max_w, track)
+    wrap_text_tab(ctx, face, px, text, max_w, track, false)
+}
+
+/// [`wrap_text`] broken under the role's figure box — the box the caller
+/// is about to DRAW the lines with, so the width a line was accepted at
+/// is the width it comes out at.
+#[allow(clippy::too_many_arguments)]
+pub fn wrap_text_tab(
+    ctx: &mut Ctx,
+    face: u8,
+    px: f32,
+    text: &str,
+    max_w: f32,
+    track: f32,
+    tabular: bool,
+) -> Vec<String> {
+    paint::wrap_tab(&mut CtxSurface::new(ctx), face, px, text, max_w, track, tabular)
 }
 
 /// How a `rows` block sizes its label column (u2 §3.1 #4).

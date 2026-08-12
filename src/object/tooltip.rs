@@ -219,12 +219,20 @@ impl Tooltips {
         // one family, which it could not while the wrap read the role and
         // the measure wrote FONT_UI.
         let face = role.font();
+        // …and `tooltip.role`'s figure box with it. The box has to reach
+        // all THREE of the readings below — the break, the width and the
+        // draw — or the box wraps to one ruler and paints to another: a
+        // tooltip is where a trimmed address or version number is
+        // finally read whole, and those are exactly the runs a boxed
+        // role widens. Read once, before the lines exist.
+        let tabular = role.tabular();
+        let fig = role.figures(ctx.fonts, face, px);
 
         // ---- the lines --------------------------------------------------
-        let lines = ui::wrap_text(ctx, face, px, &text, max_w, track);
+        let lines = ui::wrap_text_tab(ctx, face, px, &text, max_w, track, tabular);
         let mut text_w: f32 = 0.0;
         for l in &lines {
-            text_w = text_w.max(ctx.fonts.measure(face, px, l, track));
+            text_w = text_w.max(ctx.fonts.measure_fig(face, px, l, track, &fig));
         }
         let line_h = px * leading;
         let block_h = line_h * lines.len() as f32;
@@ -261,7 +269,7 @@ impl Tooltips {
         let ink = col(t.color(tok(&INK, "component.tooltip.text")));
         let mut ty = r.y + (h - block_h) / 2.0;
         for l in &lines {
-            ctx.dl.text(ctx.fonts, face, px, r.x + pad_x, ty, l, ink, track);
+            ctx.dl.text_fig(ctx.fonts, face, px, r.x + pad_x, ty, l, ink, track, &fig);
             ty += line_h;
         }
     }
@@ -308,6 +316,12 @@ fn place(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The face probe of this batch, written once in the field's own
+    // file and used by all three of its objects.
+    use crate::object::text_input::tests::{
+        all_in, drawn_runs, face_follows_the_theme, measure_in_child, report, role_word,
+    };
+    use crate::draw::DrawCmd;
 
     const DELAY: f32 = 600.0;
     const LINGER: f32 = 120.0;
@@ -483,5 +497,134 @@ mod tests {
         assert!(!anchor().contains(9.0, 11.0));
         assert_ne!(key("CPU"), key("RAM"));
         assert_eq!(key("CPU"), key("CPU"));
+    }
+
+    // ---- the type ladder reaches the tooltip -------------------------
+    //
+    // The box wraps, measures and draws in ONE family, and that family
+    // is `tooltip.role`'s `face`. The draw above has read the role since
+    // the type ladder landed; what it did not have is a MEASUREMENT,
+    // and "it reads the role" is a claim a `FONT_UI` written at the call
+    // site satisfies just as well for as long as the master happens to
+    // point the role at the interface face. So the claim is put to a
+    // theme that points it somewhere else, in a process of its own —
+    // the harness is the field's, one definition of proof for the three
+    // objects of this batch.
+
+    /// Long enough to WRAP: every line is a text call of its own, so a
+    /// wrap that ruled in one face and a draw that inked in another
+    /// would show up here as two slots in one box.
+    ///
+    /// Mostly FIGURES, because the second claim below is about the box
+    /// they step by: on a text of letters a break ruled without the box
+    /// and drawn with it would overrun by a hair, and a hair is a thing
+    /// a test can miss. Addresses are what a trimmed cell holds anyway —
+    /// they are why the tooltip exists.
+    const TIP: &str = "192.168.000.101 10.000.000.255 172.016.254.001 unreachable since \
+                       00:00:01 — 255.255.255.000 answered 11.011.011.011 instead";
+
+    /// The tooltip's text is set in the face `tooltip.role` names, and
+    /// follows a theme that moves it.
+    #[test]
+    fn the_box_is_set_in_the_face_its_role_names() {
+        face_follows_the_theme("tooltip", "object::tooltip::tests::child_tip_face");
+    }
+
+    /// The figure box reaches all THREE readings this object makes of
+    /// one string: the break, the width of the box that holds it, and
+    /// the draw. `type.<tooltip.role>.tabular` is off in the master, so
+    /// the advance is zero until a theme asks — the negative control —
+    /// and the line that decides the claim is `OVER`: the widest line
+    /// MEASURED UNDER THE BOX IT WAS DRAWN WITH, against the width the
+    /// wrap was given. A break ruled proportionally and inked under a
+    /// box overruns by the difference, and on a text of addresses that
+    /// difference is a character wide.
+    #[test]
+    fn the_lines_are_broken_under_the_box_they_are_drawn_with() {
+        const CHILD: &str = "object::tooltip::tests::child_tip_face";
+        let master = measure_in_child(CHILD, None);
+        let plain: f32 = master.field("ADVANCE=").parse().expect("ADVANCE= is a number");
+        assert_eq!(
+            plain, 0.0,
+            "the master ships `type.{}.tabular = false` and the lines were boxed anyway",
+            master.role
+        );
+        let path = std::env::temp_dir()
+            .join(format!("nacelle-box-tooltip-{}.theme", std::process::id()));
+        std::fs::write(
+            &path,
+            format!(
+                "[meta]\nschema = 1\nname = \"box tooltip\"\nbase = \"default\"\n\n\
+                 [type]\n{}.tabular = true\n",
+                master.role
+            ),
+        )
+        .expect("the fixture theme must be writable");
+        let boxed = measure_in_child(CHILD, Some(&path));
+        let _ = std::fs::remove_file(&path);
+        let a: f32 = boxed.field("ADVANCE=").parse().expect("ADVANCE= is a number");
+        assert!(
+            a > 0.0,
+            "a theme put `type.{}.tabular = true` and the lines were still drawn \
+             proportionally:\n{}",
+            master.role,
+            boxed.log
+        );
+        let over: f32 = boxed.field("OVER=").parse().expect("OVER= is a number");
+        assert!(
+            over <= 0.0,
+            "a line came out {over} px wider than the `tooltip.max_w` it was broken \
+             to fit: the wrap ruled one way and the draw inked another\n{}",
+            boxed.log
+        );
+    }
+
+    /// The children of the two tests above: one tooltip that has waited
+    /// out its delay, drawn for real. `drawn_runs` keeps the whole
+    /// command, so the face slot, the size, the tracking and the FIGURE
+    /// ADVANCE each line was made under are read from the register.
+    #[test]
+    #[ignore = "measured in a process of its own by the tests above"]
+    fn child_tip_face() {
+        let role = role_word("tooltip.role");
+        let want = crate::ui::role(&role).font();
+        let cmds = drawn_runs(|ctx| {
+            let mut tips = Tooltips::new();
+            // The pointer settled two seconds ago — the caller's clock
+            // is what `request` takes — so this one frame both arms the
+            // target and shows it.
+            tips.request(key("cpu"), Rect::new(100.0, 100.0, 200.0, 40.0), TIP, ctx.t - 2.0);
+            tips.draw(ctx);
+        });
+        let runs: Vec<(u8, f32, f32, f32, String)> = cmds
+            .iter()
+            .map(|c| match c {
+                DrawCmd::Text { font, px, tracking, tabular, text, .. } => {
+                    (*font, *px, *tracking, *tabular, text.clone())
+                }
+                _ => unreachable!("drawn_runs answers text commands"),
+            })
+            .collect();
+        let drawn: Vec<(u8, String)> =
+            runs.iter().map(|r| (r.0, r.4.clone())).collect();
+        assert!(
+            drawn.len() > 1,
+            "the text fitted on one line, so the WRAP — the one ruler that is taken \
+             apart from the draw — was never exercised: {drawn:?}"
+        );
+        all_in(&drawn, want);
+        // Every line re-measured under the box it carries, against the
+        // budget the wrap was given. The theme is this process's own, so
+        // `tooltip.max_w` is the number the object worked to.
+        let mut fonts = crate::font::FontSystem::new();
+        let max_w = theme::resolved().px(theme::id("tooltip.max_w").unwrap_or(TokenId::MISSING));
+        let mut widest = 0.0f32;
+        for (font, px, track, adv, text) in &runs {
+            let fig = crate::ui::figures(&mut fonts, *font, *px, *adv > 0.0);
+            widest = widest.max(fonts.measure_fig(*font, *px, text, *track, &fig));
+        }
+        println!("ADVANCE={}", runs[0].3);
+        println!("OVER={}", widest - max_w);
+        report(&role, drawn[0].0, &drawn);
     }
 }
