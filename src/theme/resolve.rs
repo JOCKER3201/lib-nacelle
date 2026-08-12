@@ -385,9 +385,12 @@ impl expr::Env for Resolver<'_> {
 /// same guarantee: stage 2 itself failing still yields a running program.
 pub fn fallback(schema: &Schema, id: TokenId) -> Value {
     match schema.kind(id) {
-        // A visible, un-pretty grey. Never a guess at what the author meant:
-        // the accompanying warning is the point.
-        Kind::Color => Value::Color(Color::new(0.25, 0.25, 0.25, 1.0)),
+        // The raw look, which is the same raw look a MISSING token draws:
+        // an expression that would not resolve and a token that was never
+        // declared are the same story to a reader, and telling them apart
+        // by two shades of grey nobody can name is not a diagnostic — the
+        // accompanying warning is.
+        Kind::Color => Value::Color(super::raw::INK),
         Kind::Scalar => Value::Num(0.0),
         Kind::Flag => Value::Bool(false),
         Kind::Enum => Value::Word(

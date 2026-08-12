@@ -102,6 +102,13 @@ struct TracesP {
     via_radius: f32,
     via_alpha: f32,
     seed: u64,
+    /// The walk's own shape: how long one run of trace is, and how often
+    /// it bends. Texture, like the cell pitch and the density beside it,
+    /// and it used to be four numbers written into this file.
+    run_min: i64,
+    run_max: i64,
+    turn_chance: f32,
+    turn_bias: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -263,6 +270,10 @@ fn gather(t: &ResolvedTheme) -> Params {
             via_radius: t.px(id("decor.traces.via_radius")),
             via_alpha: t.px(id("decor.traces.via_alpha")),
             seed: seed_or_theme_name(t.px(id("decor.traces.seed"))),
+            run_min: t.px(id("decor.traces.run_min")) as i64,
+            run_max: t.px(id("decor.traces.run_max")) as i64,
+            turn_chance: t.px(id("decor.traces.turn_chance")),
+            turn_bias: t.px(id("decor.traces.turn_bias")),
         });
     }
 
@@ -573,15 +584,23 @@ fn rasterise_traces(cov: &mut [u8], w: usize, h: usize, p: &TracesP) {
         let mut cx = rng.below(cols as u64) as i64;
         let mut cy = rng.below(rows as u64) as i64;
         let mut dir = rng.below(8) as usize;
-        let len = 3 + rng.below(12) as i64;
+        // A run between the theme's two lengths, inclusive at both ends.
+        // Ordered here rather than trusted: a theme that writes the pair
+        // the wrong way round asks for a range, not for a panic.
+        let (lo, hi) = (p.run_min.min(p.run_max).max(0), p.run_min.max(p.run_max).max(0));
+        let len = lo + rng.below((hi - lo + 1) as u64) as i64;
         let (sx, sy) = centre(cx, cy);
         fill_disc(cov, w, h, sx, sy, p.via_radius, via_v);
         for _ in 0..len {
-            // PCB bends: an occasional 45-degree turn, never a U-turn.
+            // PCB bends: an occasional 45-degree turn, never a U-turn —
+            // the walk turns by one eighth at a time, so it cannot double
+            // back. `turn_bias` splits the bends that happen between the
+            // two hands; at 0.5 the walk wanders, away from it it spirals.
             let turn = rng.frac();
-            if turn < 0.18 {
+            let cw = p.turn_chance * p.turn_bias.clamp(0.0, 1.0);
+            if turn < cw {
                 dir = (dir + 1) % 8;
-            } else if turn < 0.36 {
+            } else if turn < p.turn_chance {
                 dir = (dir + 7) % 8;
             }
             let (dx, dy) = DIRS[dir];
@@ -782,6 +801,10 @@ mod tests {
                 via_radius: 1.5,
                 via_alpha: 0.6,
                 seed,
+                run_min: 3,
+                run_max: 14,
+                turn_chance: 0.36,
+                turn_bias: 0.5,
             }),
             ..Default::default()
         };
@@ -807,6 +830,10 @@ mod tests {
                 via_radius: 0.0,
                 via_alpha: 0.0,
                 seed: 3,
+                run_min: 3,
+                run_max: 14,
+                turn_chance: 0.36,
+                turn_bias: 0.5,
             }),
             ..Default::default()
         };

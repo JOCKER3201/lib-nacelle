@@ -21,7 +21,7 @@
 //! class `menu.item` tokens and the `motion.menu_unfold` clock; the
 //! module holds no literal of its own.
 
-use crate::draw::{Corner, CornerStyle};
+use crate::draw::Corner;
 use crate::focus::{Key, KeyEv, Mods};
 use crate::font::FONT_UI;
 use crate::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
@@ -268,6 +268,8 @@ impl MenuState {
         static BORDER_C: OnceLock<TokenId> = OnceLock::new();
         static BORDER_W: OnceLock<TokenId> = OnceLock::new();
         static CORNER: OnceLock<TokenId> = OnceLock::new();
+        static CORNER_MODE: OnceLock<TokenId> = OnceLock::new();
+        static CORNER_IDX: OnceLock<(Option<u16>, Option<u16>)> = OnceLock::new();
         static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
         static ROW_H: OnceLock<TokenId> = OnceLock::new();
         static PAD: OnceLock<TokenId> = OnceLock::new();
@@ -401,9 +403,17 @@ impl MenuState {
 
         // ---- the box ----------------------------------------------------
         let drawn = Rect::new(self.rect.x, self.rect.y, w, pad * 2.0 + visible_h);
-        let corner = t.px(tok(&CORNER, "menu.corner")).max(0.0).min(drawn.h / 2.0);
-        let c = [Corner { style: CornerStyle::Round, size: corner }; 4];
-        let seg = super::window::corner_segments(t, &SEGMENTS, corner);
+        // The radius says how far, `menu.corner_mode` says how — and the
+        // master points it at the window frame's, so the menu the window
+        // draws (winframe.rs) and this one cannot disagree about shape.
+        let style =
+            super::window::corner_style(t, tok(&CORNER_MODE, "menu.corner_mode"), &CORNER_IDX);
+        // `Corner::sized` is where §5.0's `pill` becomes a radius. A
+        // `.max(0.0)` here would swallow it: the master would write
+        // "capsule" and the menu would come out square, silently.
+        let corner = Corner::sized(style, t.px(tok(&CORNER, "menu.corner")), drawn);
+        let c = [corner; 4];
+        let seg = super::window::corner_segments(t, &SEGMENTS, corner.size);
         ctx.dl.ring_fill(drawn, &c, seg, col(t.bed(tok(&FILL, "component.menu.fill"))));
         let bw = t.px(tok(&BORDER_W, "menu.border")).max(0.0);
         if bw > 0.0 {

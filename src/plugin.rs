@@ -361,8 +361,19 @@ fn corners_in(style: u32, radius: f32, r: RectC) -> ([Corner; 4], u8) {
     };
     // Half the short side is the geometric ceiling: past it the arcs of
     // two corners would cross and the outline would fold on itself.
-    let size = radius.max(0.0).min(r.w.min(r.h) / 2.0);
-    let seg = ring_segments(size, 0.25, 16);
+    //
+    // §5.0's `pill` is translated on the SENDING side (`AbiSurface::
+    // ring_fill`), so a length is what should arrive — but a plugin that
+    // builds this call by hand, in a language with no libnacelle in it,
+    // can still forward a raw `*.corner` token. Reading the sentinel
+    // here as well costs one compare and is the difference between the
+    // capsule the theme wrote and a silent square.
+    let size = crate::theme::corner_radius(radius, r.w, r.h).min(r.w.min(r.h) / 2.0);
+    // The ceiling is the theme's `corner.segments`, exactly as it is on
+    // the host's own surface: a plugin's ring and a panel's ring are the
+    // same shape drawn through two doors, and a number written here would
+    // be the one place a theme could not reach.
+    let seg = ring_segments(size, 0.25, crate::view::surface::corner_segments());
     ([Corner { style, size }; 4], seg)
 }
 

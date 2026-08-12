@@ -7,6 +7,7 @@ use crate::focus::{Caps, FocusId};
 use crate::font::FONT_UI;
 use crate::draw::Corner;
 use crate::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
+use crate::ui;
 use crate::{Ctx, Rect};
 use std::sync::OnceLock;
 
@@ -86,10 +87,7 @@ pub fn corners(t: &theme::ResolvedTheme) -> ([Corner; 4], u8) {
 /// Nothing behind the button shows through it.
 pub fn draw(ctx: &mut Ctx, r: Rect, label: &str, st: ButtonState) {
     static PLATE: OnceLock<TokenId> = OnceLock::new();
-    static SIZE: OnceLock<TokenId> = OnceLock::new();
-    static MIN_PX: OnceLock<TokenId> = OnceLock::new();
-    static TRACKING: OnceLock<TokenId> = OnceLock::new();
-    static LEADING: OnceLock<TokenId> = OnceLock::new();
+    static ROLE: OnceLock<TokenId> = OnceLock::new();
     static CLASS: OnceLock<Option<u16>> = OnceLock::new();
     let t = theme::resolved();
     let (corners, seg) = corners(t);
@@ -105,11 +103,18 @@ pub fn draw(ctx: &mut Ctx, r: Rect, label: &str, st: ButtonState) {
     if style.edge_width > 0.0 {
         ctx.dl.ring(r, &corners, seg, style.edge_width, col(style.edge));
     }
-    // Config scaling (UIFontSize=, panel container query) is behaviour,
-    // not design; the size itself is the button role's.
-    let px = (t.px(tok(&SIZE, "type.button.size")) * ctx.ui_font_scale * ctx.panel_scale)
-        .max(t.px(tok(&MIN_PX, "type.button.min_px")));
-    let leading = t.px(tok(&LEADING, "type.button.leading"));
+    // The cap is set in the role `button.role` NAMES, not in the role that
+    // happens to share the object's name: repointing the binding moves the
+    // label's whole ladder at once, which is the only reason the binding
+    // exists. Config scaling (UIFontSize=, panel container query) is
+    // behaviour, not design, so it rides the role's own arithmetic.
+    let role = ui::bound_role(&ROLE, "button.role");
+    // The role's own px floor and ceiling are `Role::px`'s business now,
+    // and one place is the point of them: this file used to spell the key
+    // from the binding's word by hand, which every other consumer of every
+    // other binding did not.
+    let px = role.px(ctx, ctx.ui_font_scale);
+    let leading = role.leading();
     ctx.dl.text_center(
         ctx.fonts,
         FONT_UI,
@@ -118,7 +123,7 @@ pub fn draw(ctx: &mut Ctx, r: Rect, label: &str, st: ButtonState) {
         r.y + (r.h - px * leading) / 2.0,
         label,
         col(style.text),
-        px * t.px(tok(&TRACKING, "type.button.tracking")),
+        role.tracking_px(px),
     );
 }
 

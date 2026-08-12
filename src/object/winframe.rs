@@ -30,10 +30,12 @@
 //! [`Action`]: crate::widget::Action
 
 use super::window::{corner_segments, corner_style, panel_edge_glow};
-use crate::draw::{fit_tail, Corner};
+use crate::draw::{fit_tail, Corner, CornerStyle};
 use crate::font::FONT_UI;
 use crate::theme::parse::State;
 use crate::theme::{self, Color, TokenId};
+use crate::ui;
+use crate::view::surface::{CtxSurface, Surface};
 use crate::{Ctx, Rect};
 use std::sync::OnceLock;
 
@@ -186,6 +188,38 @@ fn button_rect(outer: Rect, m: &Metrics, slot: usize) -> Rect {
     )
 }
 
+/// Which control each title-bar slot carries.
+///
+/// `winframe.button.order` is three fixed slots holding one WORD each, and
+/// every slot declares its own vocabulary — index 0 therefore names a
+/// different control in every slot, and only the word can be compared, as
+/// the master says on the key itself. Slot 0 is the plate nearest the right
+/// edge while the row is written left to right, so the array is read from
+/// its end: the shipped `[minimise, maximise, close]` puts close outermost,
+/// which is the row every screenshot shows. A slot whose word names no
+/// control carries none, which is how a theme drops one rather than by
+/// handing back a shorter row.
+///
+/// The master spells that drop `none`, and `none` is the one word this can
+/// never see: the parser takes it for a §5.0 sentinel before the slot is
+/// asked for a word, so the slot answers its own master literal and the
+/// control stays. Nothing here can tell that apart from a theme that meant
+/// the literal — the fix belongs where the sentinel is decided.
+fn button_parts() -> [Option<Part>; 3] {
+    static SLOTS: OnceLock<[TokenId; 3]> = OnceLock::new();
+    let slots = SLOTS.get_or_init(|| {
+        [0usize, 1, 2].map(|i| {
+            theme::id(&format!("winframe.button.order[{i}]")).unwrap_or(TokenId::MISSING)
+        })
+    });
+    [2usize, 1, 0].map(|i| match ui::theme_word(slots[i]).as_str() {
+        "close" => Some(Part::Close),
+        "maximise" => Some(Part::Maximize),
+        "minimise" => Some(Part::Minimize),
+        _ => None,
+    })
+}
+
 fn menu_button_rect(outer: Rect, m: &Metrics) -> Rect {
     static SIZE: OnceLock<TokenId> = OnceLock::new();
     static PAD: OnceLock<TokenId> = OnceLock::new();
@@ -320,11 +354,11 @@ impl Frame {
             if menu_button_rect(outer, m).contains(x, y) {
                 return Part::Menu;
             }
-            for (slot, part) in
-                [Part::Close, Part::Maximize, Part::Minimize].into_iter().enumerate()
-            {
-                if button_rect(outer, m, slot).contains(x, y) {
-                    return part;
+            for (slot, part) in button_parts().into_iter().enumerate() {
+                if let Some(part) = part {
+                    if button_rect(outer, m, slot).contains(x, y) {
+                        return part;
+                    }
                 }
             }
             return Part::Title;
@@ -348,6 +382,8 @@ impl Frame {
         static UNFOCUSED_DIM: OnceLock<TokenId> = OnceLock::new();
         static ICON_BUTTON: OnceLock<Option<u16>> = OnceLock::new();
         static BUTTON_BORDER: OnceLock<TokenId> = OnceLock::new();
+        static BUTTON_CORNER: OnceLock<TokenId> = OnceLock::new();
+        static BUTTON_SEG: OnceLock<TokenId> = OnceLock::new();
         static WC_IDLE: OnceLock<TokenId> = OnceLock::new();
         static WC_HOVER: OnceLock<TokenId> = OnceLock::new();
         static WC_CLOSE: OnceLock<TokenId> = OnceLock::new();
@@ -446,7 +482,23 @@ impl Frame {
                 if hot { State::Hover } else { State::Idle },
             );
             let ring = col(st.edge);
-            ctx.dl.rect_outline(r.x, r.y, r.w, r.h, bw, ring.alpha(ring.a * dim));
+            // `winframe.button.corner` carries the LENGTH alone: the
+            // [corner] section's rule is that a radius with no
+            // `*_corner_style` sibling is cut round, and `Corner::sized`
+            // is what turns a `pill` sentinel into half the short side
+            // instead of into a rectangle.
+            let c = [Corner::sized(
+                CornerStyle::Round,
+                t.px(tok(&BUTTON_CORNER, "winframe.button.corner")),
+                r,
+            ); 4];
+            ctx.dl.ring(
+                r,
+                &c,
+                corner_segments(t, &BUTTON_SEG, c[0].size),
+                bw,
+                ring.alpha(ring.a * dim),
+            );
             let ink = if hot {
                 if close {
                     ink_close
@@ -471,40 +523,53 @@ impl Frame {
             let ly = first + pitch * i as f32;
             ctx.dl.line(mb.x + g_inset, ly, mb.x + mb.w - g_inset, ly, stroke, ic);
         }
-        // Right, outermost first: close, maximize, minimize.
-        let xr = button_rect(outer, m, 0);
-        let ic = plate(ctx, xr, true);
-        ctx.dl.line(
-            xr.x + g_inset,
-            xr.y + g_inset,
-            xr.x + xr.w - g_inset,
-            xr.y + xr.h - g_inset,
-            stroke,
-            ic,
-        );
-        ctx.dl.line(
-            xr.x + xr.w - g_inset,
-            xr.y + g_inset,
-            xr.x + g_inset,
-            xr.y + xr.h - g_inset,
-            stroke,
-            ic,
-        );
-        let mx = button_rect(outer, m, 1);
-        let ic = plate(ctx, mx, false);
-        ctx.dl.rect_outline(
-            mx.x + g_inset,
-            mx.y + g_inset,
-            mx.w - 2.0 * g_inset,
-            mx.h - 2.0 * g_inset,
-            stroke,
-            ic,
-        );
-        let mn = button_rect(outer, m, 2);
-        let ic = plate(ctx, mn, false);
-        let ly = mn.y + t.px(tok(&MINIMISE_Y, "winframe.icon.minimise_y")).max(0.0);
-        ctx.dl.line(mn.x + g_inset, ly, mn.x + mn.w - g_inset, ly, stroke, ic);
-        self.draw_title(ctx, m, outer, title, mb, mn, dim);
+        // The row the theme ordered, slot 0 outermost. Drawing and hit
+        // testing read the one token, so a reordered row moves the glyph
+        // and the meaning of the plate under it together.
+        //
+        // `bound` ends on the LEFTMOST plate the row still carries — what
+        // the title has to keep clear of — and on the bar's own right edge
+        // when a theme drops every control.
+        let mut bound = Rect::new(outer.x + outer.w - m.border, outer.y + m.border, 0.0, 0.0);
+        for (slot, part) in button_parts().into_iter().enumerate() {
+            let Some(part) = part else { continue };
+            let br = button_rect(outer, m, slot);
+            bound = br;
+            let ic = plate(ctx, br, part == Part::Close);
+            match part {
+                Part::Close => {
+                    ctx.dl.line(
+                        br.x + g_inset,
+                        br.y + g_inset,
+                        br.x + br.w - g_inset,
+                        br.y + br.h - g_inset,
+                        stroke,
+                        ic,
+                    );
+                    ctx.dl.line(
+                        br.x + br.w - g_inset,
+                        br.y + g_inset,
+                        br.x + g_inset,
+                        br.y + br.h - g_inset,
+                        stroke,
+                        ic,
+                    );
+                }
+                Part::Maximize => ctx.dl.rect_outline(
+                    br.x + g_inset,
+                    br.y + g_inset,
+                    br.w - 2.0 * g_inset,
+                    br.h - 2.0 * g_inset,
+                    stroke,
+                    ic,
+                ),
+                _ => {
+                    let ly = br.y + t.px(tok(&MINIMISE_Y, "winframe.icon.minimise_y")).max(0.0);
+                    ctx.dl.line(br.x + g_inset, ly, br.x + br.w - g_inset, ly, stroke, ic);
+                }
+            }
+        }
+        self.draw_title(ctx, m, outer, title, mb, bound, dim);
         // The menu, anchored to its icon's corner. Open or closed,
         // nothing between: the unfolding is the compositor's to
         // animate.
@@ -513,9 +578,10 @@ impl Frame {
         }
     }
 
-    /// The title, set in the `title.window` role: size, tracking, case
-    /// and leading are the role's, the colour is the title bar's, and
-    /// an overlong title gives way to the room the theme keeps clear.
+    /// The title, set in the role `winframe.title.role` names: size,
+    /// tracking, case and leading are the role's, the colour is the title
+    /// bar's, and an overlong title gives way to the room the theme keeps
+    /// clear. `bound` is the leftmost control plate it must not reach.
     #[allow(clippy::too_many_arguments)]
     fn draw_title(
         &self,
@@ -524,51 +590,53 @@ impl Frame {
         outer: Rect,
         title: &str,
         mb: Rect,
-        mn: Rect,
+        bound: Rect,
         dim: f32,
     ) {
-        static SIZE: OnceLock<TokenId> = OnceLock::new();
-        static TRACKING: OnceLock<TokenId> = OnceLock::new();
-        static LEADING: OnceLock<TokenId> = OnceLock::new();
-        static CASE: OnceLock<TokenId> = OnceLock::new();
-        static CASE_IDX: OnceLock<(Option<u16>, Option<u16>)> = OnceLock::new();
+        static ROLE: OnceLock<TokenId> = OnceLock::new();
         static ALIGN: OnceLock<TokenId> = OnceLock::new();
         static ALIGN_LEFT: OnceLock<Option<u16>> = OnceLock::new();
         static ROOM_PAD: OnceLock<TokenId> = OnceLock::new();
         static TEXT: OnceLock<TokenId> = OnceLock::new();
         let t = theme::resolved();
-        let px = t.px(tok(&SIZE, "type.title.window.size")).max(0.0);
-        // Tracking is an em multiple of the resolved size (§5.16).
-        let spacing = px * t.px(tok(&TRACKING, "type.title.window.tracking"));
-        let leading = t.px(tok(&LEADING, "type.title.window.leading")).max(0.0);
+        // A frame is nobody's panel content, so the role's own arithmetic
+        // is all there is: the container query multiplies by one.
+        let role = ui::bound_role(&ROLE, "winframe.title.role");
+        // The case transform belongs to whichever role the binding lands
+        // on and `Role` does not carry it: the key hangs off the role's
+        // NAME. It is compared as a WORD because every role declares its
+        // own enum list, so one index means a different transform in each.
+        // The px floor used to be read here too and is `Role::px`'s now.
+        let case = {
+            let mut sf = CtxSurface::new(ctx);
+            let word = sf.word("winframe.title.role");
+            sf.word(&format!("type.{word}.case"))
+        };
+        let px = role.px(ctx, 1.0);
+        let spacing = role.tracking_px(px);
+        let leading = role.leading();
         let room_pad = t.px(tok(&ROOM_PAD, "winframe.title.room_pad")).max(0.0);
         let ink = col(t.color(tok(&TEXT, "component.titlebar.text")));
         let ink = ink.alpha(ink.a * dim);
-        let case = tok(&CASE, "type.title.window.case");
-        let (lower, none) = *CASE_IDX.get_or_init(|| {
-            (theme::enum_index(case, "lower"), theme::enum_index(case, "none"))
-        });
         // `smallcaps` is approximated as upper until FontSystem can set it.
-        let shown = if Some(t.enum_of(case)) == none {
-            title.to_string()
-        } else if Some(t.enum_of(case)) == lower {
-            title.to_lowercase()
-        } else {
-            title.to_uppercase()
+        let shown = match case.as_str() {
+            "none" => title.to_string(),
+            "lower" => title.to_lowercase(),
+            _ => title.to_uppercase(),
         };
         let y = outer.y + m.border + (m.title_h - px * leading) / 2.0;
         let align = tok(&ALIGN, "winframe.title.align");
         let left = *ALIGN_LEFT.get_or_init(|| theme::enum_index(align, "left"));
         if Some(t.enum_of(align)) == left {
             let x0 = mb.x + mb.w + room_pad;
-            let room = mn.x - room_pad - x0;
+            let room = bound.x - room_pad - x0;
             let shown = fit_tail(ctx.fonts, FONT_UI, px, &shown, spacing, room);
             ctx.dl.text(ctx.fonts, FONT_UI, px, x0, y, &shown, ink, spacing);
         } else {
             // Centred on the window; the room is symmetric so the
             // centre holds.
             let cx = outer.x + outer.w / 2.0;
-            let room = 2.0 * (cx - (mb.x + mb.w)).min(mn.x - cx) - room_pad;
+            let room = 2.0 * (cx - (mb.x + mb.w)).min(bound.x - cx) - room_pad;
             let shown = fit_tail(ctx.fonts, FONT_UI, px, &shown, spacing, room);
             ctx.dl.text_center(ctx.fonts, FONT_UI, px, cx, y, &shown, ink, spacing);
         }
@@ -581,9 +649,7 @@ impl Frame {
         static RING: OnceLock<TokenId> = OnceLock::new();
         static RING_W: OnceLock<TokenId> = OnceLock::new();
         static CORNER: OnceLock<TokenId> = OnceLock::new();
-        static ITEM_SIZE: OnceLock<TokenId> = OnceLock::new();
-        static ITEM_TRACKING: OnceLock<TokenId> = OnceLock::new();
-        static ITEM_LEADING: OnceLock<TokenId> = OnceLock::new();
+        static ITEM_ROLE: OnceLock<TokenId> = OnceLock::new();
         static ITEM_INSET: OnceLock<TokenId> = OnceLock::new();
         static MENU_ITEM: OnceLock<Option<u16>> = OnceLock::new();
         static MODE: OnceLock<TokenId> = OnceLock::new();
@@ -591,13 +657,21 @@ impl Frame {
         static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
         let t = theme::resolved();
         let mr = menu_rect(outer, m);
-        let cut = t.px(tok(&CORNER, "menu.corner")).max(0.0);
-        // `menu.corner` is declared as a ratio of `winframe.corner`, so
-        // the menu's cut follows the frame's mode as well as its length:
-        // the window's chrome speaks one corner language.
-        let style = corner_style(t, tok(&MODE, "winframe.corner_mode"), &MODE_IDX);
-        let corners = [Corner { style, size: cut }; 4];
-        let seg = corner_segments(t, &SEGMENTS, cut);
+        // `menu.corner_mode`, which the master already sends to
+        // `@winframe.corner_mode` — so the shipped chrome speaks one
+        // corner language, and a theme that cuts its menus differently
+        // moves this box with the context menu instead of leaving the
+        // window's copy behind. The window menu and the context menu are
+        // ONE object drawn twice; two reads of two keys is how they came
+        // to differ.
+        let style = corner_style(t, tok(&MODE, "menu.corner_mode"), &MODE_IDX);
+        // `Corner::sized`, because the context menu next to this one
+        // reads `menu.corner` the same way: §5.0's `pill` is a word about
+        // the box, and clamping it at zero is how one of two copies of
+        // the same object comes out square.
+        let cut = Corner::sized(style, t.px(tok(&CORNER, "menu.corner")), mr);
+        let corners = [cut; 4];
+        let seg = corner_segments(t, &SEGMENTS, cut.size);
         ctx.dl.ring_fill(mr, &corners, seg, col(t.color(tok(&FILL, "component.menu.fill"))));
         ctx.dl.ring(
             mr,
@@ -606,10 +680,14 @@ impl Frame {
             t.px(tok(&RING_W, "menu.border")).max(0.0),
             col(t.color(tok(&RING, "component.menu.border"))),
         );
-        // Rows are set in the body role (`menu.item.role`).
-        let ipx = t.px(tok(&ITEM_SIZE, "type.body.size")).max(0.0);
-        let spacing = ipx * t.px(tok(&ITEM_TRACKING, "type.body.tracking"));
-        let leading = t.px(tok(&ITEM_LEADING, "type.body.leading")).max(0.0);
+        // Rows are set in the role `menu.item.role` names — the read
+        // menu.rs already makes. The window menu and the context menu are
+        // one object drawn twice, so a theme that repoints the role must
+        // move both or the same list is two lists.
+        let role = ui::bound_role(&ITEM_ROLE, "menu.item.role");
+        let ipx = role.px(ctx, ctx.ui_font_scale);
+        let spacing = role.tracking_px(ipx);
+        let leading = role.leading();
         let inset = t.px(tok(&ITEM_INSET, "menu.item_inset")).max(0.0);
         for (i, (_, label)) in MENU.iter().enumerate() {
             let row = menu_row(mr, i);
@@ -651,6 +729,29 @@ mod tests {
             grip: 6.0,
             corner_zone: 26.0,
         }
+    }
+
+    /// The master's OWN numbers, not the hand-built ones: the grip band
+    /// lies over the title bar and resize wins over the title, so a band
+    /// as deep as the bar leaves nothing to drag the window by. Nothing
+    /// else can catch it — the two lengths are declared in different
+    /// sections of the theme and only meet here.
+    #[test]
+    fn the_masters_grip_leaves_a_title_bar_to_drag_the_window_by() {
+        let m = Metrics::new(1080.0);
+        let bar = m.border + m.title_h;
+        assert!(bar > 0.0, "the master must give the frame a title bar at all");
+        assert!(
+            m.grip > 0.0 && m.grip < bar,
+            "grip {} against a title bar of {bar}: the whole bar resizes",
+            m.grip
+        );
+        // And the bar really does answer with the window's own part below
+        // the band, in the middle of the frame where no control sits.
+        let outer = Rect::new(100.0, 100.0, 400.0, 300.0);
+        let f = Frame::new();
+        let y = outer.y + (m.grip + bar) / 2.0;
+        assert_eq!(f.hit(outer, &m, outer.x + outer.w / 2.0, y), Part::Title);
     }
 
     #[test]

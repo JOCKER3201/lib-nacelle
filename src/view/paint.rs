@@ -15,6 +15,7 @@
 //! inside it.
 
 use super::surface::{StateInk, Surface};
+use crate::draw::CornerStyle;
 use crate::theme::parse::State;
 use crate::theme::Color;
 use crate::ui::{sev_of, Align, BadgeStyle, Sev, SEVERITY_ROLES};
@@ -26,7 +27,10 @@ use crate::Rect;
 /// `script.severity_fallback`, which §5.10 forbids ever being `ok`.
 pub fn sev_fallback(sf: &mut impl Surface) -> Sev {
     let word = sf.word("script.severity_fallback");
-    sev_of(&word).unwrap_or(Sev(6))
+    // The same answer, from the same place, as [`crate::ui::sev_fallback`]
+    // — a plugin's table and the host's must not judge one reading two
+    // ways, which is what two copies of the rule always end up doing.
+    sev_of(&word).unwrap_or_else(|| crate::ui::unnamed_severity(&word))
 }
 
 fn sev_role(s: Sev) -> &'static str {
@@ -72,37 +76,131 @@ pub struct RoleLook {
     pub color: Color,
 }
 
-/// Resolves a type role by name. An unknown role falls back to `body`,
-/// the rule `script.text_role` has always followed: a typo must stay
-/// readable rather than vanish.
+/// The look of a role the master does not declare. There is no spare
+/// role and there must not be one: a role is twelve tokens, so a single
+/// spare word hides a whole ladder behind a name nobody wrote, and `body`
+/// — the obvious candidate — is a REAL role of plausible size, which
+/// renders a broken theme as a nearly-right interface and lets it ship.
+///
+/// Nothing is drawn in it: zero px, no leading, no ink. The same ruling
+/// [`crate::ui::role`] makes for the objects that draw against `Ctx`,
+/// made once more here because this is the resolver every view, every
+/// script table and the whole ABI side goes through.
+pub const NO_ROLE: RoleLook =
+    RoleLook { px: 0.0, track: 0.0, leading: 0.0, color: Color::TRANSPARENT };
+
+/// Resolves a type role by name. A name no `type.*` block declares warns
+/// once and answers [`NO_ROLE`]: naming a role the theme does not have is
+/// a defect to report, never a decision about how the text should look.
 pub fn role_look(sf: &mut impl Surface, name: &str, shrink: f32) -> RoleLook {
-    let name = if sf.has_token(&format!("type.{name}.size")) {
-        name
-    } else {
+    if !sf.has_token(&format!("type.{name}.size")) {
         // Said once, exactly as `ui::role` says it: a typo in a theme or
         // a script is worth one line and not sixty a second.
         crate::ui::warn_once(
             &format!("role:{name}"),
-            &format!("unknown type role \"{name}\" — falling back to body"),
+            &format!("unknown type role \"{name}\" — nothing is drawn in it"),
         );
-        "body"
-    };
-    let px = (sf.px(&format!("type.{name}.size")) * sf.scale() * shrink)
-        .max(sf.px("type.min_px"));
+        return NO_ROLE;
+    }
+    let raw = sf.px(&format!("type.{name}.size")) * sf.scale() * shrink;
+    // The role's own ceiling and floor, the global floor beneath a role
+    // whose theme states none of its own — and the arithmetic itself in
+    // [`crate::theme::role_px`], which `ui::Role::px` calls too. Two
+    // resolvers answering one question have to answer it identically, and
+    // the only way to be sure of that is for there to be one answer.
+    //
+    // A floor at all only because the role EXISTS: the absent case has
+    // already returned, since a floor on a role that does not exist would
+    // put the hole back on screen at legible size, which is the failure
+    // this whole rule was written to stop.
+    let px = crate::theme::role_px(
+        raw,
+        sf.px(&format!("type.{name}.min_px")),
+        sf.px("type.min_px"),
+        sf.px(&format!("type.{name}.max_px")),
+    );
     // Tracking tokens are em — a fraction of the run's own size.
     let track = px * sf.px(&format!("type.{name}.tracking"));
+    // A role whose master states no `leading` measures zero: an unstated
+    // line height is a broken role, and the height of a broken role is
+    // not this file's to invent.
     let leading = sf.px(&format!("type.{name}.leading"));
     let mut color = sf.color(&format!("type.{name}.fg"));
     let alpha = sf.px(&format!("type.{name}.alpha"));
     color.a *= if alpha > 0.0 { alpha.min(1.0) } else { 1.0 };
-    RoleLook { px, track, leading: if leading > 0.0 { leading } else { 1.0 }, color }
+    RoleLook { px, track, leading, color }
 }
 
 /// The role a `*_role` binding token names — `script.table_head_role`,
-/// `list.label_role`. A binding resolving to nothing is `body`.
+/// `list.label_role`. A binding resolving to nothing answers [`NO_ROLE`].
 pub fn bound_role(sf: &mut impl Surface, binding: &str, shrink: f32) -> RoleLook {
     let word = sf.word(binding);
-    role_look(sf, if word.is_empty() { "body" } else { &word }, shrink)
+    if word.is_empty() {
+        // The BINDING is what a reader has to go and fix, and it is the
+        // one thing the role-side warning cannot name: an empty word
+        // means either that this key is absent from the master or that a
+        // consumer asked for a key nobody declares, and both are the
+        // binding's story.
+        crate::ui::warn_once(
+            &format!("binding:{binding}"),
+            &format!("\"{binding}\" names no type role — nothing is drawn in it"),
+        );
+        return NO_ROLE;
+    }
+    role_look(sf, &word, shrink)
+}
+
+// -------------------------------------------------------------- corners
+
+/// The cut a shape word asks for, in the three [`Surface`] can draw.
+///
+/// Compared as a WORD, not as an enum index, for two reasons that both
+/// bite here: the ABI can only ship words, and a preset's style slot
+/// (`shape.badge.corners[0]`) has no `enum:` list in the master, so its
+/// word table grows out of the values actually loaded — an index
+/// memoised before a variant is read would freeze at the wrong answer.
+///
+/// `chevron` and `hexagon` are in the presets' vocabulary and in no
+/// surface's: they degrade to the square a surface with no ring
+/// primitive degrades to, for the same reason — it is the shape that can
+/// be drawn honestly, and one a theme can already ask for.
+pub fn corner_style(sf: &mut impl Surface, name: &str) -> CornerStyle {
+    match sf.word(name).as_str() {
+        "round" => CornerStyle::Round,
+        "chamfer" => CornerStyle::Chamfer,
+        _ => CornerStyle::Square,
+    }
+}
+
+/// The radius a `*.corner` token states, for the rect that wears it.
+///
+/// A LENGTH IS NOT A SHAPE (§5.4d): this is the radius half of the pair
+/// only, and [`corner_style`] carries the cut. `pill` is not a length at
+/// all — §5.0 bakes the word to a negative sentinel — and names the
+/// capsule: the radius at which both ends of the rect close over, which
+/// is half its shorter side, and which is also the ceiling any stated
+/// radius meets before two corners would cross.
+///
+/// The translation itself lives in [`crate::theme::corner_radius`] and is
+/// called from here rather than repeated: a capsule written four times is
+/// a capsule that stops being one somewhere.
+pub fn corner_radius(sf: &mut impl Surface, name: &str, r: Rect, shrink: f32) -> f32 {
+    let stated = sf.px(name);
+    // A stated LENGTH meets the panel's shrink before it meets the box.
+    // Every sentinel is a word ABOUT the box and has nothing to scale.
+    let scaled = if stated > 0.0 { stated * shrink } else { stated };
+    let radius = crate::theme::corner_radius(scaled, r.w, r.h);
+    if radius == 0.0 && stated < 0.0 {
+        // `auto` and `same_as_parent` are the rest of §5.0's table, and
+        // neither is a radius. Named out loud rather than quietly cut to
+        // nothing: the key is a theme's mistake to fix, not this file's
+        // to paper over.
+        crate::ui::warn_once(
+            &format!("corner:{name}"),
+            &format!("\"{name}\" holds a sentinel that is neither a length nor `pill`"),
+        );
+    }
+    radius.min(r.w.min(r.h).max(0.0) / 2.0)
 }
 
 // --------------------------------------------------------------- text
@@ -261,29 +359,34 @@ pub fn meter(sf: &mut impl Surface, r: Rect, frac: f32, sev: Option<Sev>, track:
     // The fill sits `progress.inset` behind the ring, so it never
     // touches it.
     let inset = bw + sf.px("progress.inset");
+    // `progress.corner` was declared and read by nothing, so a theme that
+    // rounded its bars got squares. The fill wears the track's own corner
+    // inset by the same distance the fill is inset — a square-ended fill
+    // inside a rounded track hangs out past the cap, which is the bug the
+    // slider's groove already had to fix.
+    let cut = corner_style(sf, "progress.corner_style");
+    let radius = corner_radius(sf, "progress.corner", r, 1.0);
     if track {
         let c = sf.color("component.bar.track");
-        sf.rect_outline(r, bw, c);
+        sf.ring(r, cut, radius, bw, c);
     }
     let inner = (r.w - 2.0 * inset).max(0.0);
     let fill = match sev {
         Some(s) => sev_text(sf, s),
         None => sf.color("component.bar.fill"),
     };
-    sf.rect(
-        Rect::new(r.x + inset, r.y + inset, inner * frac, (r.h - 2.0 * inset).max(0.0)),
-        fill,
-    );
+    let bar = Rect::new(r.x + inset, r.y + inset, inner * frac, (r.h - 2.0 * inset).max(0.0));
+    sf.ring_fill(bar, cut, (radius - inset).max(0.0), fill);
 }
 
 /// The CRITICAL / CONTAINED pill: a filled, ringed capsule around a
 /// short text, its four colours from the severity at draw time. Returns
 /// the pill's width.
 ///
-/// The corner honours `badge.corner` as far as the surface can: a
-/// positive radius cuts a chamfer where there is one to cut, and
-/// degrades to square where there is not (the ABI has no chamfer) —
-/// which is the look `badge.corner = 0` already asks for.
+/// The corner is the theme's: `badge.corner` for the radius — `pill`
+/// included, which is what the master ships and what makes the capsule
+/// this thing is named after — and `shape.badge.corners`' style slot for
+/// the cut.
 pub fn badge(
     sf: &mut impl Surface,
     r: Rect,
@@ -296,8 +399,13 @@ pub fn badge(
     let role = bound_role(sf, "script.badge_role", shrink);
     let tw = sf.measure(role.px, text, role.track);
     let pad = sf.px("badge.pad_x") * shrink;
-    let h = (sf.px("badge.h") * shrink).min(r.h).max(1.0);
-    let w = (tw + 2.0 * pad).min(r.w).max(1.0);
+    // No floor under either: a `.max(1.0)` here is a one-pixel badge
+    // nobody's theme asked for. `badge.h = 0` means the master wants no
+    // badge, and that is a look it is entitled to state; the width is
+    // the measured text plus the theme's padding, which is already a
+    // length rather than a guess.
+    let h = (sf.px("badge.h") * shrink).min(r.h);
+    let w = (tw + 2.0 * pad).min(r.w);
     let x = match align {
         Align::Left => r.x,
         Align::Center => r.x + (r.w - w) / 2.0,
@@ -329,20 +437,16 @@ pub fn badge(
         ),
     };
     let pill = Rect::new(x, y, w, h);
-    let corner = sf.px("badge.corner");
+    // A badge is the one element that states its shape in two places:
+    // `badge.corner` is the radius, and the style half of the preset's
+    // `shape.badge.corners` is the cut. Both are read, so a theme that
+    // moves either one moves the badge.
+    let cut = corner_style(sf, "shape.badge.corners[0]");
+    let radius = corner_radius(sf, "badge.corner", pill, shrink);
     let bw = sf.px("badge.border");
-    if corner > 0.0 {
-        let cut = corner.min(h / 2.0) * shrink;
-        sf.chamfer_fill(pill, cut, fill);
-        if bw > 0.0 && !solid {
-            sf.chamfer_frame(pill, cut, bw, edge);
-        }
-    } else {
-        // `pill` is a negative sentinel until R5 lands: square it is.
-        sf.rect(pill, fill);
-        if bw > 0.0 && !solid {
-            sf.rect_outline(pill, bw, edge);
-        }
+    sf.ring_fill(pill, cut, radius, fill);
+    if bw > 0.0 && !solid {
+        sf.ring(pill, cut, radius, bw, edge);
     }
     let ty = center_line_y(sf, y, h, role.px, role.leading);
     sf.text(role.px, x + w / 2.0, ty, text, ink, role.track, Align::Center);
@@ -431,22 +535,28 @@ pub fn scrollbar(
         State::Idle
     };
     let style: StateInk = sf.class_state("scrollbar.thumb", rung);
+    // The master asks for `@corner.pill` here and got a rectangle: the
+    // radius was declared and read by nothing. The pair is the ordinary
+    // one — the radius from `scrollbar.corner`, the cut from
+    // `scrollbar.corner_style` — so a capsule thumb is a capsule.
+    let cut = corner_style(sf, "scrollbar.corner_style");
+    let radius = corner_radius(sf, "scrollbar.corner", geom.thumb, 1.0);
     let mut fill = style.fill;
     fill.a *= alpha;
     if fill.a > 0.0 {
-        sf.rect(geom.thumb, fill);
+        sf.ring_fill(geom.thumb, cut, radius, fill);
     }
     let mut edge = style.edge;
     edge.a *= alpha;
     if style.edge_width > 0.0 && edge.a > 0.0 {
-        sf.rect_outline(geom.thumb, style.edge_width, edge);
+        sf.ring(geom.thumb, cut, radius, style.edge_width, edge);
     }
 }
 
 // ---------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A surface that only measures: half an em a character, which is
@@ -545,9 +655,304 @@ mod tests {
         assert_eq!(leading_number("..."), None);
     }
 
-    // ---- the rule every trimmed label follows ----
+    // ---- severity ----
 
     use crate::view::surface::tests::FakeSurface;
+
+    /// §5.10's fallback is the master's word, and the one answer this
+    /// file may not give is a number of its own. A key naming a severity
+    /// the closed set does not hold lands on its LAST rung — counted off
+    /// the set rather than written down, so a master that adds a rung
+    /// cannot leave a stale index pointing at somebody else's colour.
+    #[test]
+    fn an_unnameable_severity_fallback_lands_on_the_last_rung_and_never_on_ok() {
+        let mut sf = FakeSurface::new().word_at("script.severity_fallback", "chartreuse");
+        let sev = sev_fallback(&mut sf);
+        assert_eq!(
+            sev,
+            Sev(SEVERITY_ROLES.len() as u16 - 1),
+            "the fallback must be the last rung of the set, not a number in this file"
+        );
+        assert_ne!(SEVERITY_ROLES[sev.0 as usize], "ok", "§5.10 forbids the fallback being `ok`");
+        // A word the set DOES hold still wins outright — the fallback is
+        // the exception, not the rule.
+        let mut sf = FakeSurface::new().word_at("script.severity_fallback", "warning");
+        assert_eq!(sev_fallback(&mut sf), sev_of("warning").unwrap());
+    }
+
+    // ---- corners ----
+
+    /// A badge 12 px tall and wider than it is tall — three characters
+    /// at 5 px and 4 px of padding a side — on a surface that can draw
+    /// rings. Wider matters: the capsule closes over the SHORTER side.
+    fn badged(sf: FakeSurface) -> FakeSurface {
+        let mut sf = sf
+            .token("badge.h", 12.0)
+            .token("badge.pad_x", 4.0)
+            .token("type.body.size", 10.0)
+            .token("type.body.leading", 1.0)
+            .word_at("script.badge_role", "body");
+        badge(
+            &mut sf,
+            Rect::new(0.0, 0.0, 100.0, 20.0),
+            "hot",
+            None,
+            BadgeStyle::Hollow,
+            Align::Left,
+            1.0,
+        );
+        sf
+    }
+
+    #[test]
+    fn a_pill_is_the_capsule_its_name_says_and_a_length_is_a_length() {
+        let r = Rect::new(0.0, 0.0, 40.0, 12.0);
+        // `pill` is a word, not a number: the sentinel it bakes to means
+        // half the shorter side, which closes both ends.
+        let pill = crate::theme::expr::sentinel("pill").unwrap();
+        let mut sf = FakeSurface::new().token("x.corner", pill);
+        assert_eq!(corner_radius(&mut sf, "x.corner", r, 1.0), 6.0);
+        // A stated radius is itself, shrunk with everything else...
+        let mut sf = FakeSurface::new().token("x.corner", 3.0);
+        assert_eq!(corner_radius(&mut sf, "x.corner", r, 1.0), 3.0);
+        assert_eq!(corner_radius(&mut sf, "x.corner", r, 0.5), 1.5);
+        // ...and never past the point where two corners would cross.
+        let mut sf = FakeSurface::new().token("x.corner", 100.0);
+        assert_eq!(corner_radius(&mut sf, "x.corner", r, 1.0), 6.0);
+        // The rest of the sentinel table is not a radius at all, and
+        // says so on the way to drawing nothing.
+        let auto = crate::theme::expr::sentinel("auto").unwrap();
+        let mut sf = FakeSurface::new().token("x.corner", auto);
+        assert_eq!(corner_radius(&mut sf, "x.corner", r, 1.0), 0.0);
+    }
+
+    // ---- roles ----
+
+    /// A theme with `body` fully stated and a readable global floor —
+    /// everything a fallback to `body` would need to look plausible.
+    fn typeset() -> FakeSurface {
+        FakeSurface::new()
+            .token("type.body.size", 10.0)
+            .token("type.body.leading", 1.4)
+            .token("type.min_px", 8.0)
+    }
+
+    #[test]
+    fn a_binding_that_names_no_role_draws_nothing_at_all() {
+        // A binding standing at no word: neither the master nor the theme
+        // said what this text is, so nothing is what it looks like.
+        let mut sf = typeset();
+        let look = bound_role(&mut sf, "list.label_role", 1.0);
+        assert_eq!(look.px, 0.0, "the global floor must not apply to a role that is absent");
+        assert_eq!(look.leading, 0.0);
+        assert_eq!(look.color.a, 0.0);
+
+        // A binding standing at a name no `type.*` block declares is the
+        // same hole reached through the other door — and `body` sitting
+        // right there, fully stated, is exactly the trap: a fallback to
+        // it renders a broken theme as a nearly-right interface.
+        let mut sf = typeset().word_at("list.label_role", "no_such_role");
+        let look = bound_role(&mut sf, "list.label_role", 1.0);
+        assert_eq!(look.px, 0.0);
+        assert_eq!(look.color.a, 0.0);
+    }
+
+    #[test]
+    fn a_declared_role_obeys_its_own_floor_and_its_own_ceiling() {
+        let mut sf = typeset().word_at("list.label_role", "body");
+        assert_eq!(bound_role(&mut sf, "list.label_role", 1.0).px, 10.0);
+        // Shrunk under the GLOBAL floor, a role the master declares still
+        // stops there: `type.min_px` is the last defence against
+        // unreadable type.
+        assert_eq!(bound_role(&mut sf, "list.label_role", 0.1).px, 8.0);
+        // The role's own floor wins over the global one when it is higher.
+        let mut sf = typeset().word_at("list.label_role", "body").token("type.body.min_px", 12.0);
+        assert_eq!(bound_role(&mut sf, "list.label_role", 1.0).px, 12.0);
+        // A ceiling caps the size...
+        let mut sf = typeset().word_at("list.label_role", "body").token("type.body.max_px", 9.0);
+        assert_eq!(bound_role(&mut sf, "list.label_role", 1.0).px, 9.0);
+        // ...and `0px` is how the master spells "uncapped", which must
+        // never read as a ceiling of nothing.
+        let mut sf = typeset().word_at("list.label_role", "body").token("type.body.max_px", 0.0);
+        assert_eq!(bound_role(&mut sf, "list.label_role", 1.0).px, 10.0);
+        // A ceiling under the floor is a theme contradicting itself, and
+        // the floor is the one that wins.
+        let mut sf = typeset()
+            .word_at("list.label_role", "body")
+            .token("type.body.min_px", 12.0)
+            .token("type.body.max_px", 4.0);
+        assert_eq!(bound_role(&mut sf, "list.label_role", 1.0).px, 12.0);
+    }
+
+    #[test]
+    fn the_cut_is_the_word_the_theme_wrote_and_nothing_else() {
+        let mut sf = FakeSurface::new().word_at("x.corner_style", "round");
+        assert_eq!(corner_style(&mut sf, "x.corner_style"), CornerStyle::Round);
+        let mut sf = FakeSurface::new().word_at("x.corner_style", "chamfer");
+        assert_eq!(corner_style(&mut sf, "x.corner_style"), CornerStyle::Chamfer);
+        // `chevron` is in the presets' vocabulary and in no surface's,
+        // and a theme that says nothing has said nothing.
+        let mut sf = FakeSurface::new().word_at("x.corner_style", "chevron");
+        assert_eq!(corner_style(&mut sf, "x.corner_style"), CornerStyle::Square);
+        let mut sf = FakeSurface::new();
+        assert_eq!(corner_style(&mut sf, "x.corner_style"), CornerStyle::Square);
+    }
+
+    #[test]
+    fn a_badge_wears_the_radius_and_the_cut_the_theme_states() {
+        let pill = crate::theme::expr::sentinel("pill").unwrap();
+        // The master's own pair: the pill sentinel and `round`.
+        let sf = badged(
+            FakeSurface::new()
+                .token("badge.corner", pill)
+                .word_at("shape.badge.corners[0]", "round"),
+        );
+        assert!(sf.rects.is_empty(), "a shaped badge is not a rectangle");
+        assert_eq!(sf.rings.len(), 1);
+        let (r, style, radius) = sf.rings[0];
+        assert_eq!(r.h, 12.0);
+        assert_eq!(style, CornerStyle::Round);
+        assert_eq!(radius, 6.0, "half the 12 px height: the capsule");
+        // Move the radius token, and the pill stops being one.
+        let sf = badged(
+            FakeSurface::new()
+                .token("badge.corner", 2.0)
+                .word_at("shape.badge.corners[0]", "round"),
+        );
+        assert_eq!(sf.rings[0].2, 2.0);
+        // Move the style token, and the same radius is cut differently.
+        let sf = badged(
+            FakeSurface::new()
+                .token("badge.corner", pill)
+                .word_at("shape.badge.corners[0]", "chamfer"),
+        );
+        assert_eq!(sf.rings[0].1, CornerStyle::Chamfer);
+        assert_eq!(sf.rings[0].2, 6.0);
+    }
+
+    #[test]
+    fn a_hollow_badge_strokes_the_same_shape_it_filled() {
+        // Two rings, one geometry: a ring drawn on a different radius
+        // from its fill is the two-shapes bug in miniature.
+        let pill = crate::theme::expr::sentinel("pill").unwrap();
+        let sf = badged(
+            FakeSurface::new()
+                .token("badge.corner", pill)
+                .token("badge.border", 1.0)
+                .word_at("shape.badge.corners[0]", "chamfer"),
+        );
+        assert_eq!(sf.strokes.len(), 1);
+        let (fill_r, fill_style, fill_radius) = sf.rings[0];
+        let (edge_r, edge_style, edge_radius) = sf.strokes[0];
+        assert_eq!((fill_r.x, fill_r.y, fill_r.w, fill_r.h), (edge_r.x, edge_r.y, edge_r.w, edge_r.h));
+        assert_eq!(fill_style, edge_style);
+        assert_eq!(fill_radius, edge_radius);
+    }
+
+    #[test]
+    fn the_master_states_both_halves_of_a_badges_corner() {
+        // The proof the drawing tests stand on: these are the values the
+        // shipped theme really holds, so the pill above is the pill the
+        // user sees.
+        let t = crate::theme::resolved();
+        let id = |n: &str| crate::theme::id(n).expect("declared in the master");
+        assert_eq!(
+            t.px(id("badge.corner")),
+            crate::theme::expr::sentinel("pill").unwrap(),
+            "the master asks for a capsule, which used to bake to a square"
+        );
+        // Asked the way `CtxSurface::word` asks it, so this is the
+        // answer the drawing really gets and not a second reading of the
+        // same file.
+        assert_eq!(
+            crate::ui::theme_word(id("shape.badge.corners[0]")),
+            "round",
+            "the style half of the preset, which the badge now reads"
+        );
+    }
+
+    /// The thumb and the bar, whose corner tokens the audit found
+    /// declared and read by NOTHING: the master writes `@corner.pill` on
+    /// a scrollbar thumb and the drawing was `rect`, so the one token a
+    /// theme has for the shape of a thumb moved nothing at all. Both
+    /// halves of the pair are measured — the radius the token states and
+    /// the cut its `*_corner_style` sibling names — because a radius
+    /// with no cut is the same silence one step along.
+    #[test]
+    fn the_thumb_and_the_bar_wear_the_corner_their_own_tokens_state() {
+        let pill = crate::theme::expr::sentinel("pill").unwrap();
+        // A plate, because a thumb with no fill colour is never drawn
+        // and a test about its SHAPE would then measure nothing.
+        let thumbed = |radius: f32, cut: &str| -> FakeSurface {
+            let geom = crate::view::scroll::ScrollbarGeom {
+                track: Rect::new(90.0, 0.0, 10.0, 100.0),
+                thumb: Rect::new(90.0, 20.0, 10.0, 40.0),
+            };
+            let mut sf = FakeSurface::new()
+                .plate(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 })
+                .token("scrollbar.corner", radius)
+                .word_at("scrollbar.corner_style", cut);
+            scrollbar(&mut sf, &geom, 1.0, false, false);
+            sf
+        };
+
+        let sf = thumbed(pill, "round");
+        assert!(sf.rects.is_empty(), "a shaped thumb is not a rectangle");
+        assert_eq!(sf.rings.len(), 1);
+        assert_eq!(sf.rings[0].1, CornerStyle::Round);
+        assert_eq!(sf.rings[0].2, 5.0, "half the thumb's 10 px width: the capsule");
+        // A stated length is itself, and the cut is the sibling's word:
+        // move either token and the thumb moves with it.
+        assert_eq!(thumbed(2.0, "round").rings[0].2, 2.0);
+        assert_eq!(thumbed(pill, "chamfer").rings[0].1, CornerStyle::Chamfer);
+        // `@corner.none` is a literal zero and stays the slab it asks
+        // for: reading a token is not deciding for the theme.
+        assert_eq!(thumbed(0.0, "round").rings[0].2, 0.0);
+
+        // The bar is the same pair on the other element, and its fill
+        // wears the track's corner inset by its own inset — a
+        // square-ended fill inside a rounded track hangs out past the cap.
+        let r = Rect::new(0.0, 0.0, 100.0, 10.0);
+        let mut sf = FakeSurface::new()
+            .token("progress.corner", pill)
+            .word_at("progress.corner_style", "round");
+        meter(&mut sf, r, 1.0, None, true);
+        assert_eq!(sf.strokes.len(), 1, "the track's ring");
+        assert_eq!(sf.strokes[0].1, CornerStyle::Round);
+        assert_eq!(sf.strokes[0].2, 5.0, "half the bar's 10 px height");
+        assert_eq!(sf.rings.len(), 1, "the fill");
+        assert_eq!(sf.rings[0].2, 5.0);
+        // The shipped radius is zero, and the bar drawn from it is the
+        // rectangle the master asked for.
+        let mut sf = FakeSurface::new().word_at("progress.corner_style", "round");
+        meter(&mut sf, r, 1.0, None, true);
+        assert_eq!(sf.rings[0].2, 0.0);
+    }
+
+    /// The values behind the test above, in the shipped file: the tokens
+    /// the audit found unread are read, and what they say is what the
+    /// user sees.
+    #[test]
+    fn the_master_states_a_corner_for_the_thumb_and_for_the_bar() {
+        let t = crate::theme::resolved();
+        let id = |n: &str| crate::theme::id(n).expect("declared in the master");
+        assert_eq!(
+            t.px(id("scrollbar.corner")),
+            crate::theme::expr::sentinel("pill").unwrap(),
+            "the master asks for a capsule thumb, which used to bake to a slab"
+        );
+        // Asked the way `CtxSurface::word` asks it, so this is the answer
+        // the drawing really gets and not a second reading of the file.
+        assert_eq!(crate::ui::theme_word(id("scrollbar.corner_style")), "round");
+        assert_eq!(t.px(id("progress.corner")), 0.0, "`@corner.none` is a length of zero");
+        assert!(
+            !crate::ui::theme_word(id("progress.corner_style")).is_empty(),
+            "a radius with no cut is the same silence one step along"
+        );
+    }
+
+    // ---- the rule every trimmed label follows ----
+
 
     const FULL: &str = "org.freedesktop.NetworkManager";
     const CUT: &str = "org.freedesk\u{2026}";
@@ -598,3 +1003,4 @@ mod tests {
         assert!(off.tips.is_empty());
     }
 }
+

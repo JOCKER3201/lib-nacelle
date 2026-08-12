@@ -3,6 +3,7 @@
 //! returned track rectangle.
 
 use super::focus_ring;
+use crate::draw::{Corner, CornerStyle};
 use crate::focus::{Caps, FocusId};
 use crate::theme::{self, Color, TokenId};
 use crate::{Ctx, Rect};
@@ -17,6 +18,25 @@ fn col(c: theme::ThemeColor) -> Color {
     Color { r: c.r, g: c.g, b: c.b, a: c.a }
 }
 
+/// The four corners a radius token asks for on a `w` x `h` box, with the
+/// arc tessellation that radius earns.
+///
+/// A negative radius is a §5.0 sentinel, and translating one is
+/// [`Corner::sized`]'s job — the one place that knows `pill` means half
+/// the shorter side, which on the groove is the end cap the master's
+/// `@corner.pill` promises. HOW the
+/// radius is cut is not this file's decision — [corner]'s header rules
+/// every radius without a `*_corner_style` sibling to `round`, and the
+/// track's and the knob's have none. Zero is spelled Square only because
+/// a zero-radius arc IS a square corner, and the square path draws it in
+/// one quad.
+fn shape(t: &theme::ResolvedTheme, radius: f32, w: f32, h: f32) -> ([Corner; 4], u8) {
+    static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
+    let c = Corner::sized(CornerStyle::Round, radius, Rect::new(0.0, 0.0, w, h));
+    let c = if c.size > 0.0 { c } else { Corner::SQUARE };
+    ([c; 4], super::window::corner_segments(t, &SEGMENTS, c.size))
+}
+
 /// Draws the track with the knob at position `t` (0..1).
 pub fn track(ctx: &mut Ctx, track: Rect, t: f32) {
     static TRACK_COLOR: OnceLock<TokenId> = OnceLock::new();
@@ -26,15 +46,21 @@ pub fn track(ctx: &mut Ctx, track: Rect, t: f32) {
     static FILL_H: OnceLock<TokenId> = OnceLock::new();
     static KNOB_W: OnceLock<TokenId> = OnceLock::new();
     static KNOB_H: OnceLock<TokenId> = OnceLock::new();
+    static TRACK_CORNER: OnceLock<TokenId> = OnceLock::new();
+    static KNOB_CORNER: OnceLock<TokenId> = OnceLock::new();
     let th = theme::resolved();
     let cy = track.y + track.h / 2.0;
     let track_h = th.px(tok(&TRACK_H, "slider.track_h"));
-    ctx.dl.line(
-        track.x,
-        cy,
-        track.right(),
-        cy,
-        track_h,
+    let track_corner = th.px(tok(&TRACK_CORNER, "slider.track_corner"));
+    // A groove is a box with end caps, not a stroke: `line` is a quad cut
+    // square at both ends, and `slider.track_corner` is what says how the
+    // ends are shaped.
+    let groove = Rect::new(track.x, cy - track_h / 2.0, track.w, track_h);
+    let (gc, gseg) = shape(th, track_corner, groove.w, groove.h);
+    ctx.dl.ring_fill(
+        groove,
+        &gc,
+        gseg,
         col(th.color(tok(&TRACK_COLOR, "slider.track_color"))),
     );
     let t = t.clamp(0.0, 1.0);
@@ -45,22 +71,25 @@ pub fn track(ctx: &mut Ctx, track: Rect, t: f32) {
     if fill_h < 0.0 {
         fill_h = track_h;
     }
-    ctx.dl.line(
-        track.x,
-        cy,
-        knob_x,
-        cy,
-        fill_h,
+    // The filled part lies INSIDE the groove and wears the groove's cap:
+    // a square-ended fill in a capsule groove hangs out past the cap.
+    let fill = Rect::new(track.x, cy - fill_h / 2.0, knob_x - track.x, fill_h);
+    let (fc, fseg) = shape(th, track_corner, fill.w, fill.h);
+    ctx.dl.ring_fill(
+        fill,
+        &fc,
+        fseg,
         col(th.color(tok(&FILL_COLOR, "slider.fill_color"))),
     );
     // The knob is its own length now, not a cut of the row height.
     let kw = th.px(tok(&KNOB_W, "slider.knob_w"));
     let kh = th.px(tok(&KNOB_H, "slider.knob_h"));
-    ctx.dl.rect(
-        knob_x - kw / 2.0,
-        cy - kh / 2.0,
-        kw,
-        kh,
+    let knob = Rect::new(knob_x - kw / 2.0, cy - kh / 2.0, kw, kh);
+    let (kc, kseg) = shape(th, th.px(tok(&KNOB_CORNER, "slider.knob_corner")), kw, kh);
+    ctx.dl.ring_fill(
+        knob,
+        &kc,
+        kseg,
         col(th.color(tok(&KNOB_COLOR, "slider.knob_color"))),
     );
 }

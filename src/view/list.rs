@@ -18,6 +18,7 @@ use super::scroll::{ScrollPhysics, ScrollView, ScrollbarEdge, ScrollbarLook};
 use super::surface::Surface;
 use super::table::Extent;
 use super::virt;
+use crate::draw::CornerStyle;
 use crate::theme::parse::State;
 use crate::theme::Color;
 use crate::ui::Align;
@@ -139,13 +140,19 @@ struct Look {
     /// no guides are drawn — the same shape `list.rule` has.
     guide_w: f32,
     guide_c: Color,
+    /// `list.corner_style` and `list.corner` — the cut and the radius of
+    /// the hover/selection plate under a row, which is the one thing the
+    /// master's `list.corner` was ever written for.
+    plate_cut: CornerStyle,
+    plate_radius: f32,
 }
 
 impl Look {
-    fn read(sf: &mut impl Surface, shrink: f32, tree: bool) -> Look {
+    fn read(sf: &mut impl Surface, shrink: f32, tree: bool, row_w: f32) -> Look {
         let guide_w = if tree { sf.px("tree.guides") } else { 0.0 };
+        let row_h = sf.px("list.row_h") * shrink;
         Look {
-            row_h: sf.px("list.row_h") * shrink,
+            row_h,
             pad_x: sf.px("list.pad_x") * shrink,
             gap: sf.px("list.gap") * shrink,
             // A hairline is a hairline at every scale — the rule of
@@ -173,6 +180,15 @@ impl Look {
             } else {
                 Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
             },
+            plate_cut: paint::corner_style(sf, "list.corner_style"),
+            // Settled here and not per row: every row of a list wears
+            // the same rectangle, and a `pill` radius is read off it.
+            plate_radius: paint::corner_radius(
+                sf,
+                "list.corner",
+                Rect::new(0.0, 0.0, row_w, row_h),
+                shrink,
+            ),
         }
     }
 
@@ -217,7 +233,7 @@ pub fn list<S: Surface, M: RowModel>(
         }
         None => (None, None, 0, false, false, false, false),
     };
-    let look = Look::read(sf, st.shrink, tree);
+    let look = Look::read(sf, st.shrink, tree, r.w);
     let pitch = look.pitch();
     let total = model.len();
     if r.h <= 0.0 || total == 0 {
@@ -335,7 +351,7 @@ pub fn list<S: Surface, M: RowModel>(
                 // needs to.
                 let style = sf.class_state("list.item", rung);
                 if style.fill.a > 0.0 {
-                    sf.rect(row_r, style.fill);
+                    sf.ring_fill(row_r, look.plate_cut, look.plate_radius, style.fill);
                 }
             }
         }
@@ -554,12 +570,19 @@ mod tests {
     /// A surface with just enough theme to draw a row that can be
     /// pointed at: a row 20 px tall, 4 px of padding, and a body role
     /// whose characters are 5 px wide (the fake measures half an em).
+    ///
+    /// The two role BINDINGS are stated as well. They have to be: a
+    /// binding standing at no word names no role, and no role draws
+    /// nothing — which is the whole point of the rule, and would leave
+    /// these tests measuring an empty row.
     fn dressed() -> FakeSurface {
         FakeSurface::new()
             .token("list.row_h", 20.0)
             .token("list.pad_x", 4.0)
             .token("type.body.size", 10.0)
             .token("type.body.leading", 1.0)
+            .word_at("list.label_role", "body")
+            .word_at("list.status_role", "body")
     }
 
     fn one_row(label: &str) -> Rows {
@@ -619,6 +642,68 @@ mod tests {
         // Trimmed and asked for, but the pointer is on the row BELOW the
         // only one there is.
         assert!(drawn(dressed().at(20.0, 45.0), &model, true).tips.is_empty());
+    }
+
+    // ---- the plate under a row ----
+
+    /// One row, 20 px tall, with the pointer resting on it and a plate
+    /// colour to draw — the only frame in which a hover plate exists.
+    fn hovered(corner: f32, cut: &str) -> FakeSurface {
+        let mut sf = dressed()
+            .token("list.corner", corner)
+            .word_at("list.corner_style", cut)
+            .plate(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 })
+            .at(20.0, 10.0);
+        let model = one_row("nm");
+        let mut state = ListState::new();
+        let mut hits = super::super::hits::Hits::new();
+        list(
+            &mut sf,
+            Rect::new(0.0, 0.0, 100.0, 60.0),
+            &model,
+            &ListStyle::default(),
+            Some(ListView {
+                state: &mut state,
+                hits: &mut hits,
+                id: 3,
+                select: true,
+                scroll: false,
+                tree: false,
+                tooltip: false,
+            }),
+        );
+        sf
+    }
+
+    #[test]
+    fn the_plate_under_a_row_wears_the_corner_the_theme_states() {
+        let sf = hovered(4.0, "round");
+        assert_eq!(sf.rings.len(), 1, "one row under the pointer, one plate");
+        let (r, style, radius) = sf.rings[0];
+        assert_eq!((r.x, r.y, r.w, r.h), (0.0, 0.0, 100.0, 20.0), "the row's own box");
+        assert_eq!(style, CornerStyle::Round);
+        assert_eq!(radius, 4.0);
+        // Both halves of the pair move the plate, which is the whole
+        // point: `list.corner` used to be read by nothing at all.
+        let sf = hovered(9.0, "round");
+        assert_eq!(sf.rings[0].2, 9.0);
+        let sf = hovered(4.0, "chamfer");
+        assert_eq!(sf.rings[0].1, CornerStyle::Chamfer);
+        // A row 20 px tall cannot wear a 40 px radius: two corners would
+        // cross before they met.
+        let sf = hovered(40.0, "round");
+        assert_eq!(sf.rings[0].2, 10.0);
+    }
+
+    #[test]
+    fn the_master_states_a_rows_corner_and_how_it_is_cut() {
+        // What the drawing test stands on: the shipped values, so the
+        // rounded plate above is the plate the user sees.
+        assert!(px("list.corner") > 0.0);
+        // Asked the way `CtxSurface::word` asks it: the answer the
+        // drawing gets, not a second reading of the same file.
+        let id = crate::theme::id("list.corner_style").expect("declared in the master");
+        assert_eq!(crate::ui::theme_word(id), "round");
     }
 
     #[test]

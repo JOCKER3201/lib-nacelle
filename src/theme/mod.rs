@@ -68,6 +68,35 @@ pub use color::Color as ThemeColor;
 pub use expr::{Expr, Kind, Value};
 pub use parse::{Diagnostic, Level, Span};
 
+/// THE RAW LOOK — what the program is when no theme has answered.
+///
+/// "Without a theme it should look like HTML with no CSS": legible,
+/// visibly undesigned, and never a guess at what an author meant. These
+/// are the only colours in the engine that are not a token, and they live
+/// in ONE place because they were four — a grey in `color.rs`, a bed in
+/// `bake.rs`, a darker grey in `resolve.rs` and a stroke width inside
+/// `StateStyle::RAW` — and four copies of "unstyled" are four different
+/// unstyled programs, only one of which anybody ever looks at.
+pub mod raw {
+    use super::color::Color;
+
+    /// What a colour that gets DRAWN answers with nothing behind it —
+    /// text, lines, glyphs, edges. Mid grey: unstyled at a glance, still
+    /// legible on either bed.
+    pub const INK: Color = Color::GREY;
+
+    /// What a colour that gets FILLED answers with nothing behind it —
+    /// beds, backgrounds, the canvas. Near-black, the way an unstyled web
+    /// page is white: one grey for everything made the themeless program
+    /// an unreadable slab, and legible-but-undesigned needs exactly two
+    /// achromatic values, not one.
+    pub const BED: Color = Color { r: 0.05, g: 0.05, b: 0.05, a: 1.0 };
+
+    /// The one hairline an unstyled control wears. A device pixel: this
+    /// is the absence of a stroke token, not a stroke ladder in hiding.
+    pub const EDGE_WIDTH: f32 = 1.0;
+}
+
 use cascade::ThemeSource;
 use parse::{Document, LangTag, SectionKind, Sources};
 use std::collections::HashMap;
@@ -234,9 +263,68 @@ pub fn class_id(name: &str) -> Option<u16> {
 }
 
 pub fn id(name: &str) -> Option<TokenId> {
+    // There is no schema until a theme has been loaded, and `resolved` is
+    // what loads it. Almost every caller memoises this answer in a
+    // `'static OnceLock` — `ui::tok`, `plate`, `term_ansi`, `data_series`
+    // and a dozen copies of `tok` across the objects — so an id asked one
+    // moment too early does not merely fail once: it pins "no such token"
+    // for the life of the process, and the token silently keeps whatever
+    // the consumer falls back to. Nothing in the load path reaches this
+    // function, so forcing the load here cannot re-enter.
+    if ENGINE.get().is_none() {
+        let _ = resolved();
+    }
     let e = ENGINE.get()?;
     let g = e.lock().ok()?;
     g.schema.id(name)
+}
+
+/// A baked corner RADIUS as a length on the box it is about to cut.
+///
+/// Radius tokens carry the LENGTH alone — how the corner is cut is the
+/// `*_corner_style` / `*_corner_mode` sibling's word — but one of the
+/// lengths a theme may write is `pill`, and `pill` has no value until
+/// there is a box: it means "as round as this one can be", which is half
+/// the short side, the largest radius the ring generator honours. It
+/// bakes to §5.0's negative sentinel, so every consumer testing
+/// `radius > 0.0` has silently drawn a rectangle instead.
+///
+/// Any other sentinel is the ABSENCE of a length rather than a length,
+/// and absence answers zero: nothing here invents a radius the theme did
+/// not ask for.
+pub fn corner_radius(radius: f32, w: f32, h: f32) -> f32 {
+    match expr::sentinel("pill") {
+        Some(pill) if radius == pill => (w.min(h) * 0.5).max(0.0),
+        _ if radius > 0.0 => radius,
+        _ => 0.0,
+    }
+}
+
+/// A role's resolved px: `raw` under the role's own ceiling and floor,
+/// with `type.min_px` beneath a role whose theme states no floor of its
+/// own.
+///
+/// Here for the same reason [`corner_radius`] is: the library has TWO
+/// role resolvers — [`crate::ui::Role::px`] for objects drawing against
+/// `Ctx`, [`crate::view::paint::role_look`] for every view, script table
+/// and ABI widget drawing against `Surface` — and a rule written twice
+/// is a rule that stops matching itself somewhere. It already had: one
+/// side read a stated `min_px` of zero as "no floor" and the other as
+/// "unstated, take the global", so one theme sized the same role two
+/// ways in two halves of one screen.
+///
+/// Zero is "unstated" in both slots, which is how the master spells an
+/// absent bound: `0px` on the ceiling is uncapped, and a floor of zero
+/// is no floor a theme wrote. Neither is a length this file invents —
+/// the caller passes what the theme holds, MISSING included, which reads
+/// as zero.
+///
+/// The floor is applied AFTER the ceiling: a theme that caps a role
+/// below the readable floor has contradicted itself, and `type.min_px`
+/// is the master's last defence against unreadable type, so it wins.
+pub fn role_px(raw: f32, own_floor: f32, global_floor: f32, ceiling: f32) -> f32 {
+    let capped = if ceiling > 0.0 { raw.min(ceiling) } else { raw };
+    capped.max(if own_floor > 0.0 { own_floor } else { global_floor })
 }
 
 /// The word behind an enum token's baked index, for diagnostics and for a
@@ -1050,6 +1138,50 @@ pub fn check_hot_set() -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// A capsule is a radius the box has to be asked for, and the sentinel
+    /// that asks for it is the one every `radius > 0.0` test has been
+    /// reading as "no corner".
+    #[test]
+    fn a_pill_becomes_a_radius_only_once_there_is_a_box_to_measure() {
+        let pill = expr::sentinel("pill").unwrap();
+        assert_eq!(corner_radius(pill, 200.0, 8.0), 4.0);
+        // Half the SHORT side, whichever way round the box lies.
+        assert_eq!(corner_radius(pill, 8.0, 200.0), 4.0);
+        // A stated length is itself; clamping to the box is the ring
+        // generator's job and stays there.
+        assert_eq!(corner_radius(3.0, 200.0, 8.0), 3.0);
+        // The other sentinels are the ABSENCE of a length. Answering one of
+        // them with a guessed radius would be this file choosing a shape.
+        for word in ["none", "auto", "same_as_parent"] {
+            let v = expr::sentinel(word).unwrap();
+            assert_eq!(corner_radius(v, 200.0, 8.0), 0.0, "{word}");
+        }
+    }
+
+    /// The bounds a role's size meets, in the one place both resolvers
+    /// meet them. The last line is the reason this is a function at all:
+    /// a stated floor of zero used to mean "no floor" on one side of the
+    /// library and "unstated, take the global" on the other, so one theme
+    /// sized one role two ways in two halves of one screen.
+    #[test]
+    fn a_role_meets_its_own_bounds_first_and_the_global_floor_last() {
+        // Unbounded on both ends: `0` is how the master spells an absent
+        // bound, and must never read as a ceiling of nothing.
+        assert_eq!(role_px(10.0, 0.0, 0.0, 0.0), 10.0);
+        // The role's own ceiling caps it, its own floor lifts it.
+        assert_eq!(role_px(10.0, 0.0, 0.0, 9.0), 9.0);
+        assert_eq!(role_px(4.0, 6.0, 0.0, 0.0), 6.0);
+        // A ceiling under the floor is a theme contradicting itself, and
+        // the floor is the last defence against unreadable type.
+        assert_eq!(role_px(10.0, 12.0, 8.0, 4.0), 12.0);
+        // The global floor holds up a role that states none of its own.
+        // A MISSING token and a stated `0px` reach here as the same
+        // number on purpose — that is the silence both resolvers now read
+        // the same way, and neither of them may shrink type to nothing
+        // because a theme wrote a bound it does not have.
+        assert_eq!(role_px(4.0, 0.0, 8.0, 0.0), 8.0);
+    }
+
     /// Every name in the hot set must be a token `default.theme` declares.
     ///
     /// A hot id that resolves to MISSING does not crash and does not warn on a
@@ -1317,6 +1449,16 @@ ui_scale    = 1.0
 density     = compact
 density_space = 1.00
 density_type  = 1.00
+level.airy.space = 1.30
+level.airy.type = 1.06
+level.comfortable.space = 1.15
+level.comfortable.type = 1.00
+level.compact.space = 1.00
+level.compact.type = 1.00
+level.dense.space = 0.85
+level.dense.type = 0.96
+level.instrument.space = 0.72
+level.instrument.type = 0.90
 
 [surface]
 base  = mix(@palette.black, @palette.accent, 0.06)
@@ -1438,7 +1580,7 @@ decor.enabled    = false
         assert!(printed.contains("unknown token \"stroke.thin\""), "{printed}");
         assert!(printed.contains("ring.width = @stroke.thin"), "{printed}");
         assert!(printed.contains('^'), "{printed}");
-        assert!(printed.contains("default.theme:68:14"), "{printed}");
+        assert!(printed.contains("default.theme:78:14"), "{printed}");
         assert!(
             out.iter().all(|d| d.message.contains("stroke.thin")),
             "the master must be clean apart from the deliberate dangler:\n{printed}"
