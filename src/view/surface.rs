@@ -225,9 +225,11 @@ pub trait Surface {
     /// every hover-able rectangle on screen.
     ///
     /// **Nothing, by default.** A tooltip is drawn over its neighbours,
-    /// and a plugin's surface may not paint outside the box it was given
-    /// — a host-drawn tooltip for plugins needs an ABI entry of its own
-    /// and is out of this phase (F2 §11).
+    /// and a surface that cannot reach past the box it was given cannot
+    /// draw one; both real surfaces can — [`CtxSurface`] files with the
+    /// application's manager, [`AbiSurface`] through
+    /// [`crate::runtime::HostApi::tooltip`], and in both cases the box
+    /// is the HOST's to paint.
     fn tooltip(&mut self, id: u64, anchor: Rect, text: &str) {
         let _ = (id, anchor, text);
     }
@@ -720,6 +722,24 @@ impl Surface for AbiSurface<'_> {
 
     fn scale(&self) -> f32 {
         self.scale
+    }
+
+    /// Filed with the host, which draws the box: a plugin draws in the
+    /// middle of the frame, so anything IT painted outside its own
+    /// rectangle would be covered by the panels drawn after it.
+    ///
+    /// The pointer test is repeated on this side too, before the call —
+    /// not because the host does not repeat it (it does), but because a
+    /// request that is going to be dropped is not worth a crossing, and
+    /// the mouse is already in hand.
+    fn tooltip(&mut self, id: u64, anchor: Rect, text: &str) {
+        if !self.api.has_tooltip() || text.is_empty() {
+            return;
+        }
+        if !anchor.contains(self.mouse.0, self.mouse.1) {
+            return;
+        }
+        (self.api.tooltip)(self.ctx, id, rc(anchor), text.as_ptr(), text.len() as u32);
     }
 }
 

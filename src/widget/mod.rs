@@ -219,6 +219,55 @@ pub trait Widget {
         Action::None
     }
 
+    /// The pointer button went down over the widget.
+    ///
+    /// The front of the SAME gesture [`Widget::drag`] carries, never a
+    /// second capture path: the host delivers this, then asks
+    /// `drag(Begin)`, and that answer alone decides who owns what
+    /// follows. [`Action::Capture`] from here means nothing and does
+    /// nothing — exactly what it means from [`Widget::click`].
+    ///
+    /// What it is for is the half of a press a capture cannot express:
+    /// the PRESS rung of the state ladder (a control that darkens while
+    /// it is held), and a grab that has to know it started even when the
+    /// widget did not want the drag. The default does nothing, so every
+    /// widget written before this existed behaves exactly as it did.
+    fn press(&mut self, _x: f32, _y: f32, _r: Rect, _host: &Host) -> Action {
+        Action::None
+    }
+
+    /// The pointer button came up.
+    ///
+    /// Delivered after `drag(End)` when a capture was in force, and
+    /// before [`Widget::click`] when none was — so a widget tracking its
+    /// own down/up pair has closed it before the click that concludes it
+    /// arrives. The coordinates may lie outside `r`: a button pressed
+    /// and released off its own edge is a press the user took back, and
+    /// only the widget can decide that.
+    fn release(&mut self, _x: f32, _y: f32, _r: Rect, _host: &Host) -> Action {
+        Action::None
+    }
+
+    /// A key delivered to THIS widget, because it owns the keyboard.
+    ///
+    /// The opposite of [`Widget::key_feedback`] in every way that
+    /// matters: that one is a broadcast to every instance so an
+    /// on-screen keyboard can light up what somebody else is typing;
+    /// this one goes to one widget, carries the modifiers, and answers.
+    ///
+    /// * `None` — not consumed. The host spends the key on itself:
+    ///   focus navigation, the shortcut registry, the shell's bytes.
+    /// * `Some(`[`Action::None`]`)` — consumed, and nothing is asked of
+    ///   the application. What a field answers to an ordinary character.
+    /// * `Some(action)` — consumed, and here is what to do about it (a
+    ///   search box's Enter opening what it found).
+    ///
+    /// The default is `None`: a widget that has not been taught about
+    /// keys never takes one away from the host.
+    fn key(&mut self, _ev: &crate::focus::KeyEv) -> Option<Action> {
+        None
+    }
+
     /// The character grid this widget settled on while drawing. Only the
     /// terminal view has one; the application resizes the PTY to match.
     fn grid(&self) -> Option<(usize, usize)> {
@@ -227,6 +276,12 @@ pub trait Widget {
 
     /// A key was pressed on the PHYSICAL keyboard — so the on-screen one
     /// can light the matching key up.
+    ///
+    /// A BROADCAST: every widget hears every key, whoever it was meant
+    /// for, and nobody can consume it. That is right for lighting a key
+    /// up and wrong for everything else, which is what [`Widget::key`]
+    /// is. Named keys are spelled with the [`crate::runtime::keys`]
+    /// words on both paths.
     fn key_feedback(&mut self, _ch: Option<char>, _label: Option<&str>) {}
 
     /// How this widget answers being resized. Asked once a frame, BEFORE

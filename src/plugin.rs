@@ -17,11 +17,13 @@ use crate::runtime::{
     ACTION_BYTES, ACTION_CAPTURE, ACTION_EXIT, SIZING_ROWS, ACTION_NONE, ACTION_OPEN_DIR,
     ACTION_OPEN_FILE,
     ACTION_OPEN_SETTINGS, ACTION_PASTE_PRIMARY, ACTION_SCROLL_TERMINAL, ACTION_SELECT_TAB,
-    ACTION_TERM_SELECT, CHROME_BUTTONS_CLOSE, CHROME_BUTTONS_MIN_CLOSE,
+    ACTION_TERM_SELECT, BUTTON_PRESS, BUTTON_RELEASE, CHROME_BUTTONS_CLOSE,
+    CHROME_BUTTONS_MIN_CLOSE,
     CHROME_BUTTONS_MIN_MAX_CLOSE, DRAG_BEGIN, DRAG_END, DRAG_MOVE, MASK_QUAD_ADD,
-    PLUGIN_API_HAS_CHROME, PLUGIN_API_HAS_DRAG, PLUGIN_API_HAS_POINTER, PLUGIN_API_SIZE_MIN,
+    PLUGIN_API_HAS_BUTTON, PLUGIN_API_HAS_CHROME, PLUGIN_API_HAS_DRAG, PLUGIN_API_HAS_KEY,
+    PLUGIN_API_HAS_POINTER, PLUGIN_API_SIZE_MIN,
     SELECT_KIND_LINES,
-    SELECT_KIND_WORDS, SELECT_OP_BEGIN, SELECT_OP_END, SELECT_OP_EXTEND, StateStyleC,
+    SELECT_KIND_WORDS, SELECT_OP_BEGIN, SELECT_OP_END, SELECT_OP_EXTEND, StateStyleC, keys,
 };
 use crate::font::{FontSystem, FONT_COUNT};
 use crate::term::{Cell, SelKind, FLAG_UNDERLINE, FLAG_WIDE_LEAD, FLAG_WIDE_SPACER};
@@ -382,6 +384,89 @@ extern "C" fn h_ring(p: *mut c_void, r: RectC, style: u32, radius: f32, w: f32, 
     ctx.dl.ring(Rect::new(r.x, r.y, r.w, r.h), &corners, seg, w, color_in(c));
 }
 
+/// A plugin's tooltip request, filed with the application's manager —
+/// the same call `CtxSurface::tooltip` makes, because it is the same
+/// request: the plugin may not draw the box (it would be covered by the
+/// panels drawn after it), so the host does.
+///
+/// The containment test is repeated here rather than trusted, exactly as
+/// on the host's own surface: a request for a rectangle the pointer is
+/// nowhere near would explain the wrong thing, and one comparison is
+/// cheaper than finding that out on screen.
+extern "C" fn h_tooltip(p: *mut c_void, id: u64, anchor: RectC, text: *const u8, len: u32) {
+    let Some(ctx) = (unsafe { ctx_of(p) }) else { return };
+    let r = Rect::new(anchor.x, anchor.y, anchor.w, anchor.h);
+    if !r.contains(ctx.mouse.0, ctx.mouse.1) {
+        return;
+    }
+    let s = text_in(text, len);
+    if s.is_empty() {
+        return;
+    }
+    let now = ctx.t;
+    if let Some(tips) = ctx.tips.as_deref_mut() {
+        tips.request(id, r, s, now);
+    }
+}
+
+/// The channel's two entries. They take no drawing context because the
+/// board is the PROCESS's, like the theme's token table: a value stated
+/// while drawing must still be there when another widget's click reads
+/// it three frames later.
+extern "C" fn h_channel_publish(
+    topic: *const u8,
+    topic_len: u32,
+    data: *const u8,
+    data_len: u32,
+) -> u64 {
+    let topic = text_in(topic, topic_len);
+    if topic.is_empty() {
+        return 0;
+    }
+    // An empty payload is a legitimate value ("nothing is selected
+    // now"), so no bytes is a publication rather than a refusal — and a
+    // null pointer is no bytes whatever its length claims, because
+    // `from_raw_parts` on one is undefined behaviour before anything is
+    // ever read. A length past the ceiling is refused outright rather
+    // than clamped: half a message is not the message.
+    let bytes: &[u8] = if data.is_null() || data_len == 0 {
+        &[]
+    } else if data_len as usize > crate::runtime::CHANNEL_VALUE_MAX {
+        return 0;
+    } else {
+        unsafe { std::slice::from_raw_parts(data, data_len as usize) }
+    };
+    crate::channel::publish(topic, bytes)
+}
+
+extern "C" fn h_channel_read(
+    topic: *const u8,
+    topic_len: u32,
+    buf: *mut u8,
+    cap: u32,
+    seq: *mut u64,
+) -> u32 {
+    let topic = text_in(topic, topic_len);
+    if topic.is_empty() {
+        return 0;
+    }
+    // A caller wanting only the sequence number passes no buffer, which
+    // is what `channel::seq` does on this side too.
+    let mut none: [u8; 0] = [];
+    let out: &mut [u8] = if buf.is_null() || cap == 0 {
+        &mut none
+    } else {
+        unsafe { std::slice::from_raw_parts_mut(buf, cap as usize) }
+    };
+    let (len, s) = crate::channel::read_into(topic, out);
+    unsafe {
+        if let Some(seq) = seq.as_mut() {
+            *seq = s;
+        }
+    }
+    len.min(u32::MAX as usize) as u32
+}
+
 // The two v4 theme entries. Append-only means they stay at their table
 // positions forever and keep answering what the retired seven-field
 // bridge answered: `accent.primary` and `surface.base`.
@@ -685,6 +770,9 @@ pub fn host_api() -> &'static HostApi {
         pop_clip: h_pop_clip,
         ring_fill: h_ring_fill,
         ring: h_ring,
+        tooltip: h_tooltip,
+        channel_publish: h_channel_publish,
+        channel_read: h_channel_read,
     };
     &API
 }
@@ -814,6 +902,37 @@ extern "C" fn pointer_absent(
     0
 }
 
+/// The stand-in for a table that ends before `key`: no key is ever
+/// consumed, so the host spends every one of them on itself — which is
+/// what it does today for every widget there is.
+extern "C" fn key_absent(
+    _: *mut c_void,
+    _: u32,
+    _: *const u8,
+    _: u32,
+    _: u32,
+    _: *mut ActionC,
+) -> u32 {
+    0
+}
+
+/// The stand-in for a table that ends before `button`: the press and the
+/// release are simply not delivered. The gesture still reaches the
+/// widget as a `drag` or a `click`, so a pre-button widget loses the
+/// press RUNG and nothing else.
+#[allow(clippy::too_many_arguments)]
+extern "C" fn button_absent(
+    _: *mut c_void,
+    _: u32,
+    _: f32,
+    _: f32,
+    _: RectC,
+    _: f32,
+    _: f32,
+    _: *mut ActionC,
+) {
+}
+
 impl PluginWidget {
     /// Wraps a plugin's interface. None when the plugin reports an
     /// interface this build does not speak, or cannot make an instance.
@@ -862,6 +981,12 @@ impl PluginWidget {
             if size < PLUGIN_API_HAS_POINTER {
                 std::ptr::addr_of_mut!((*slot.as_mut_ptr()).pointer).write(pointer_absent);
             }
+            if size < PLUGIN_API_HAS_KEY {
+                std::ptr::addr_of_mut!((*slot.as_mut_ptr()).key).write(key_absent);
+            }
+            if size < PLUGIN_API_HAS_BUTTON {
+                std::ptr::addr_of_mut!((*slot.as_mut_ptr()).button).write(button_absent);
+            }
             slot.assume_init()
         };
         let instance = (table.create)();
@@ -885,6 +1010,43 @@ impl PluginWidget {
     /// Whether the plugin's table reaches the `pointer` entry.
     fn has_pointer(&self) -> bool {
         self.api.api_size as usize >= PLUGIN_API_HAS_POINTER
+    }
+
+    /// Whether the plugin's table reaches the `key` entry.
+    fn has_key(&self) -> bool {
+        self.api.api_size as usize >= PLUGIN_API_HAS_KEY
+    }
+
+    /// Whether the plugin's table reaches the `button` entry.
+    fn has_button(&self) -> bool {
+        self.api.api_size as usize >= PLUGIN_API_HAS_BUTTON
+    }
+
+    /// The press/release pair, which differ only in their phase — the
+    /// same shape `drag` has, for the same reason.
+    fn button(&mut self, phase: u32, x: f32, y: f32, r: Rect, host: &Host) -> Action {
+        if !self.has_button() {
+            return Action::None;
+        }
+        let mut out = empty_action();
+        (self.api.button)(
+            self.instance,
+            phase,
+            x,
+            y,
+            rect_out(r),
+            host.window.0,
+            host.window.1,
+            &mut out,
+        );
+        match action_in(&out) {
+            // The capture is `drag`'s alone (F1 §5.1). A plugin
+            // answering it here has misread the contract; taking it
+            // seriously would open a second capture path, which is the
+            // one thing this entry promised not to be.
+            Action::Capture => Action::None,
+            a => a,
+        }
     }
 }
 
@@ -1002,6 +1164,53 @@ impl Widget for PluginWidget {
             &mut out,
         );
         action_in(&out)
+    }
+
+    fn press(&mut self, x: f32, y: f32, r: Rect, host: &Host) -> Action {
+        self.button(BUTTON_PRESS, x, y, r, host)
+    }
+
+    fn release(&mut self, x: f32, y: f32, r: Rect, host: &Host) -> Action {
+        self.button(BUTTON_RELEASE, x, y, r, host)
+    }
+
+    /// The focused key, as the boundary carries it: a scalar OR one of
+    /// the [`keys`] words, plus the modifier bits.
+    ///
+    /// Two fields of a [`crate::focus::KeyEv`] stay on this side.
+    /// `text` does not cross — the boundary carries the KEY, so a
+    /// platform that expanded a press into several characters (an IME
+    /// commit) reaches a plugin through no entry at all, rather than
+    /// through this one with the tail cut off. `repeat` does not cross
+    /// either: a held key arrives as another key, which is what
+    /// auto-repeat is for, and a widget that must act once per physical
+    /// press cannot be written against this entry.
+    fn key(&mut self, ev: &crate::focus::KeyEv) -> Option<Action> {
+        if !self.has_key() {
+            return None;
+        }
+        let name = keys::name_of(ev.key);
+        let ch = match ev.key {
+            crate::focus::Key::Char(c) => c as u32,
+            _ => 0,
+        };
+        // A key this build does not carry by name and cannot spell as a
+        // character is not an event to send: an empty name with a zero
+        // scalar means nothing, and the contract says so.
+        if name.is_none() && ch == 0 {
+            return None;
+        }
+        let label = name.unwrap_or("");
+        let mut out = empty_action();
+        let taken = (self.api.key)(
+            self.instance,
+            ch,
+            label.as_ptr(),
+            label.len() as u32,
+            ev.mods.bits() as u32,
+            &mut out,
+        );
+        (taken != 0).then(|| action_in(&out))
     }
 
     fn pointer(&mut self, x: f32, y: f32, r: Rect, window: (f32, f32)) -> bool {
@@ -1128,8 +1337,9 @@ mod tests {
     #[test]
     fn the_host_table_grows_at_the_end_only() {
         use crate::runtime::{
-            HOST_API_HAS_CLIP, HOST_API_HAS_ENUM_WORD, HOST_API_HAS_MASK_QUAD,
-            HOST_API_HAS_RING, HOST_API_SIZE_MIN,
+            HOST_API_HAS_CHANNEL, HOST_API_HAS_CLIP, HOST_API_HAS_ENUM_WORD,
+            HOST_API_HAS_MASK_QUAD, HOST_API_HAS_RING, HOST_API_HAS_TOOLTIP,
+            HOST_API_SIZE_MIN,
         };
         let api = host_api();
         assert_eq!(api.api_size as usize, std::mem::size_of::<HostApi>());
@@ -1137,13 +1347,17 @@ mod tests {
         assert!(api.has_mask_quad());
         assert!(api.has_clip());
         assert!(api.has_ring());
+        assert!(api.has_tooltip());
+        assert!(api.has_channel());
         // The appended entries sit past the mandatory prefix, in order,
-        // with the ring pair the current end of the table.
+        // with the channel pair the current end of the table.
         assert!(HOST_API_SIZE_MIN < HOST_API_HAS_ENUM_WORD);
         assert!(HOST_API_HAS_ENUM_WORD < HOST_API_HAS_MASK_QUAD);
         assert!(HOST_API_HAS_MASK_QUAD < HOST_API_HAS_CLIP);
         assert!(HOST_API_HAS_CLIP < HOST_API_HAS_RING);
-        assert_eq!(HOST_API_HAS_RING, std::mem::size_of::<HostApi>());
+        assert!(HOST_API_HAS_RING < HOST_API_HAS_TOOLTIP);
+        assert!(HOST_API_HAS_TOOLTIP < HOST_API_HAS_CHANNEL);
+        assert_eq!(HOST_API_HAS_CHANNEL, std::mem::size_of::<HostApi>());
         // A host that stopped at the version-6 minimum answers none of
         // them, which is what a plugin's `has_*` gate is for.
         let old = HostApi { api_size: HOST_API_SIZE_MIN as u32, ..*api };
@@ -1151,10 +1365,32 @@ mod tests {
         assert!(!old.has_mask_quad());
         assert!(!old.has_clip());
         assert!(!old.has_ring());
+        assert!(!old.has_tooltip());
+        assert!(!old.has_channel());
         // And a host from before the ring pair keeps the clips.
         let pre_ring = HostApi { api_size: HOST_API_HAS_CLIP as u32, ..*api };
         assert!(pre_ring.has_clip());
         assert!(!pre_ring.has_ring());
+        // The table as it stood before THIS growth — everything through
+        // the rings, and none of the four holes it closes. This is the
+        // old table a shipped plugin measured, and every new gate must
+        // answer false for it or that plugin reads past the end.
+        let pre_growth = HostApi { api_size: HOST_API_HAS_RING as u32, ..*api };
+        assert!(pre_growth.has_theme_enum_word());
+        assert!(pre_growth.has_mask_quad());
+        assert!(pre_growth.has_clip());
+        assert!(pre_growth.has_ring());
+        assert!(!pre_growth.has_tooltip());
+        assert!(!pre_growth.has_channel());
+        // Half the channel pair is no channel: a table that reaches
+        // `channel_publish` and stops must be called for neither, or a
+        // widget would state facts nothing in the process can read.
+        let half_channel = HostApi {
+            api_size: (std::mem::offset_of!(HostApi, channel_read)) as u32,
+            ..*api
+        };
+        assert!(half_channel.has_tooltip());
+        assert!(!half_channel.has_channel());
         // A host from before the clip pair — the whole of ABI 6 as it
         // stood — still answers everything it did answer.
         let pre_clip = HostApi { api_size: HOST_API_HAS_MASK_QUAD as u32, ..*api };
@@ -1292,6 +1528,53 @@ mod tests {
         u32::from(x < r.x + r.w / 2.0)
     }
 
+    /// Answers the focused key the way a text field would: Enter is
+    /// consumed and asks the application for something, Ctrl+A is
+    /// consumed and asks for nothing, everything else is left alone.
+    extern "C" fn t_key_focused(
+        _: *mut c_void,
+        ch: u32,
+        label: *const u8,
+        label_len: u32,
+        mods: u32,
+        out: *mut ActionC,
+    ) -> u32 {
+        let name = text_in(label, label_len);
+        if name == keys::ENTER {
+            if let Some(out) = unsafe { out.as_mut() } {
+                out.kind = ACTION_EXIT;
+            }
+            return 1;
+        }
+        if ch == 'a' as u32 && mods == crate::runtime::MODS_CTRL {
+            return 1; // consumed, nothing asked
+        }
+        0
+    }
+
+    /// Answers the two phases differently, so a test can tell which one
+    /// arrived — and answers CAPTURE on the press, which the bridge must
+    /// refuse to pass on (the capture is `drag`'s alone).
+    #[allow(clippy::too_many_arguments)]
+    extern "C" fn t_button(
+        _: *mut c_void,
+        phase: u32,
+        _: f32,
+        _: f32,
+        _: RectC,
+        _: f32,
+        _: f32,
+        out: *mut ActionC,
+    ) {
+        let Some(out) = (unsafe { out.as_mut() }) else { return };
+        if phase == crate::runtime::BUTTON_PRESS {
+            out.kind = ACTION_CAPTURE;
+        } else {
+            out.kind = ACTION_SELECT_TAB;
+            out.index = 7;
+        }
+    }
+
     fn t_api() -> PluginApi {
         PluginApi {
             abi_version: ABI_VERSION,
@@ -1307,6 +1590,22 @@ mod tests {
             chrome: t_chrome,
             drag: t_drag,
             pointer: t_pointer,
+            key: t_key_focused,
+            button: t_button,
+        }
+    }
+
+    fn t_host() -> Host<'static> {
+        static SNAP: std::sync::OnceLock<crate::telemetry::Snapshot> =
+            std::sync::OnceLock::new();
+        Host {
+            snap: SNAP.get_or_init(crate::telemetry::Snapshot::default),
+            term: None,
+            tabs: &[true],
+            tab_active: 0,
+            shell_cwd: None,
+            t: 0.0,
+            window: (800.0, 600.0),
         }
     }
 
@@ -1397,9 +1696,11 @@ mod tests {
     #[test]
     fn a_table_without_pointer_never_claims_the_cursor() {
         use crate::runtime::{PLUGIN_API_HAS_DRAG, PLUGIN_API_HAS_POINTER};
-        // `pointer` is the current end of the table.
+        // The appended entries sit past the mandatory prefix, in order;
+        // `pointer` is no longer the table's end (`button` is, and its
+        // own test says so), which is exactly what appending means.
         assert!(PLUGIN_API_HAS_DRAG < PLUGIN_API_HAS_POINTER);
-        assert_eq!(PLUGIN_API_HAS_POINTER, std::mem::size_of::<PluginApi>());
+        assert!(PLUGIN_API_HAS_POINTER <= std::mem::size_of::<PluginApi>());
 
         let r = Rect::new(0.0, 0.0, 100.0, 100.0);
         let short = PluginApi { api_size: PLUGIN_API_HAS_DRAG as u32, ..t_api() };
@@ -1411,6 +1712,186 @@ mod tests {
         assert!(w.has_pointer());
         assert!(w.pointer(5.0, 5.0, r, (800.0, 600.0)), "over the control");
         assert!(!w.pointer(95.0, 5.0, r, (800.0, 600.0)), "past it");
+    }
+
+    /// `api_size` gates `key` like every append before it: a table from
+    /// before the entry loads, is never asked, and every key stays the
+    /// host's — which is exactly the behaviour of every plugin shipped
+    /// so far. A full table is asked, answers whether it CONSUMED the
+    /// key, and the modifiers arrive with it.
+    #[test]
+    fn a_table_without_key_leaves_every_key_to_the_host() {
+        use crate::focus::{Key, KeyEv, Mods};
+        use crate::runtime::{PLUGIN_API_HAS_KEY, PLUGIN_API_HAS_POINTER};
+        assert!(PLUGIN_API_HAS_POINTER < PLUGIN_API_HAS_KEY);
+
+        let ev = |key, mods| KeyEv { key, mods, repeat: false, text: None };
+
+        let short = PluginApi { api_size: PLUGIN_API_HAS_POINTER as u32, ..t_api() };
+        let mut w = unsafe { PluginWidget::new(&short) }.expect("a pre-key table loads");
+        assert!(!w.has_key());
+        assert_eq!(w.key(&ev(Key::Enter, Mods::NONE)), None);
+
+        let mut w = unsafe { PluginWidget::new(&t_api()) }.expect("full table loads");
+        assert!(w.has_key());
+        // A named key, spelled with the contract's word, consumed and
+        // asking the application for something.
+        assert_eq!(w.key(&ev(Key::Enter, Mods::NONE)), Some(Action::Exit));
+        // The modifiers cross: without them this is an ordinary 'a'.
+        assert_eq!(w.key(&ev(Key::Char('a'), Mods::CTRL)), Some(Action::None));
+        assert_eq!(w.key(&ev(Key::Char('a'), Mods::NONE)), None, "a plain 'a' is not the chord");
+        // A key the boundary carries neither by name nor as a scalar is
+        // not an event at all, so the widget is not even asked.
+        assert_eq!(w.key(&ev(Key::F(6), Mods::NONE)), None);
+        assert_eq!(w.key(&ev(Key::Menu, Mods::NONE)), None);
+    }
+
+    /// `api_size` gates `button` the same way, and the press/release
+    /// pair must not become a second capture path: CAPTURE answered from
+    /// either phase means nothing, exactly as it does from `click`.
+    #[test]
+    fn press_and_release_arrive_but_never_capture() {
+        use crate::runtime::{PLUGIN_API_HAS_BUTTON, PLUGIN_API_HAS_KEY};
+        // `button` is the current end of the table.
+        assert!(PLUGIN_API_HAS_KEY < PLUGIN_API_HAS_BUTTON);
+        assert_eq!(PLUGIN_API_HAS_BUTTON, std::mem::size_of::<PluginApi>());
+
+        let host = t_host();
+        let r = Rect::new(0.0, 0.0, 100.0, 100.0);
+
+        let short = PluginApi { api_size: PLUGIN_API_HAS_KEY as u32, ..t_api() };
+        let mut w = unsafe { PluginWidget::new(&short) }.expect("a pre-button table loads");
+        assert!(!w.has_button());
+        assert_eq!(w.press(5.0, 5.0, r, &host), Action::None);
+        assert_eq!(w.release(5.0, 5.0, r, &host), Action::None);
+
+        let mut w = unsafe { PluginWidget::new(&t_api()) }.expect("full table loads");
+        assert!(w.has_button());
+        // The press answers CAPTURE, which the bridge refuses to pass
+        // on: the capture is `drag`'s, and a second path to it is the
+        // one thing this entry promised not to be.
+        assert_eq!(w.press(5.0, 5.0, r, &host), Action::None);
+        // The release's own answer crosses untouched, and the two
+        // phases are told apart.
+        assert_eq!(w.release(5.0, 5.0, r, &host), Action::SelectTab(7));
+    }
+
+    /// The channel entries are reachable from a plugin and defensive
+    /// about what crosses: an unknown topic is nothing, a null buffer is
+    /// a sequence query, and neither is a crash.
+    #[test]
+    fn the_channel_crosses_as_bytes_under_a_named_topic() {
+        let topic = b"test.abi.pick";
+        let value = b"Utility";
+        let seq = h_channel_publish(
+            topic.as_ptr(),
+            topic.len() as u32,
+            value.as_ptr(),
+            value.len() as u32,
+        );
+        assert!(seq >= 1, "a published value gets a sequence number");
+
+        let mut buf = [0u8; 32];
+        let mut got = 0u64;
+        let n = h_channel_read(
+            topic.as_ptr(),
+            topic.len() as u32,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            &mut got,
+        );
+        assert_eq!(&buf[..n as usize], value);
+        assert_eq!(got, seq);
+
+        // A buffer shorter than the value is told the FULL length, so
+        // truncation is detectable rather than silent.
+        let mut small = [0u8; 3];
+        let n = h_channel_read(
+            topic.as_ptr(),
+            topic.len() as u32,
+            small.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+        );
+        assert_eq!(n as usize, value.len());
+        assert_eq!(&small, b"Uti");
+
+        // No buffer at all: a sequence query, which is how a reader asks
+        // "has anything changed" without copying.
+        let mut got = 0u64;
+        assert_eq!(
+            h_channel_read(
+                topic.as_ptr(),
+                topic.len() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut got
+            ),
+            value.len() as u32
+        );
+        assert_eq!(got, seq);
+
+        // A topic nobody published to: 0 length, 0 sequence — absent,
+        // which is a different thing from an empty value.
+        let unknown = b"test.abi.silent";
+        let mut got = 7u64;
+        assert_eq!(
+            h_channel_read(
+                unknown.as_ptr(),
+                unknown.len() as u32,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                &mut got
+            ),
+            0
+        );
+        assert_eq!(got, 0);
+
+        // Nothing here dereferences a null: an empty topic is refused
+        // both ways, and a null payload publishes an empty value.
+        assert_eq!(h_channel_publish(std::ptr::null(), 0, value.as_ptr(), 7), 0);
+        assert_eq!(
+            h_channel_read(std::ptr::null(), 0, buf.as_mut_ptr(), 32, std::ptr::null_mut()),
+            0
+        );
+        let empty = b"test.abi.empty";
+        assert!(h_channel_publish(empty.as_ptr(), empty.len() as u32, std::ptr::null(), 0) >= 1);
+        let mut got = 0u64;
+        assert_eq!(
+            h_channel_read(
+                empty.as_ptr(),
+                empty.len() as u32,
+                buf.as_mut_ptr(),
+                32,
+                &mut got
+            ),
+            0,
+            "an empty value is zero bytes long"
+        );
+        assert!(got >= 1, "but it HAS a sequence number, which is what makes it present");
+    }
+
+    /// The tooltip entry survives the two things a plugin can do wrong
+    /// with it — no context, and no application manager to file with.
+    /// Whether the box appears is `object::tooltip`'s own test; what is
+    /// tested here is that neither answer is a crash.
+    #[test]
+    fn the_tooltip_entry_survives_a_null_context() {
+        let text = b"a name too long for its column";
+        h_tooltip(
+            std::ptr::null_mut(),
+            1,
+            RectC { x: 0.0, y: 0.0, w: 10.0, h: 10.0 },
+            text.as_ptr(),
+            text.len() as u32,
+        );
+        h_tooltip(
+            std::ptr::null_mut(),
+            1,
+            RectC { x: 0.0, y: 0.0, w: 10.0, h: 10.0 },
+            std::ptr::null(),
+            0,
+        );
     }
 
     /// The TermSelect payload is read defensively: null data, a payload
