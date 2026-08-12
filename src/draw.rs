@@ -92,6 +92,20 @@ impl Corner {
         Corner { style: CornerStyle::Chamfer, size: len }
     }
 
+    /// The corner a THEME asks for, on the box it is about to cut: the
+    /// style from the token's `*_corner_style` sibling, the radius from
+    /// the `*.corner` token, and the box because §5.0's `pill` is not a
+    /// length until there is one.
+    ///
+    /// This is what a capsule is made of. `pill` says "as round as this
+    /// box can be" and bakes to a negative sentinel, so every consumer
+    /// that compares it against zero has so far drawn a rectangle where
+    /// the theme wrote a capsule; half the short side is the largest
+    /// radius `ring_points` honours, so a pill is exactly that.
+    pub fn sized(style: CornerStyle, radius: f32, r: Rect) -> Corner {
+        Corner { style, size: crate::theme::corner_radius(radius, r.w, r.h) }
+    }
+
     /// The same corner on a boundary moved inward by `d` (outward when `d`
     /// is negative), keeping the moved face parallel to the original.
     /// Round offsets to a concentric arc: exactly `r − d`. Chamfer: moving
@@ -138,7 +152,11 @@ pub fn ring_segments(r: f32, tol: f32, ceiling: u8) -> u8 {
 /// not design defaults). One `sin_cos` per call; the arc itself is adds
 /// and multiplies via incremental rotation, endpoints pinned exactly onto
 /// the edges so a flush test can compare bitwise-close.
-fn ring_points(r: Rect, c: &[Corner; 4], segments: u8, out: &mut Vec<[f32; 2]>) {
+///
+/// `pub(crate)` because a stroke is not always a fill: the focus ring
+/// walks this boundary to lay dashes along it, and a second generator for
+/// the dashed case would be a second answer to what shape a control is.
+pub(crate) fn ring_points(r: Rect, c: &[Corner; 4], segments: u8, out: &mut Vec<[f32; 2]>) {
     out.clear();
     let seg = segments.clamp(3, 16) as u32;
     let cap = (r.w.min(r.h) * 0.5).max(0.0);
@@ -940,6 +958,25 @@ impl DrawList {
         self.rect_verts(x + w - t, y + t, t, h - 2.0 * t, color);
     }
 
+    /// One straight segment `t` px wide, ends cut square across the
+    /// path — and no end treatment, on purpose.
+    ///
+    /// A rounded end was asked for here because `slider.track_corner =
+    /// @corner.pill` drew a square-ended bar, but the track is not a line
+    /// with caps: it is a BOX with corners, and the theme says so in the
+    /// word it uses. `*.corner` is a rect-corner token with a
+    /// `*_corner_style` sibling deciding the cut; there is no `*_cap` key
+    /// in the whole master, so capping a segment would answer a corner
+    /// token with a vocabulary the theme cannot spell. The capsule
+    /// therefore belongs to [`DrawList::ring_fill`], which already takes
+    /// four [`Corner`]s and already tessellates them — see
+    /// [`Corner::sized`], which is the piece that was actually missing.
+    ///
+    /// A cap here would also cost what this file protects: `polyline`
+    /// builds every chart stroke out of `line_verts`, so a cap on the
+    /// segment would double-draw at each joint, which is exactly what
+    /// `ring`'s watertight band exists to avoid and what additive runs
+    /// show as a bright pip.
     pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, t: f32, color: Color) {
         self.cmd(|| DrawCmd::Line {
             from: [x0, y0],
@@ -1828,6 +1865,35 @@ pub(crate) fn fit_tail(
 mod tests {
     use super::*;
     use std::fmt::Write as _;
+
+    /// The two shipped track corners, drawn. `slider.track_corner` says
+    /// `@corner.pill` and `slider.knob_corner` says `@corner.none`, and
+    /// until `Corner::sized` existed both reached the vertex list as the
+    /// same square-ended bar — the theme said capsule and the program drew
+    /// a slab, which is the one case where even the SHIPPED look was not
+    /// what the master wrote.
+    #[test]
+    fn a_corner_token_decides_the_shape_and_the_two_shipped_words_differ() {
+        let t = crate::theme::resolved();
+        let pill = t.px(crate::theme::id("slider.track_corner").unwrap());
+        let none = t.px(crate::theme::id("slider.knob_corner").unwrap());
+        // A pill is a sentinel, not a length: every consumer testing
+        // `radius > 0.0` has read it as "no corner at all".
+        assert!(pill < 0.0, "{pill}");
+        let r = Rect::new(0.0, 0.0, 200.0, 8.0);
+        assert_eq!(Corner::sized(CornerStyle::Round, pill, r).size, 4.0);
+        assert_eq!(Corner::sized(CornerStyle::Round, none, r).size, 0.0);
+
+        // And the difference reaches the picture: a capsule has no vertex
+        // at the box's own corner, a square-cornered fill has four.
+        let fill = |radius: f32| {
+            let mut dl = DrawList::new();
+            dl.ring_fill(r, &[Corner::sized(CornerStyle::Round, radius, r); 4], 6, Color::WHITE);
+            dl.verts.iter().filter(|v| v.pos == [r.x, r.y]).count()
+        };
+        assert!(fill(none) > 0);
+        assert_eq!(fill(pill), 0);
+    }
 
     /// The frame's stroke stays INSIDE the rect it frames. The rect is
     /// layout's and the width is the theme's, so a theme thickening a border

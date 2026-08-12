@@ -6,6 +6,7 @@
 //! [`Surface`] — a probe that records quads is as good a surface as a
 //! GPU.
 
+use nacelle::draw::CornerStyle;
 use nacelle::object::{segmented, tabs};
 use nacelle::theme::parse::State;
 use nacelle::theme::{self, Color};
@@ -14,6 +15,16 @@ use nacelle::view::surface::{StateInk, Surface};
 use nacelle::view::{Hit, Hits};
 use nacelle::Rect;
 
+/// One ring the probe was asked for: the rect, the cut its theme named,
+/// the radius, and the stroke weight — zero for a fill.
+#[derive(Clone, Copy)]
+struct Ring {
+    r: Rect,
+    style: CornerStyle,
+    radius: f32,
+    stroke: f32,
+}
+
 /// A surface that answers the REAL theme and records what it was asked
 /// to draw. Text is measured at half an em a character: wrong about
 /// fonts, right about monotonicity, which is all the trimming asks.
@@ -21,8 +32,8 @@ use nacelle::Rect;
 struct Probe {
     rects: Vec<(Rect, Color)>,
     quads: Vec<([[f32; 2]; 4], Color)>,
-    /// Chamfered fills and frames: rect, cut, stroke (0 for a fill).
-    chamfers: Vec<(Rect, f32, f32)>,
+    /// Every ring asked for, in order.
+    rings: Vec<Ring>,
     texts: Vec<(f32, f32, String, Align)>,
     lines: Vec<(f32, f32, f32, f32, f32, Color)>,
     polys: Vec<Vec<[f32; 2]>>,
@@ -53,11 +64,17 @@ impl Surface for Probe {
         true
     }
     fn unclip(&mut self) {}
-    fn chamfer_fill(&mut self, r: Rect, cut: f32, _c: Color) {
-        self.chamfers.push((r, cut, 0.0));
+    /// Recorded AND passed on to the plain primitive. The shape tests ask
+    /// what cut the theme named; the colour tests ask what landed where,
+    /// and reading those out of one list is what stops the two answers
+    /// drifting apart.
+    fn ring_fill(&mut self, r: Rect, style: CornerStyle, radius: f32, c: Color) {
+        self.rings.push(Ring { r, style, radius, stroke: 0.0 });
+        self.rect(r, c);
     }
-    fn chamfer_frame(&mut self, r: Rect, cut: f32, w: f32, _c: Color) {
-        self.chamfers.push((r, cut, w));
+    fn ring(&mut self, r: Rect, style: CornerStyle, radius: f32, w: f32, c: Color) {
+        self.rings.push(Ring { r, style, radius, stroke: w });
+        self.rect_outline(r, w, c);
     }
     fn has_token(&mut self, name: &str) -> bool {
         theme::id(name).is_some()
@@ -361,18 +378,32 @@ fn the_chosen_segment_wears_the_heavier_ring_and_the_selected_rung() {
         None,
     );
     let cut = px("segmented.corner");
-    // Fill then frame, cell by cell: the chamfer is the theme's corner.
-    let frames: Vec<_> = sf.chamfers.iter().filter(|c| c.2 > 0.0).collect();
+    // The cut is the theme's word, not the object's choice: the master
+    // sends `segmented.corner_style` after the button's, and a control
+    // that borrows the button's ladder and not its shape is a second
+    // button.
+    let want_style = match theme::enum_word_of(theme::id("segmented.corner_style").unwrap()) {
+        Some(w) if w == "round" => CornerStyle::Round,
+        Some(w) if w == "chamfer" => CornerStyle::Chamfer,
+        _ => CornerStyle::Square,
+    };
+    // Fill then frame, cell by cell.
+    let frames: Vec<_> = sf.rings.iter().filter(|c| c.stroke > 0.0).collect();
     assert_eq!(frames.len(), 3, "one ring a cell");
-    assert!((frames[0].2 - px("segmented.border")).abs() < 0.01);
-    assert!((frames[1].2 - px("segmented.border_active")).abs() < 0.01);
-    assert!((frames[2].2 - px("segmented.border")).abs() < 0.01);
+    assert!((frames[0].stroke - px("segmented.border")).abs() < 0.01);
+    assert!((frames[1].stroke - px("segmented.border_active")).abs() < 0.01);
+    assert!((frames[2].stroke - px("segmented.border")).abs() < 0.01);
     for f in &frames {
-        assert!((f.1 - cut).abs() < 0.01, "the cut is segmented.corner");
+        assert!((f.radius - cut).abs() < 0.01, "the radius is segmented.corner");
+        assert_eq!(f.style, want_style, "the cut is segmented.corner_style");
     }
-    let fills: Vec<_> = sf.chamfers.iter().filter(|c| c.2 == 0.0).collect();
+    let fills: Vec<_> = sf.rings.iter().filter(|c| c.stroke == 0.0).collect();
     assert_eq!(fills.len(), 3);
-    assert_eq!(fills[1].0.x, cells[1].x);
+    assert_eq!(fills[1].r.x, cells[1].x);
+    for f in &fills {
+        assert!((f.radius - cut).abs() < 0.01);
+        assert_eq!(f.style, want_style);
+    }
     // The chosen cell stands on the button ladder's Selected rung — the
     // class the 5.27 matrix lends this control.
     let sel = ladder("button", State::Selected).fill;

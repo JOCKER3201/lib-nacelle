@@ -70,10 +70,10 @@ impl StateStyle {
     /// hairline. What a control looks like when no theme says otherwise.
     pub const RAW: StateStyle = StateStyle {
         fill: Color::TRANSPARENT,
-        edge: Color::GREY,
-        text: Color::GREY,
-        glyph: Color::GREY,
-        edge_width: 1.0,
+        edge: super::raw::INK,
+        text: super::raw::INK,
+        glyph: super::raw::INK,
+        edge_width: super::raw::EDGE_WIDTH,
         glow_radius: 0.0,
         glow_alpha: 0.0,
         elevation: 0.0,
@@ -119,15 +119,12 @@ impl ResolvedTheme {
         self.class_count
     }
 
-    /// The engine's raw INK: what a colour that gets DRAWN answers when no
-    /// theme declares it. Mid grey — visibly unstyled, still legible.
-    pub const RAW_INK: Color = Color::GREY;
-    /// The engine's raw BED: what a colour that gets FILLED answers when no
-    /// theme declares it. Near-black, the way a browser's unstyled page is
-    /// white: one grey for everything made the themeless program an
-    /// unreadable slab, and legible-but-undesigned needs exactly two
-    /// achromatic values, not one.
-    pub const RAW_BED: Color = Color { r: 0.05, g: 0.05, b: 0.05, a: 1.0 };
+    /// The engine's raw INK, re-exported where the accessors below use
+    /// it. The value itself is [`super::raw::INK`]: one raw look, stated
+    /// once.
+    pub const RAW_INK: Color = super::raw::INK;
+    /// The engine's raw BED — [`super::raw::BED`], likewise.
+    pub const RAW_BED: Color = super::raw::BED;
 
     /// A colour used as ink — text, lines, glyphs, edges. Missing = RAW_INK.
     #[inline]
@@ -227,17 +224,24 @@ pub struct BakeInput {
     pub explicit_density: (bool, bool),
 }
 
-/// §5.3's density levels. `metric.density` is a *generator* of the two floats,
-/// not their peer.
-pub fn density_level(word: &str) -> Option<(f32, f32)> {
-    Some(match word {
-        "airy" => (1.30, 1.06),
-        "comfortable" => (1.15, 1.00),
-        "compact" => (1.00, 1.00),
-        "dense" => (0.85, 0.96),
-        "instrument" => (0.72, 0.90),
-        _ => return None,
-    })
+/// §5.3's density levels. `metric.density` is a *generator* of the two
+/// floats, not their peer — and what it generates is the THEME's, read
+/// from `metric.level.<word>.space` and `.type`.
+///
+/// The table used to live here as ten literals, with the same ten numbers
+/// written into the master as prose in a comment. An author who set
+/// `density = airy` therefore got multipliers out of the binary and had no
+/// way to say what `airy` means — and the path is real: `Density=` in the
+/// user's `.conf` is stage 5 of the cascade.
+fn density_level(
+    schema: &Schema,
+    r: &Resolved,
+    word: &str,
+    out: &mut Vec<Diagnostic>,
+) -> Option<(f32, f32)> {
+    let space = num_by_name(schema, r, &format!("metric.level.{word}.space"), out)?;
+    let type_ = num_by_name(schema, r, &format!("metric.level.{word}.type"), out)?;
+    Some((space, type_))
 }
 
 /// The seven `metric.*` tokens the baker itself must read by name, and the only
@@ -260,21 +264,29 @@ pub struct Metrics {
     pub density_type: f32,
 }
 
+/// One `metric.*` number, read by name because the baker runs before the
+/// hot set exists. `None` — with a diagnostic — when the master declares no
+/// such key or declares something that is not a finite number.
+///
+/// The caller gets an absence, not a substitute. A spare copy of the shipped
+/// number here would be a SECOND source of truth for the root of every length
+/// in the program: the day `default.theme` moves `unit_pct_h`, a master that
+/// failed to parse would keep drawing the old interface out of this binary,
+/// and nobody could tell the two apart by looking.
 fn num_by_name(
     schema: &Schema,
     r: &Resolved,
     name: &str,
-    default: f32,
     out: &mut Vec<Diagnostic>,
-) -> f32 {
+) -> Option<f32> {
     match schema.id(name).and_then(|id| r.get(id)).and_then(Value::as_num) {
-        Some(v) if v.is_finite() => v,
+        Some(v) if v.is_finite() => Some(v),
         _ => {
             out.push(Diagnostic::warn(
                 Span::default(),
-                format!("default.theme does not declare \"{name}\" — using {default}"),
+                format!("default.theme does not declare \"{name}\" — no length can be baked"),
             ));
-            default
+            None
         }
     }
 }
@@ -287,10 +299,16 @@ pub fn metrics(
     input: &BakeInput,
     out: &mut Vec<Diagnostic>,
 ) -> Metrics {
-    let pct = num_by_name(schema, r, "metric.unit_pct_h", 0.5, out);
-    let lo = num_by_name(schema, r, "metric.unit_min_px", 4.0, out);
-    let hi = num_by_name(schema, r, "metric.unit_max_px", 10.0, out);
-    let theme_scale = num_by_name(schema, r, "metric.ui_scale", 1.0, out);
+    // An undeclared key answers zero, and zero here is the ABSENCE of a
+    // length rather than a small one: what is left of `u` is whatever the
+    // master's OTHER keys still say — its own floor, or nothing at all —
+    // and the diagnostic names the key that went missing. The alternative,
+    // this binary quietly supplying the four numbers, is the same program
+    // wearing a look no theme file can account for.
+    let pct = num_by_name(schema, r, "metric.unit_pct_h", out).unwrap_or(0.0);
+    let lo = num_by_name(schema, r, "metric.unit_min_px", out).unwrap_or(0.0);
+    let hi = num_by_name(schema, r, "metric.unit_max_px", out).unwrap_or(0.0);
+    let theme_scale = num_by_name(schema, r, "metric.ui_scale", out).unwrap_or(0.0);
     let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
     let raw = input.viewport.screen_h.max(1.0) * pct / 100.0;
     let u = raw.clamp(lo, hi) * theme_scale * input.viewport.ui_scale.max(0.01);
@@ -300,18 +318,23 @@ pub fn metrics(
         .id("metric.density")
         .and_then(|id| r.get(id))
         .and_then(|v| match v {
-            Value::Word(w) => density_level(w),
+            Value::Word(w) => density_level(schema, r, &w.to_string(), out),
             _ => None,
         })
+        // No level named: the identity of a multiplier, which leaves every
+        // length exactly as the file wrote it. This one is not a spare
+        // value — it is the absence of a scaling.
         .unwrap_or((1.0, 1.0));
-    // 2. ...and an explicit float replaces it, for that axis only.
+    // 2. ...and an explicit float replaces it, for that axis only. The
+    // generated value stands in when the pin cannot be read: that is the
+    // other TOKEN's answer for this axis, not a number this file knows.
     let space = if input.explicit_density.0 {
-        num_by_name(schema, r, "metric.density_space", level.0, out)
+        num_by_name(schema, r, "metric.density_space", out).unwrap_or(level.0)
     } else {
         level.0
     };
     let type_ = if input.explicit_density.1 {
-        num_by_name(schema, r, "metric.density_type", level.1, out)
+        num_by_name(schema, r, "metric.density_type", out).unwrap_or(level.1)
     } else {
         level.1
     };
@@ -407,7 +430,17 @@ pub fn bake(
                 colors[i] = c.to_srgb().clamped();
             }
             Value::Bool(b) => flags[i] = *b,
-            Value::Word(w) => match super::expr::sentinel(w) {
+            // On a token the schema knows to be an ENUM, a word is a word:
+            // §5.0's table says what `none` means where a LENGTH was
+            // expected, and it has nothing to say about a slot whose
+            // vocabulary is words. Without that condition the one word a
+            // theme could never deliver was `none` — which is exactly the
+            // word `winframe.button.order` documents for dropping a
+            // control, so the slot went on answering the master's own
+            // `maximise` and said nothing about it.
+            Value::Word(w) => match super::expr::sentinel(w)
+                .filter(|_| schema.kind(id) != Kind::Enum)
+            {
                 // A sentinel folds to its `f32` and can never reach a vertex.
                 Some(s) => scalars[i] = s,
                 None => enums[i] = schema.enum_index(id, w).unwrap_or(0),
@@ -591,6 +624,16 @@ ui_scale = 1.0
 density = compact
 density_space = 1.00
 density_type = 1.00
+level.airy.space = 1.30
+level.airy.type = 1.06
+level.comfortable.space = 1.15
+level.comfortable.type = 1.00
+level.compact.space = 1.00
+level.compact.type = 1.00
+level.dense.space = 0.85
+level.dense.type = 0.96
+level.instrument.space = 0.72
+level.instrument.type = 0.90
 [palette]
 black = #0A100E
 white = #EAF6F1
@@ -883,18 +926,46 @@ ansi = [ #000000, #CD3131 ]
         );
     }
 
-    #[test]
-    fn a_missing_metric_token_degrades_with_a_warning() {
+    /// A master holding nothing but the four keys `u` is made of.
+    fn unit_master(pct: &str) -> String {
+        format!(
+            "[metric]\nunit_pct_h = {pct}\nunit_min_px = 4px\nunit_max_px = 10px\nui_scale = 1.0\n"
+        )
+    }
+
+    fn unit_of(text: &str) -> (f32, Vec<Diagnostic>) {
         let mut src = Sources::new();
         let mut out = Vec::new();
-        let f = src.add("default.theme", "[palette]\naccent = #3FE3AE\n");
+        let f = src.add("default.theme", text);
         let d = parse(&mut src, f, None, &mut out);
         let schema = Schema::from_default(&d, &mut out);
         let r = resolve_default(&schema, &mut out);
         let t = bake(&schema, &r, &BakeInput::default(), &mut out);
+        (t.unit_px, out)
+    }
+
+    #[test]
+    fn the_unit_is_the_masters_number_and_this_binary_keeps_no_copy_of_it() {
+        // 1080 x 0.5 / 100 — the shipped reference px.
+        let (a, _) = unit_of(&unit_master("0.5"));
+        assert!((a - 5.4).abs() < 1e-4, "{a}");
+        // Move the one key and the root of every length in the program
+        // moves with it: this is what proves the number is read, not known.
+        let (b, _) = unit_of(&unit_master("0.75"));
+        assert!((b - 8.1).abs() < 1e-4, "{b}");
+        // Take the key away and the answer is STILL the master's: with no
+        // percentage the clamp floors `u` at the file's own unit_min_px.
+        let (c, out) =
+            unit_of("[metric]\nunit_min_px = 4px\nunit_max_px = 10px\nui_scale = 1.0\n");
         assert!(out.iter().any(|x| x.message.contains("metric.unit_pct_h")), "{out:?}");
-        // and it still produced a theme with a sane u
-        assert!((t.unit_px - 5.4).abs() < 1e-4, "{}", t.unit_px);
+        assert!((c - 4.0).abs() < 1e-4, "{c}");
+        // And with none of the four declared there is no length to bake at
+        // all. This master used to answer 5.4 — the shipped percentage, out
+        // of a literal in this file — so a program whose master had stopped
+        // declaring any metric kept drawing the shipped interface, from a
+        // number no theme could reach.
+        let (d, _) = unit_of("[palette]\naccent = #3FE3AE\n");
+        assert!(d < 0.05, "{d}");
     }
 
     #[test]

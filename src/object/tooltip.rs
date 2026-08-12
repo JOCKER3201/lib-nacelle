@@ -20,7 +20,7 @@
 //! its `motion.tooltip_*`, and until then appearing is instantaneous,
 //! which is honest rather than half-animated.
 
-use crate::draw::{Corner, CornerStyle};
+use crate::draw::Corner;
 use crate::font::FONT_UI;
 use crate::theme::{self, Color, TokenId};
 use crate::{ui, Ctx, Rect};
@@ -186,6 +186,8 @@ impl Tooltips {
         static PAD_X: OnceLock<TokenId> = OnceLock::new();
         static PAD_Y: OnceLock<TokenId> = OnceLock::new();
         static CORNER: OnceLock<TokenId> = OnceLock::new();
+        static CORNER_MODE: OnceLock<TokenId> = OnceLock::new();
+        static CORNER_IDX: OnceLock<(Option<u16>, Option<u16>)> = OnceLock::new();
         static BORDER: OnceLock<TokenId> = OnceLock::new();
         static OFFSET: OnceLock<TokenId> = OnceLock::new();
         static MAX_W: OnceLock<TokenId> = OnceLock::new();
@@ -233,9 +235,17 @@ impl Tooltips {
         self.shown = Some(text.clone());
 
         // ---- the box ----------------------------------------------------
-        let corner = t.px(tok(&CORNER, "tooltip.corner")).max(0.0).min(h / 2.0);
-        let c = [Corner { style: CornerStyle::Round, size: corner }; 4];
-        let seg = super::window::corner_segments(t, &SEGMENTS, corner);
+        // A tooltip is the same floating chrome a menu is, so the master
+        // points `tooltip.corner_mode` at the menu's rather than letting
+        // two boxes that appear side by side answer differently.
+        let style =
+            super::window::corner_style(t, tok(&CORNER_MODE, "tooltip.corner_mode"), &CORNER_IDX);
+        // `Corner::sized` rather than a clamp: §5.0's `pill` bakes to a
+        // negative number, so a floor at zero would draw the square a
+        // master writing `pill` wrote to avoid — and say nothing.
+        let corner = Corner::sized(style, t.px(tok(&CORNER, "tooltip.corner")), r);
+        let c = [corner; 4];
+        let seg = super::window::corner_segments(t, &SEGMENTS, corner.size);
         ctx.dl.ring_fill(r, &c, seg, col(t.bed(tok(&FILL, "component.tooltip.fill"))));
         let bw = t.px(tok(&BORDER, "tooltip.border")).max(0.0);
         if bw > 0.0 {

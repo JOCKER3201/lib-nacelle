@@ -673,7 +673,9 @@ fn tree_node(v: &Dynamic, depth: usize) -> view::tree::MemNode {
 }
 
 /// The role an element names for itself, if any. An unknown role name
-/// warns once and falls back to `body` inside [`ui::role`].
+/// warns once inside [`ui::role`] and draws NOTHING: there is no spare
+/// role, so a script naming one the theme does not have leaves a hole
+/// rather than a plausible line of `body` nobody asked for.
 fn role_opt(m: &Map, key: &str) -> Option<ui::Role> {
     let word = str_of(m, key);
     if word.is_empty() {
@@ -1243,6 +1245,11 @@ struct Metrics {
     spacer: f32,
     rule_block: f32,
     group_gap: f32,
+    /// The air between two stack elements: the implicit one and the two
+    /// an element may claim for itself. See [`stack_gap`].
+    element_gap: f32,
+    meter_gap: f32,
+    dots_gap: f32,
     /// `list.row_h` and `list.gap`: what a `list` element measures at.
     /// The measure pass runs a frame before there is a draw list, so it
     /// reads the two tokens here rather than through a
@@ -1263,6 +1270,9 @@ fn metrics() -> Metrics {
     static SPACER: OnceLock<TokenId> = OnceLock::new();
     static RULE_BLOCK: OnceLock<TokenId> = OnceLock::new();
     static GROUP_GAP: OnceLock<TokenId> = OnceLock::new();
+    static ELEMENT_GAP: OnceLock<TokenId> = OnceLock::new();
+    static METER_GAP: OnceLock<TokenId> = OnceLock::new();
+    static DOTS_GAP: OnceLock<TokenId> = OnceLock::new();
     static LIST_ROW_H: OnceLock<TokenId> = OnceLock::new();
     static LIST_GAP: OnceLock<TokenId> = OnceLock::new();
     static TEXT_LEADING: OnceLock<TokenId> = OnceLock::new();
@@ -1277,6 +1287,9 @@ fn metrics() -> Metrics {
         spacer: t.px(tok(&SPACER, "script.spacer")),
         rule_block: t.px(tok(&RULE_BLOCK, "script.rule_block")),
         group_gap: t.px(tok(&GROUP_GAP, "script.group_gap")),
+        element_gap: t.px(tok(&ELEMENT_GAP, "script.element_gap")),
+        meter_gap: t.px(tok(&METER_GAP, "script.meter_gap")),
+        dots_gap: t.px(tok(&DOTS_GAP, "script.dots_gap")),
         list_row_h: t.px(tok(&LIST_ROW_H, "list.row_h")),
         list_gap: t.px(tok(&LIST_GAP, "list.gap")),
         text_leading: t.px(tok(&TEXT_LEADING, "script.text_leading")),
@@ -1297,6 +1310,9 @@ impl Metrics {
             spacer: self.spacer * k,
             rule_block: self.rule_block * k,
             group_gap: self.group_gap * k,
+            element_gap: self.element_gap * k,
+            meter_gap: self.meter_gap * k,
+            dots_gap: self.dots_gap * k,
             list_row_h: self.list_row_h * k,
             list_gap: self.list_gap * k,
             text_leading: self.text_leading,
@@ -1353,6 +1369,44 @@ fn runs_px(ctx: &Ctx, m: &Map) -> f32 {
         .unwrap_or(0.0)
 }
 
+/// The gap the theme puts between two neighbours of the stack, named in
+/// the order they are drawn.
+///
+/// `script.element_gap` is the IMPLICIT one — what the theme spends
+/// between any two elements that ask for nothing else. An element with a
+/// gap token of its own overrides it rather than adding to it, and where
+/// two such elements meet the wider claim wins, the way two margins
+/// collapse: a meter under a meter is spaced once.
+///
+/// Pure, and taking words rather than maps, so a test can hold the whole
+/// rule still the way one holds [`stack_fit`] still.
+fn stack_gap(above: &str, below: &str, met: &Metrics) -> f32 {
+    // A `space` element IS gap, asked for by name and sized by the
+    // script: surrounding it with more of the theme's own would honour
+    // one request three times.
+    if above == "space" || below == "space" {
+        return 0.0;
+    }
+    match (own_gap(above, met), own_gap(below, met)) {
+        (None, None) => met.element_gap,
+        (a, b) => a.unwrap_or(0.0).max(b.unwrap_or(0.0)),
+    }
+}
+
+/// The gap an element kind claims around itself, where the theme gives
+/// it one — `None` for the kinds that live on the implicit gap.
+fn own_gap(kind: &str, met: &Metrics) -> Option<f32> {
+    match kind {
+        "meter" => Some(met.meter_gap),
+        "dots" => Some(met.dots_gap),
+        // A section's opening air (u2 §3.3) is the same air that
+        // separates it from what stands above it, so `group` claims it
+        // here instead of adding it inside the element.
+        "group" => Some(met.group_gap),
+        _ => None,
+    }
+}
+
 /// Height the fixed elements need, and how many elements grow into
 /// whatever is left. Walked before drawing, and again a frame earlier
 /// by [`ScriptWidget::sizing`] — a widget with nothing growing has
@@ -1361,8 +1415,19 @@ fn runs_px(ctx: &Ctx, m: &Map) -> f32 {
 fn measure(ctx: &Ctx, maps: &[Map], met: &Metrics) -> (f32, usize) {
     let mut fixed = 0.0;
     let mut flexible = 0usize;
+    // The element above, for the gap — `None` until one has taken height,
+    // because the stack's air goes BETWEEN elements and the panel's own
+    // edge is `panel.content_pad`'s business.
+    let mut above: Option<String> = None;
     for m in maps {
-        match str_of(m, "kind").as_str() {
+        let kind = str_of(m, "kind");
+        if kind != "title" {
+            if let Some(prev) = &above {
+                fixed += stack_gap(prev, &kind, met);
+            }
+            above = Some(kind.clone());
+        }
+        match kind.as_str() {
             // A `title` is a chrome declaration, consumed by the host's
             // band (u2 §3.1 #1, §4): it takes no body height — the band's
             // block is what `chrome_extra` adds around the content box.
@@ -1388,7 +1453,7 @@ fn measure(ctx: &Ctx, maps: &[Map], met: &Metrics) -> (f32, usize) {
             "badge" => fixed += met.row_h,
             "rule" => fixed += met.rule_block,
             "group" => {
-                fixed += met.group_gap + met.row_h;
+                fixed += met.row_h;
                 let children: Vec<Map> = m
                     .get("elements")
                     .and_then(|v| v.read_lock::<Array>())
@@ -1443,9 +1508,17 @@ fn stack_fit(
 
 /// Draws the element list a script returned.
 fn render(ctx: &mut Ctx, r: Rect, elements: &Array, v: &mut ViewPass) {
+    static PAD_X: OnceLock<TokenId> = OnceLock::new();
+    static STACK_ALIGN: OnceLock<TokenId> = OnceLock::new();
     let t = theme::resolved();
-    let px = ctx.font_px(1.0);
     let met = metrics();
+    // `script.pad_x` is the stack's own horizontal inset, inside whatever
+    // the host's panel already left. It was declared and read by nothing,
+    // so a theme that asked for breathing room around script content got
+    // none — and the master states zero, which is exactly why nobody
+    // noticed.
+    let pad_x = t.px(tok(&PAD_X, "script.pad_x")).max(0.0);
+    let r = Rect::new(r.x + pad_x, r.y, (r.w - 2.0 * pad_x).max(0.0), r.h);
 
     // Fixed-height elements take what they need; the rest share what is
     // left, and the whole stack is fitted to the panel so a widget can
@@ -1495,13 +1568,13 @@ fn render(ctx: &mut Ctx, r: Rect, elements: &Array, v: &mut ViewPass) {
         );
         ctx.dl.push_clip(r.x, r.y, r.w, r.h);
     }
-    let pass = Pass {
-        px: px * scale,
-        share: share * scale,
-        scale,
-        met: met.scaled(scale),
-    };
-    let y = ui::block_top(&r, (fixed + share * flexible as f32) * scale);
+    let pass = Pass { share: share * scale, scale, met: met.scaled(scale) };
+    // `script.stack_align` says where a stack shorter than its panel
+    // stands. The word decides — an enum's indices intern in load order —
+    // and the master says `middle`, which is what this line did on its
+    // own before the key was read at all.
+    let vy = ui::vy_of(&ui::theme_word(tok(&STACK_ALIGN, "script.stack_align")));
+    let y = ui::block_top_aligned(&r, (fixed + share * flexible as f32) * scale, vy);
     draw_stack(ctx, &r, y, &maps, &pass, v);
     if clipped {
         ctx.dl.pop_clip();
@@ -1513,8 +1586,6 @@ fn render(ctx: &mut Ctx, r: Rect, elements: &Array, v: &mut ViewPass) {
 /// struct, because `group` recurses (u2 §3.1 #13) and its children draw
 /// under exactly the numbers their parent measured with.
 struct Pass {
-    /// The legacy base type size, already shrunk.
-    px: f32,
     /// The height each flexible element receives, already shrunk.
     share: f32,
     /// The shrink factor itself, for role sizes and paddings.
@@ -1567,10 +1638,20 @@ fn draw_stack(
     v: &mut ViewPass,
 ) -> f32 {
     let t = theme::resolved();
-    let (px, share, scale) = (p.px, p.share, p.scale);
+    let (share, scale) = (p.share, p.scale);
     let met = &p.met;
+    // The same walk `measure` made, so the gap it counted is the gap
+    // drawn: two rules would drift the moment one of them changed.
+    let mut above: Option<String> = None;
     for m in maps {
-        match str_of(m, "kind").as_str() {
+        let kind = str_of(m, "kind");
+        if kind != "title" {
+            if let Some(prev) = &above {
+                y += stack_gap(prev, &kind, met);
+            }
+            above = Some(kind.clone());
+        }
+        match kind.as_str() {
             "title" => {
                 // Re-homed (u2 §3.1 #1): the element is the chrome
                 // declaration the host's title band draws — same strings,
@@ -1719,8 +1800,12 @@ fn draw_stack(
                     let role = ui::bound_role(&LABEL_ROLE, "script.rows_label_role");
                     let lpx = role.px(ctx, scale);
                     let lsp = role.tracking_px(lpx);
-                    // The 1.3 cap-height guess is F021, as in `meter`.
-                    let ty = y + (met.row_h - lpx * 1.3) / 2.0;
+                    // Centred by the role's OWN line height and the
+                    // theme's centring mode — the same primitive every
+                    // other object on this line uses. It used to guess a
+                    // cap height of 1.3 here, which was a look no theme
+                    // file could account for.
+                    let ty = ui::center_line_y(ctx, y, met.row_h, lpx, role.leading());
                     ctx.dl.text(
                         ctx.fonts, FONT_UI, lpx, r.x, ty, &label,
                         col(&LABEL_C, "component.script.label"), lsp,
@@ -1743,7 +1828,6 @@ fn draw_stack(
                 y += met.row_h;
             }
             "group" => {
-                y += met.group_gap;
                 ui::group_header(
                     ctx,
                     Rect::new(r.x, y, r.w, met.row_h),
@@ -1763,38 +1847,58 @@ fn draw_stack(
                 static VALUE: OnceLock<TokenId> = OnceLock::new();
                 static LABEL_GAP: OnceLock<TokenId> = OnceLock::new();
                 static VALUE_GAP: OnceLock<TokenId> = OnceLock::new();
-                static TRACK_OFF: OnceLock<TokenId> = OnceLock::new();
                 static BAR_H: OnceLock<TokenId> = OnceLock::new();
-                static LABEL_TRACKING: OnceLock<TokenId> = OnceLock::new();
-                static VALUE_TRACKING: OnceLock<TokenId> = OnceLock::new();
+                static LABEL_ROLE: OnceLock<TokenId> = OnceLock::new();
+                static VALUE_ROLE: OnceLock<TokenId> = OnceLock::new();
                 let label = str_of(m, "label");
                 let value = str_of(m, "value");
                 let f = f32_of(m, "fraction", 0.0);
-                let lsp = px * t.px(tok(&LABEL_TRACKING, "type.caption.tracking"));
-                let vsp = px * t.px(tok(&VALUE_TRACKING, "type.value.tracking"));
-                let lw = ctx.fonts.measure(FONT_UI, px, &label, lsp)
+                // Both strings are ROLES, the way `text` and `rows` take
+                // theirs: the size and the tracking come from whatever
+                // role the binding names, so retyping the label is a
+                // theme's decision and not a rewrite here.
+                let label_role = ui::bound_role(&LABEL_ROLE, "script.meter_label_role");
+                let value_role = ui::bound_role(&VALUE_ROLE, "script.meter_value_role");
+                let lpx = label_role.px(ctx, scale);
+                let vpx = value_role.px(ctx, scale);
+                let lsp = label_role.tracking_px(lpx);
+                let vsp = value_role.tracking_px(vpx);
+                let lw = ctx.fonts.measure(FONT_UI, lpx, &label, lsp)
                     + t.px(tok(&LABEL_GAP, "meter.label_gap")) * scale;
-                let vw = ctx.fonts.measure(FONT_UI, px, &value, vsp)
+                let vw = ctx.fonts.measure(FONT_UI, vpx, &value, vsp)
                     + t.px(tok(&VALUE_GAP, "meter.value_gap")) * scale;
-                // The 1.3 cap-height guess is F021: it waits for the shared
-                // optical-centring primitive, not a per-site token.
-                let ty = y + (met.row_h - px * 1.3) / 2.0;
+                // Each string centres on ITS OWN size and its own line
+                // height: two roles on one line sit on one axis only if
+                // each is measured by its own. The primitive is the
+                // shared one, so the theme's centring mode reaches here
+                // as it reaches every other line in the program.
+                let lty = ui::center_line_y(ctx, y, met.row_h, lpx, label_role.leading());
+                let vty = ui::center_line_y(ctx, y, met.row_h, vpx, value_role.leading());
                 ctx.dl.text(
-                    ctx.fonts, FONT_UI, px, r.x, ty, &label,
+                    ctx.fonts, FONT_UI, lpx, r.x, lty, &label,
                     col(&LABEL, "component.script.label"), lsp,
                 );
+                // `meter.bar_align` says where the bar stands in its row.
+                // The offset used to be `script.meter_track_h`, a token
+                // the master describes as a HEIGHT — so the one key that
+                // was about this placement was unread and a key about
+                // something else was doing its job.
+                static BAR_ALIGN: OnceLock<TokenId> = OnceLock::new();
+                let bar_h = t.px(tok(&BAR_H, "script.meter_bar_h")) * scale;
+                let row = Rect::new(r.x, y, r.w, met.row_h);
+                let vy = ui::vy_of(&ui::theme_word(tok(&BAR_ALIGN, "meter.bar_align")));
                 let bar = Rect::new(
                     r.x + lw,
-                    y + t.px(tok(&TRACK_OFF, "script.meter_track_h")) * scale,
+                    ui::block_top_aligned(&row, bar_h, vy),
                     (r.w - lw - vw).max(1.0),
-                    t.px(tok(&BAR_H, "script.meter_bar_h")) * scale,
+                    bar_h,
                 );
                 // ui::meter reads its own track and fill; the element
                 // only says where the bar sits, how full it is, and — the
                 // script's judgement — how it stands (u2 §3.1 #6).
                 ui::meter(ctx, bar, f, sev_opt(m, "severity"), bool_of(m, "track", true));
                 ctx.dl.text_right(
-                    ctx.fonts, FONT_UI, px, r.right(), ty, &value,
+                    ctx.fonts, FONT_UI, vpx, r.right(), vty, &value,
                     col(&VALUE, "component.script.value"), vsp,
                 );
                 y += met.row_h;
@@ -2438,6 +2542,48 @@ mod tests {
         assert_eq!(share, 100.0 - 45.4);
         assert_eq!(scale, 1.0);
         assert!(!clipped);
+    }
+
+    /// Metrics whose gaps are told apart by sight, so a wrong token is a
+    /// wrong number and not a rounding argument.
+    fn gap_metrics() -> Metrics {
+        Metrics {
+            row_h: 0.0,
+            row_compact: 0.0,
+            title_block: 0.0,
+            columns_block: 0.0,
+            spacer: 0.0,
+            rule_block: 0.0,
+            group_gap: 300.0,
+            element_gap: 1.0,
+            meter_gap: 20.0,
+            dots_gap: 100.0,
+            list_row_h: 0.0,
+            list_gap: 0.0,
+            text_leading: 1.0,
+            min_flex_h: 0.0,
+        }
+    }
+
+    /// Which token pays for the air between two elements. The picture
+    /// this arithmetic makes is proved against the theme in
+    /// `tests/script_stack_gaps.rs`; here it is the RULE that is held
+    /// still.
+    #[test]
+    fn an_elements_own_gap_overrides_the_implicit_one_and_two_of_them_collapse() {
+        let met = gap_metrics();
+        // Nothing claimed: the theme's implicit gap.
+        assert_eq!(stack_gap("text", "rows", &met), met.element_gap);
+        // One claim wins over the implicit gap in both directions —
+        // wider or narrower, it is the more specific token.
+        assert_eq!(stack_gap("text", "meter", &met), met.meter_gap);
+        assert_eq!(stack_gap("meter", "text", &met), met.meter_gap);
+        // Two claims collapse to the wider, so the pair is spaced once.
+        assert_eq!(stack_gap("meter", "dots", &met), met.dots_gap);
+        assert_eq!(stack_gap("group", "meter", &met), met.group_gap);
+        // A `space` element is the gap, and is not padded with more.
+        assert_eq!(stack_gap("text", "space", &met), 0.0);
+        assert_eq!(stack_gap("space", "meter", &met), 0.0);
     }
 
     /// The view options of F2 §2.2 ride on the table's map beside the

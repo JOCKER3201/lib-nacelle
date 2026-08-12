@@ -73,15 +73,6 @@ impl From<theme::bake::StateStyle> for StateInk {
     }
 }
 
-/// Everything a view object may do to the outside world.
-///
-/// Drawing, the theme, and the two facts about the frame a view needs to
-/// answer the pointer. Nothing else: a view that could reach further
-/// would stop being portable across the boundary, which is the whole
-/// point of the trait.
-/// Corners and tessellation for a ring at this size: the radius can
-/// never exceed half the short side (past it two corners would cross),
-/// and the arc count is the toolkit's own quarter-pixel rule.
 /// The boundary's corner vocabulary. The theme's enum indices intern in
 /// load order and mean nothing across a library edge, so the numbers
 /// travel instead.
@@ -93,11 +84,40 @@ fn corner_code(style: CornerStyle) -> u32 {
     }
 }
 
-fn ring_parts(style: CornerStyle, radius: f32, r: Rect) -> ([Corner; 4], u8) {
-    let size = radius.max(0.0).min(r.w.min(r.h) / 2.0);
-    ([Corner { style, size }; 4], crate::draw::ring_segments(size, 0.25, 16))
+/// The radius a ring is DRAWN at, from the number a caller handed the
+/// surface.
+///
+/// That number is as often a word as a length: §5.0 bakes `pill` to a
+/// negative sentinel, and a `*.corner` token read straight off the theme
+/// carries it here unchanged. Clamping it at zero — which is what this
+/// did — answered a master writing `pill` with the very square it wrote
+/// to avoid, and said nothing about it; a silent wrong shape is worse
+/// than a missing token, because it looks finished. The translation is
+/// [`crate::theme::corner_radius`], the one place that knows what `pill`
+/// means, and it is idempotent: a caller that already resolved its own
+/// sentinel (segmented, badge) hands in a plain length and gets it back.
+///
+/// Half the short side is then the geometric ceiling — past it two
+/// corners would cross and the outline would fold on itself.
+fn ring_radius(radius: f32, r: Rect) -> f32 {
+    crate::theme::corner_radius(radius, r.w, r.h).min(r.w.min(r.h) / 2.0)
 }
 
+/// Corners and tessellation for a ring at this size. The radius is
+/// [`ring_radius`], and the arc count is the toolkit's quarter-pixel rule
+/// spent against the theme's own `corner.segments` ceiling, which is the
+/// only number in this pair a theme gets to state.
+fn ring_parts(style: CornerStyle, radius: f32, r: Rect, ceiling: u8) -> ([Corner; 4], u8) {
+    let size = ring_radius(radius, r);
+    ([Corner { style, size }; 4], crate::draw::ring_segments(size, 0.25, ceiling))
+}
+
+/// Everything a view object may do to the outside world.
+///
+/// Drawing, the theme, and the two facts about the frame a view needs to
+/// answer the pointer. Nothing else: a view that could reach further
+/// would stop being portable across the boundary, which is the whole
+/// point of the trait.
 pub trait Surface {
     // ----------------------------------------------------------- paint
     fn rect(&mut self, r: Rect, c: Color);
@@ -159,22 +179,6 @@ pub trait Surface {
     /// asked once per draw.
     fn can_clip(&self) -> bool {
         true
-    }
-
-    /// A chamfered fill. Degrades to a square [`Surface::rect`] on a
-    /// surface with no chamfer of its own — the ABI has no chamfer
-    /// primitive, and a square badge is what `badge.corner = 0` draws
-    /// anyway, so the degradation is a look the theme can already ask
-    /// for rather than an invention.
-    fn chamfer_fill(&mut self, r: Rect, cut: f32, c: Color) {
-        let _ = cut;
-        self.rect(r, c);
-    }
-
-    /// A chamfered outline, degrading like [`Surface::chamfer_fill`].
-    fn chamfer_frame(&mut self, r: Rect, cut: f32, w: f32, c: Color) {
-        let _ = cut;
-        self.rect_outline(r, w, c);
     }
 
     // ----------------------------------------------------------- theme
@@ -250,6 +254,12 @@ fn token_id(name: &str) -> TokenId {
         if let Some(id) = m.borrow().get(name) {
             return *id;
         }
+        // A name is resolved against the SCHEMA, and there is no schema
+        // until a theme has been loaded — `resolved` is what loads it.
+        // The answer is memoised for the life of the process, so asking
+        // one moment too early would otherwise pin MISSING on a token
+        // the master declares, for good.
+        let _ = theme::resolved();
         let id = theme::id(name).unwrap_or(TokenId::MISSING);
         m.borrow_mut().insert(name.to_string(), id);
         id
@@ -263,14 +273,18 @@ fn token_id(name: &str) -> TokenId {
 /// question the ABI can answer — but on the host that would allocate a
 /// `String` for every ask, and the asks are in draw paths. Comparing
 /// indices costs a hash and no allocation, and answers the same.
+///
+/// Keyed by EPOCH as well, for the reason [`crate::ui::theme_word`] is: an
+/// index only names a word against the schema it was interned in, and a
+/// theme swap builds the schema afresh and renumbers every open word set.
 fn enum_index(id: TokenId, word: &str) -> Option<u16> {
     thread_local! {
-        static IDX: RefCell<HashMap<usize, HashMap<String, Option<u16>>>> =
+        static IDX: RefCell<HashMap<(u32, usize), HashMap<String, Option<u16>>>> =
             RefCell::new(HashMap::new());
     }
     IDX.with(|m| {
         let mut m = m.borrow_mut();
-        let per_token = m.entry(id.index()).or_default();
+        let per_token = m.entry((theme::epoch(), id.index())).or_default();
         if let Some(i) = per_token.get(word) {
             return *i;
         }
@@ -278,6 +292,13 @@ fn enum_index(id: TokenId, word: &str) -> Option<u16> {
         per_token.insert(word.to_string(), i);
         i
     })
+}
+
+/// The theme's arc-tessellation ceiling. Asked per ring rather than
+/// memoised: the answer moves with the theme, and it is one resolved
+/// lookup against a hundred vertices of generator behind it.
+pub(crate) fn corner_segments() -> u8 {
+    theme::resolved().px(token_id("corner.segments")) as u8
 }
 
 /// A class index resolved once per name; `None` in a build whose master
@@ -334,12 +355,12 @@ impl Surface for CtxSurface<'_, '_> {
     }
 
     fn ring_fill(&mut self, r: Rect, style: CornerStyle, radius: f32, c: Color) {
-        let (corners, seg) = ring_parts(style, radius, r);
+        let (corners, seg) = ring_parts(style, radius, r, corner_segments());
         self.ctx.dl.ring_fill(r, &corners, seg, c);
     }
 
     fn ring(&mut self, r: Rect, style: CornerStyle, radius: f32, w: f32, c: Color) {
-        let (corners, seg) = ring_parts(style, radius, r);
+        let (corners, seg) = ring_parts(style, radius, r, corner_segments());
         self.ctx.dl.ring(r, &corners, seg, w, c);
     }
 
@@ -370,14 +391,6 @@ impl Surface for CtxSurface<'_, '_> {
 
     fn unclip(&mut self) {
         self.ctx.dl.pop_clip();
-    }
-
-    fn chamfer_fill(&mut self, r: Rect, cut: f32, c: Color) {
-        self.ctx.dl.chamfer_fill(r.x, r.y, r.w, r.h, cut, c);
-    }
-
-    fn chamfer_frame(&mut self, r: Rect, cut: f32, w: f32, c: Color) {
-        self.ctx.dl.chamfer_frame(r.x, r.y, r.w, r.h, cut, w, c);
     }
 
     fn has_token(&mut self, name: &str) -> bool {
@@ -533,8 +546,18 @@ impl<'a> AbiSurface<'a> {
 }
 
 impl Surface for AbiSurface<'_> {
+    /// The radius crosses the boundary as a PLAIN LENGTH.
+    ///
+    /// §5.0's sentinels are libnacelle's own private spelling — the host
+    /// on the other side of this call has no way to know that -2.0 means
+    /// "capsule", and the corner code beside it says only how the corner
+    /// is cut. A plugin handing `@corner.pill` straight to `ring_fill`
+    /// would ship a negative width down the ABI and get whatever the
+    /// host makes of it. So the word is translated HERE, on the sending
+    /// side, while the box it is a word about is still in hand.
     fn ring_fill(&mut self, r: Rect, style: CornerStyle, radius: f32, c: Color) {
         if self.api.has_ring() {
+            let radius = ring_radius(radius, r);
             (self.api.ring_fill)(self.ctx, rc(r), corner_code(style), radius, cc(c));
         } else {
             self.rect(r, c);
@@ -543,6 +566,7 @@ impl Surface for AbiSurface<'_> {
 
     fn ring(&mut self, r: Rect, style: CornerStyle, radius: f32, w: f32, c: Color) {
         if self.api.has_ring() {
+            let radius = ring_radius(radius, r);
             (self.api.ring)(self.ctx, rc(r), corner_code(style), radius, w, cc(c));
         } else {
             self.rect_outline(r, w, c);
@@ -761,12 +785,26 @@ pub(crate) mod tests {
         pub rects: Vec<(Rect, Color)>,
         pub texts: Vec<(f32, f32, String, Align)>,
         pub clips: Vec<Rect>,
+        /// Every filled ring, as the shape arguments it was given: a
+        /// shape test asks what CUT and what radius a view chose, which
+        /// the resulting rectangle cannot answer.
+        pub rings: Vec<(Rect, CornerStyle, f32)>,
+        /// Every stroked ring, same.
+        pub strokes: Vec<(Rect, CornerStyle, f32)>,
         /// The tooltip requests the view filed, in the order it filed
         /// them — the last of a frame is the one the manager answers.
         pub tips: Vec<(u64, Rect, String)>,
         pub depth: i32,
         pub can_clip: bool,
         pub tokens: HashMap<String, f32>,
+        /// The word each enum token stands at. Empty is the honest
+        /// answer for a token no test declared — it is what a master
+        /// missing the key says too.
+        pub words: HashMap<String, String>,
+        /// The fill every class rung answers with. `StateInk::raw` is
+        /// transparent and a plate with no colour is never drawn, so a
+        /// test about a plate's SHAPE has to hand it one.
+        pub plate: Option<Color>,
         /// Where the pointer is. Off-screen by default, so a test that
         /// does not care about hovering gets none of it.
         pub mouse: (f32, f32),
@@ -778,10 +816,14 @@ pub(crate) mod tests {
                 rects: Vec::new(),
                 texts: Vec::new(),
                 clips: Vec::new(),
+                rings: Vec::new(),
+                strokes: Vec::new(),
                 tips: Vec::new(),
                 depth: 0,
                 can_clip: true,
                 tokens: HashMap::new(),
+                words: HashMap::new(),
+                plate: None,
                 mouse: (-1.0, -1.0),
             }
         }
@@ -791,6 +833,18 @@ pub(crate) mod tests {
         /// zero and a zero-height row cannot be pointed at.
         pub fn token(mut self, name: &str, v: f32) -> FakeSurface {
             self.tokens.insert(name.to_string(), v);
+            self
+        }
+
+        /// Stands an enum token at a word — a role binding, a corner
+        /// style, anything the view compares by name.
+        pub fn word_at(mut self, name: &str, word: &str) -> FakeSurface {
+            self.words.insert(name.to_string(), word.to_string());
+            self
+        }
+
+        pub fn plate(mut self, c: Color) -> FakeSurface {
+            self.plate = Some(c);
             self
         }
 
@@ -807,6 +861,15 @@ pub(crate) mod tests {
         fn rect_outline(&mut self, _r: Rect, _w: f32, _c: Color) {}
         fn line(&mut self, _a: f32, _b: f32, _c: f32, _d: f32, _w: f32, _col: Color) {}
         fn polyline(&mut self, _p: &[[f32; 2]], _w: f32, _c: Color, _closed: bool) {}
+        /// Recorded as a SHAPE, not degraded to its bounding rectangle:
+        /// a fake that answered a ring with a rectangle could not tell a
+        /// capsule from the square it was drawn instead of.
+        fn ring_fill(&mut self, r: Rect, style: CornerStyle, radius: f32, _c: Color) {
+            self.rings.push((r, style, radius));
+        }
+        fn ring(&mut self, r: Rect, style: CornerStyle, radius: f32, _w: f32, _c: Color) {
+            self.strokes.push((r, style, radius));
+        }
         fn text(&mut self, _px: f32, x: f32, y: f32, s: &str, _c: Color, _t: f32, a: Align) {
             self.texts.push((x, y, s.to_string(), a));
         }
@@ -842,11 +905,15 @@ pub(crate) mod tests {
         fn flag(&mut self, _name: &str) -> bool {
             false
         }
-        fn word(&mut self, _name: &str) -> String {
-            String::new()
+        fn word(&mut self, name: &str) -> String {
+            self.words.get(name).cloned().unwrap_or_default()
         }
         fn class_state(&mut self, _class: &str, _state: State) -> StateInk {
-            StateInk::raw()
+            let mut ink = StateInk::raw();
+            if let Some(fill) = self.plate {
+                ink.fill = fill;
+            }
+            ink
         }
         fn epoch(&mut self) -> u32 {
             0
@@ -880,16 +947,70 @@ pub(crate) mod tests {
         assert_eq!(sf.depth, 0);
     }
 
+    /// The trait's own default, on a surface that has no ring primitive:
+    /// the ABI's oldest hosts are exactly that, and what they can draw
+    /// honestly is the rectangle the ring bounds — which is also the
+    /// shape `corner = 0u` already asks for, so the degradation is a look
+    /// the theme can state rather than an invention.
     #[test]
-    fn a_chamfer_degrades_to_the_square_the_theme_can_already_ask_for() {
-        // The ABI has no chamfer; the default impl must still put the
-        // pill's fill somewhere, and it must be exactly the rectangle.
-        let mut sf = FakeSurface::new();
+    fn a_ring_degrades_to_the_square_the_theme_can_already_ask_for() {
+        struct Plain(Vec<Rect>);
+        impl Surface for Plain {
+            fn rect(&mut self, r: Rect, _c: Color) {
+                self.0.push(r);
+            }
+            fn rect_outline(&mut self, _r: Rect, _w: f32, _c: Color) {}
+            fn line(&mut self, _a: f32, _b: f32, _c: f32, _d: f32, _w: f32, _col: Color) {}
+            fn polyline(&mut self, _p: &[[f32; 2]], _w: f32, _c: Color, _closed: bool) {}
+            fn text(&mut self, _p: f32, _x: f32, _y: f32, _s: &str, _c: Color, _t: f32, _a: Align) {
+            }
+            fn measure(&mut self, _px: f32, _s: &str, _t: f32) -> f32 {
+                0.0
+            }
+            fn clip(&mut self, _r: Rect) -> bool {
+                false
+            }
+            fn unclip(&mut self) {}
+            fn has_token(&mut self, _n: &str) -> bool {
+                false
+            }
+            fn px(&mut self, _n: &str) -> f32 {
+                0.0
+            }
+            fn color(&mut self, _n: &str) -> Color {
+                Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }
+            }
+            fn bed(&mut self, _n: &str) -> Color {
+                Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }
+            }
+            fn flag(&mut self, _n: &str) -> bool {
+                false
+            }
+            fn word(&mut self, _n: &str) -> String {
+                String::new()
+            }
+            fn class_state(&mut self, _c: &str, _s: State) -> StateInk {
+                StateInk::raw()
+            }
+            fn epoch(&mut self) -> u32 {
+                0
+            }
+            fn now(&self) -> f64 {
+                0.0
+            }
+            fn mouse(&self) -> (f32, f32) {
+                (0.0, 0.0)
+            }
+            fn scale(&self) -> f32 {
+                1.0
+            }
+        }
+        let mut sf = Plain(Vec::new());
         let r = Rect::new(2.0, 3.0, 40.0, 12.0);
-        sf.chamfer_fill(r, 4.0, Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 });
-        assert_eq!(sf.rects.len(), 1);
-        assert_eq!(sf.rects[0].0.x, 2.0);
-        assert_eq!(sf.rects[0].0.w, 40.0);
+        sf.ring_fill(r, CornerStyle::Round, 6.0, Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 });
+        assert_eq!(sf.0.len(), 1);
+        assert_eq!(sf.0[0].x, 2.0);
+        assert_eq!(sf.0[0].w, 40.0);
     }
 
     #[test]

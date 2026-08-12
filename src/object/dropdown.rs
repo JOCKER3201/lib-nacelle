@@ -6,7 +6,7 @@ use super::focus_ring;
 use crate::focus::{Caps, FocusId};
 use crate::font::FONT_UI;
 use crate::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
-use crate::{Ctx, Rect};
+use crate::{ui, Ctx, Rect};
 use std::sync::OnceLock;
 
 fn tok(cell: &'static OnceLock<TokenId>, name: &'static str) -> TokenId {
@@ -61,23 +61,35 @@ fn accordion_impl(
     static BORDER: OnceLock<TokenId> = OnceLock::new();
     static SKEW: OnceLock<TokenId> = OnceLock::new();
     static THRESHOLD: OnceLock<TokenId> = OnceLock::new();
-    static TSIZE: OnceLock<TokenId> = OnceLock::new();
-    static TMIN: OnceLock<TokenId> = OnceLock::new();
-    static TRACKING: OnceLock<TokenId> = OnceLock::new();
-    static LEADING: OnceLock<TokenId> = OnceLock::new();
+    static ROLE: OnceLock<TokenId> = OnceLock::new();
+    static ANCHOR_W: OnceLock<TokenId> = OnceLock::new();
+    static ANCHOR_W_IDX: OnceLock<Option<u16>> = OnceLock::new();
+    static MIN_W: OnceLock<TokenId> = OnceLock::new();
     static CLASS: OnceLock<Option<u16>> = OnceLock::new();
     let t = theme::resolved();
     let class = *CLASS.get_or_init(|| theme::class_id("menu.item"));
-    let px = (t.px(tok(&TSIZE, "type.body.size")) * ctx.ui_font_scale * ctx.panel_scale)
-        .max(t.px(tok(&TMIN, "type.body.min_px")));
-    let leading = t.px(tok(&LEADING, "type.body.leading"));
-    let tracking = px * t.px(tok(&TRACKING, "type.body.tracking"));
+    // The same object as menu.rs's rows, down to the class — so the same
+    // binding decides how they are set.
+    let role = ui::bound_role(&ROLE, "menu.item.role");
+    let px = role.px(ctx, ctx.ui_font_scale);
+    let leading = role.leading();
+    let tracking = role.tracking_px(px);
     let border = t.px(tok(&BORDER, "menu.border"));
     // Same token as button::quad, so the list stays flush with the
     // anchor's slanted edge.
     let skew = t.px(tok(&SKEW, "button.skew"));
     // Below this height an unfolding row draws no text.
     let text_threshold = t.px(tok(&THRESHOLD, "menu.item_text_threshold"));
+    // `menu.anchor_width` says whether the anchor's edge is the whole
+    // story: under `min_w` the list still starts at that edge, but
+    // `menu.min_w` is a floor under it, so a narrow anchor no longer
+    // makes an unreadable list.
+    let aw = tok(&ANCHOR_W, "menu.anchor_width");
+    let floored = *ANCHOR_W_IDX.get_or_init(|| theme::enum_index(aw, "min_w")) == Some(t.enum_of(aw));
+    let mut row_w = anchor.w - skew;
+    if floored {
+        row_w = row_w.max(t.px(tok(&MIN_W, "menu.min_w")));
+    }
     let visible_h = p.clamp(0.0, 1.0) * item_h * names.len() as f32;
     let mut out = Vec::new();
     let mut ring: Option<Rect> = None;
@@ -89,7 +101,7 @@ fn accordion_impl(
         // The edge closest to the anchor coincides with the anchor's
         // bottom edge (shorter by the skew of the parallelogram).
         let h = (visible_h - top).min(item_h);
-        let r = Rect::new(anchor.x, anchor.bottom() + top, anchor.w - skew, h);
+        let r = Rect::new(anchor.x, anchor.bottom() + top, row_w, h);
         // Floating-point tolerance: the LAST item's height comes from a
         // subtraction and can be epsilon short of item_h.
         let full = h >= item_h - 0.5;

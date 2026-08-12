@@ -149,7 +149,13 @@ impl Look {
             // Deliberately NOT `button.skew`: the master says so where
             // the token stands, and two shapes are allowed to differ.
             skew: sf.px("tab.skew").max(0.0),
-            corner: sf.px("tab.corner").max(0.0),
+            // Read RAW, on purpose. This number is only ever handed to
+            // `Surface::ring_fill`/`ring`, which is where §5.0's `pill`
+            // becomes half the cell it is about — and it cannot become
+            // anything at all if a clamp has already spelled it zero.
+            // The one place that knows what a capsule is, is the place
+            // that has the box.
+            corner: sf.px("tab.corner"),
             // The frames' shape, reached the same way every control
             // reaches it — the master points tab.corner_style at the
             // button's, which points at the panel's.

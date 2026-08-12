@@ -15,6 +15,7 @@
 
 use super::focus_ring;
 use super::tabs;
+use crate::draw::CornerStyle;
 use crate::focus::{Caps, FocusId};
 use crate::ui::Align;
 use crate::view::paint::{self, RoleLook};
@@ -25,10 +26,16 @@ use crate::{Ctx, Rect};
 pub use super::tabs::{hit, key, StripState, StripStyle, StripView};
 
 /// The `[segmented]` metrics, read ONCE per draw.
+///
+/// The corner RADIUS is not among them, and cannot be: `@corner.pill` is
+/// a word about a box (§5.0), so it is not a length until there is a cell
+/// to close over — [`paint::corner_radius`] resolves it against each cell
+/// in [`control`]. The CUT is a metric like any other; it is the same for
+/// every cell.
 struct Look {
     h: f32,
     gap: f32,
-    corner: f32,
+    corner_style: CornerStyle,
     border: f32,
     border_active: f32,
     pad_x: f32,
@@ -41,7 +48,14 @@ impl Look {
         Look {
             h: sf.px("segmented.h").max(0.0),
             gap: sf.px("segmented.gap").max(0.0),
-            corner: sf.px("segmented.corner").max(0.0),
+            // The radius was already the theme's; the CUT was not, and a
+            // cell frozen on a chamfer stopped looking like the button
+            // whose class ladder it borrows. Read through the shared
+            // reader rather than spelled out again here: the corner
+            // vocabulary is already written in more places than it should
+            // be, and one word table is what stops a cell and a badge
+            // disagreeing about what `chamfer` means.
+            corner_style: paint::corner_style(sf, "segmented.corner_style"),
             // A ring's weight is a stroke, and a stroke does not scale.
             border: sf.px("segmented.border").max(0.0),
             border_active: sf.px("segmented.border_active").max(0.0),
@@ -124,13 +138,19 @@ pub fn control<S: Surface>(
         // ladder, including the Selected rung the chosen cell always
         // stands on.
         let ink = sf.class_state("button", st.rung(i));
-        let cut = look.corner.min(cell.w / 2.0).min(cell.h / 2.0);
+        // Per cell, and through the one translator: `segmented.corner`
+        // may hold `@corner.pill`, which bakes to a NEGATIVE number and
+        // means "as round as THIS cell can be". A `.max(0.0)` here would
+        // have answered a theme writing `pill` with the square it wrote
+        // `pill` to avoid, and said nothing about it; the ceiling of half
+        // the short side is geometry, and lives with the translation.
+        let cut = paint::corner_radius(sf, "segmented.corner", *cell, 1.0);
         if ink.fill.a > 0.0 {
-            sf.chamfer_fill(*cell, cut, ink.fill);
+            sf.ring_fill(*cell, look.corner_style, cut, ink.fill);
         }
         let bw = if i == st.active { look.border_active } else { look.border };
         if bw > 0.0 && ink.edge.a > 0.0 {
-            sf.chamfer_frame(*cell, cut, bw, ink.edge);
+            sf.ring(*cell, look.corner_style, cut, bw, ink.edge);
         }
         let inner = (cell.w - 2.0 * look.pad_x).max(0.0);
         let text = paint::fit_end(sf, look.label.px, labels[i], inner, look.label.track);
@@ -207,6 +227,9 @@ mod tests {
         assert!(px("segmented.pad_x") > 0.0);
         assert!(px("segmented.min_cell_w") > 0.0);
         assert!(px("segmented.corner") > 0.0);
+        // The cut beside the length. `tests/corner_language.rs` proves it
+        // reaches the cell; here it only has to exist to be reachable.
+        assert_eq!(word("segmented.corner_style"), "round");
         // The chosen cell's ring is the heavier of the two.
         assert!(px("segmented.border_active") > px("segmented.border"));
         // NEW in F2 §9: the role the 5.27 matrix already lends this

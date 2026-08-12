@@ -395,6 +395,17 @@ pub trait Env {
             .and_then(|v| v.as_color())
             .unwrap_or(Color::WHITE)
     }
+    /// `ramp()`'s spread in OKLCh lightness — how far apart the rungs of a
+    /// data ladder stand. Absent, it is ZERO and every step of the ladder
+    /// comes out the base colour: a ladder with no spread is a visible
+    /// hole, and a spread invented here would be a look no theme file
+    /// could account for.
+    fn ramp_span(&mut self) -> f32 {
+        self.resolve("metric.ramp_span", None)
+            .ok()
+            .and_then(|v| v.as_num())
+            .unwrap_or(0.0)
+    }
     /// The `base` keyword inside a `[state]` block: "the class's own base
     /// colour". At the global ladder there is no class, so the value is a
     /// placeholder and the token is flagged as a template.
@@ -577,7 +588,8 @@ fn call(f: Func, a: &[Expr], env: &mut dyn Env) -> Result<Color, EvalError> {
             let c = col(&a[0], env)?;
             let n = num(&a[1], env)?.round().max(1.0) as usize;
             let i = num(&a[2], env)?.round().max(0.0) as usize;
-            ramp(c, n, i)
+            let span = env.ramp_span();
+            ramp(c, n, i, span)
         }
         Func::Ensure => {
             let fg = col(&a[0], env)?;
@@ -616,15 +628,20 @@ pub fn oklab_toward(c: Color, target: Color, t: f32) -> Color {
     Color::from_oklab(lab)
 }
 
-/// `ramp(c, n, i)`: step `i` of an `n`-step lightness ladder centred on `c`'s L,
-/// **span 0.62** (§6). Image 3 in one expression.
-pub fn ramp(c: Color, n: usize, i: usize) -> Color {
-    const SPAN: f32 = 0.62;
+/// `ramp(c, n, i)`: step `i` of an `n`-step lightness ladder centred on
+/// `c`'s L (§6). Image 3 in one expression.
+///
+/// The SPAN — how far the top rung stands from the bottom — is the
+/// theme's `metric.ramp_span`, handed in by the caller. It used to be a
+/// literal here, which meant an author could state the number of rungs
+/// and which rung a series stood on, but not how far apart they were:
+/// the spacing of every data ladder in the program lived in the binary.
+pub fn ramp(c: Color, n: usize, i: usize, span: f32) -> Color {
     let mut p = c.to_oklch();
     if n > 1 {
         let i = i.min(n - 1) as f32;
         let f = i / (n - 1) as f32; // 0 .. 1
-        p.l = (p.l - SPAN * 0.5 + SPAN * f).clamp(0.0, 1.0);
+        p.l = (p.l - span * 0.5 + span * f).clamp(0.0, 1.0);
     }
     Color::from_oklch(p)
 }
@@ -948,18 +965,24 @@ mod tests {
     }
 
     #[test]
-    fn ramp_spans_0_62_in_lightness() {
+    fn a_ramp_spans_the_lightness_the_theme_asks_for() {
         // Centred on a mid lightness, so the ladder's full span fits inside
         // 0..1 and the clamp is not what is being measured.
         let c = Color::from_oklch(Oklch { l: 0.5, c: 0.08, h: 165.0, alpha: 1.0 });
-        let lo = ramp(c, 5, 0).to_oklch().l;
-        let hi = ramp(c, 5, 4).to_oklch().l;
-        assert!((hi - lo - 0.62).abs() < 2e-3, "span {}", hi - lo);
-        // the middle step is the input's own lightness
-        assert!((ramp(c, 5, 2).to_oklch().l - c.to_oklch().l).abs() < 2e-3);
-        // out-of-range i clamps rather than panics
-        assert_eq!(ramp(c, 5, 99).to_oklch().l, hi);
-        assert_eq!(ramp(c, 1, 0).to_oklch().l, c.to_oklch().l);
+        for span in [0.62, 0.30] {
+            let lo = ramp(c, 5, 0, span).to_oklch().l;
+            let hi = ramp(c, 5, 4, span).to_oklch().l;
+            assert!((hi - lo - span).abs() < 2e-3, "span {}", hi - lo);
+            // the middle step is the input's own lightness
+            assert!((ramp(c, 5, 2, span).to_oklch().l - c.to_oklch().l).abs() < 2e-3);
+            // out-of-range i clamps rather than panics
+            assert_eq!(ramp(c, 5, 99, span).to_oklch().l, hi);
+            assert_eq!(ramp(c, 1, 0, span).to_oklch().l, c.to_oklch().l);
+        }
+        // No span at all is a ladder with no rungs apart: every step is the
+        // colour it was centred on, which is the hole a missing key should
+        // leave rather than a spacing this file invented.
+        assert_eq!(ramp(c, 5, 0, 0.0).to_oklch().l, ramp(c, 5, 4, 0.0).to_oklch().l);
     }
 
     #[test]

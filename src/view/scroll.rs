@@ -164,54 +164,51 @@ impl ScrollPhysics {
     }
 }
 
-/// [`settle_easing`] through a [`Surface`]: the word decides, exactly as
-/// it does on the host, because a word is the one thing both sides of
-/// the boundary can compare.
-fn settle_easing_on(sf: &mut impl Surface) -> Easing {
-    match sf.word("motion.scroll_settle.easing").as_str() {
+/// The curve a word names. ONE table, reached from both sides: the host
+/// and the plugin were reading the same key through two different
+/// spellings of the same question, and two spellings of one question is
+/// how they come to disagree.
+///
+/// The comparison is by WORD and it is made every time it is asked.
+/// Indices are the tempting alternative and they cannot be cached across
+/// a theme swap — an index only names a word against the schema it was
+/// interned in — and, when the master's declaration carries no `enum:`
+/// list, `theme::enum_index` answers `None` until some theme happens to
+/// use the word, which froze this curve at `linear` for the life of the
+/// process.
+fn easing_of(word: &str, duty: f32, floor: f32) -> Easing {
+    match word {
         "ease_out" => Easing::EaseOut,
         "ease_in" => Easing::EaseIn,
         "ease_in_out" => Easing::EaseInOut,
         "sine" => Easing::Sine,
-        "step" => Easing::Step {
-            duty: sf.px("motion.scroll_settle.duty"),
-            floor: sf.px("motion.scroll_settle.floor"),
-        },
+        "step" => Easing::Step { duty, floor },
         _ => Easing::Linear,
     }
 }
 
-/// `motion.scroll_settle.easing`, resolved by word exactly as the board
-/// ride's easing is (`deco::ride_ease`): the words are compared once at
-/// init, the per-frame read is an index.
+/// [`settle_easing`] through a [`Surface`]: the word decides, exactly as
+/// it does on the host, because a word is the one thing both sides of
+/// the boundary can compare.
+fn settle_easing_on(sf: &mut impl Surface) -> Easing {
+    let word = sf.word("motion.scroll_settle.easing");
+    let duty = sf.px("motion.scroll_settle.duty");
+    let floor = sf.px("motion.scroll_settle.floor");
+    easing_of(&word, duty, floor)
+}
+
+/// `motion.scroll_settle.easing` on the host, through the same memoised
+/// word every role binding is read through.
 fn settle_easing() -> Easing {
     static EASING: OnceLock<TokenId> = OnceLock::new();
     static DUTY: OnceLock<TokenId> = OnceLock::new();
     static FLOOR: OnceLock<TokenId> = OnceLock::new();
-    static WORDS: OnceLock<[Option<u16>; 5]> = OnceLock::new();
     let t = theme::resolved();
-    let id = tok(&EASING, "motion.scroll_settle.easing");
-    let w = WORDS.get_or_init(|| {
-        ["ease_out", "ease_in", "ease_in_out", "sine", "step"]
-            .map(|word| theme::enum_index(id, word))
-    });
-    let e = Some(t.enum_of(id));
-    if e == w[0] {
-        Easing::EaseOut
-    } else if e == w[1] {
-        Easing::EaseIn
-    } else if e == w[2] {
-        Easing::EaseInOut
-    } else if e == w[3] {
-        Easing::Sine
-    } else if e == w[4] {
-        Easing::Step {
-            duty: t.px(tok(&DUTY, "motion.scroll_settle.duty")),
-            floor: t.px(tok(&FLOOR, "motion.scroll_settle.floor")),
-        }
-    } else {
-        Easing::Linear
-    }
+    easing_of(
+        &crate::ui::theme_word(tok(&EASING, "motion.scroll_settle.easing")),
+        t.px(tok(&DUTY, "motion.scroll_settle.duty")),
+        t.px(tok(&FLOOR, "motion.scroll_settle.floor")),
+    )
 }
 
 #[derive(Clone, Copy, Debug)]

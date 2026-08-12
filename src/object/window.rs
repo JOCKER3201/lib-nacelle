@@ -123,12 +123,17 @@ pub fn frame(ctx: &mut Ctx, r: Rect) {
     let t = theme::resolved();
     let fill = col(t.bed(tok(&FILL, "component.panel.fill")));
     let line = col(t.color(tok(&LINE, "component.panel.border")));
-    // A negative scalar is a §5.0 sentinel: nothing to draw at that size.
-    let cut = t.px(tok(&CUT, "panel.corner")).max(0.0);
-    let width = t.px(tok(&WIDTH, "panel.border")).max(0.0);
     let style = corner_style(t, tok(&MODE, "panel.corner_mode"), &MODE_IDX);
-    let c = [Corner { style, size: cut }; 4];
-    let seg = corner_segments(t, &SEGMENTS, cut);
+    // Not every negative scalar is nothing: §5.0's `pill` is a WORD about
+    // the box (`as round as this one can be`) and bakes negative too, so
+    // a clamp at zero answers a master writing `pill` with the square it
+    // wrote to avoid. `Corner::sized` is the one place that tells the two
+    // apart, and it needs `r` — which is why the radius is read here and
+    // not up in a metrics struct that has no box yet.
+    let corner = Corner::sized(style, t.px(tok(&CUT, "panel.corner")), r);
+    let width = t.px(tok(&WIDTH, "panel.border")).max(0.0);
+    let c = [corner; 4];
+    let seg = corner_segments(t, &SEGMENTS, corner.size);
     ctx.dl.ring_fill(r, &c, seg, fill);
     ctx.dl.ring(r, &c, seg, width, line);
     panel_edge_glow(ctx.dl, t, r, &c, seg, line);

@@ -45,22 +45,31 @@ pub(crate) fn warn_once(key: &str, msg: &str) {
     });
 }
 
-/// The word an enum token currently resolves to, memoised per (token, index)
-/// so a draw loop pays the engine lock once per distinct value, not per
-/// frame. A theme switch that lands on a new word is a new index and a new
-/// memo entry, so the cache never goes stale.
+/// The word an enum token currently resolves to, memoised per (epoch,
+/// token, index) so a draw loop pays the engine lock once per distinct
+/// value, not per frame.
+///
+/// The EPOCH belongs in that key and its absence was a live bug. An index
+/// only names a word against the schema it was interned in, and every
+/// `theme::load_with` builds the schema afresh: an OPEN word set — which
+/// is what every `*_role` binding is — renumbers, so index 1 means the
+/// first theme's word under the first schema and the second theme's word
+/// under the second. Without the epoch, swapping themes in a running
+/// program left every role binding answering the PREVIOUS theme's role,
+/// for the life of the thread.
 pub(crate) fn theme_word(token: TokenId) -> String {
     word_of(token)
 }
 
 fn word_of(token: TokenId) -> String {
     thread_local! {
-        static WORDS: RefCell<HashMap<(usize, u16), String>> = RefCell::new(HashMap::new());
+        static WORDS: RefCell<HashMap<(u32, usize, u16), String>> = RefCell::new(HashMap::new());
     }
     let i = theme::resolved().enum_of(token);
+    let epoch = theme::epoch();
     WORDS.with(|w| {
         w.borrow_mut()
-            .entry((token.index(), i))
+            .entry((epoch, token.index(), i))
             .or_insert_with(|| theme::enum_word_of(token).unwrap_or_default())
             .clone()
     })
@@ -91,10 +100,35 @@ pub fn sev_of(name: &str) -> Option<Sev> {
 
 /// What an unrecognised severity resolves to: `script.severity_fallback`,
 /// which the master pins to `unknown` and §5.10 forbids ever being `ok`.
+///
+/// The theme's word is the whole answer. When the key names something
+/// the closed set does not hold there is no answer to give, so the LAST
+/// role is drawn — §5.10 puts `unknown` there for exactly this — and the
+/// key is named out loud rather than papered over: a severity picks the
+/// colour of a reading, and a wrong one that never says so is the kind
+/// of finished-looking mistake the audit exists to catch. Counted off
+/// the set rather than written as a number, so a master that adds a rung
+/// does not leave a stale index behind.
 pub fn sev_fallback() -> Sev {
     static FB: OnceLock<TokenId> = OnceLock::new();
     let word = word_of(tok(&FB, "script.severity_fallback"));
-    sev_of(&word).unwrap_or(Sev(6))
+    sev_of(&word).unwrap_or_else(|| unnamed_severity(&word))
+}
+
+/// The rung an unnameable `script.severity_fallback` lands on, and the
+/// warning that says so. Shared with [`crate::view::paint`], which asks
+/// the same question through the ABI and must not answer it differently.
+pub(crate) fn unnamed_severity(word: &str) -> Sev {
+    let last = SEVERITY_ROLES.len() - 1;
+    warn_once(
+        "severity:script.severity_fallback",
+        &format!(
+            "\"script.severity_fallback\" holds \"{word}\", which §5.10's closed set does not \
+             name — \"{}\" is drawn instead",
+            SEVERITY_ROLES[last]
+        ),
+    );
+    Sev(last as u16)
 }
 
 /// The `text` token id of each severity role, resolved once per role.
@@ -131,21 +165,49 @@ pub fn sev_text(s: Sev) -> Color {
 #[derive(Clone, Copy)]
 pub struct Role {
     size: TokenId,
+    min_px: TokenId,
+    max_px: TokenId,
     tracking: TokenId,
     leading: TokenId,
     fg: TokenId,
     alpha: TokenId,
 }
 
-/// The role for a name. An unknown role warns once and falls back to `body`
-/// (the rule of `script.text_role`): a typo must stay readable, not vanish.
+/// The role for a name the master does not declare. There is no spare role
+/// and there must not be one: a role is TWELVE tokens, so a single spare
+/// word hides a whole ladder behind a name nobody wrote, and `body` — the
+/// obvious candidate — is a REAL role of plausible size, which renders a
+/// broken theme as a nearly-right interface and lets it ship. Every
+/// member is MISSING and every accessor below answers zero px and no
+/// ink for it, so the defect shows as a hole rather than as a near-miss.
+const NO_ROLE: Role = Role {
+    size: TokenId::MISSING,
+    min_px: TokenId::MISSING,
+    max_px: TokenId::MISSING,
+    tracking: TokenId::MISSING,
+    leading: TokenId::MISSING,
+    fg: TokenId::MISSING,
+    alpha: TokenId::MISSING,
+};
+
+/// The role for a name. A name no `type.*` block declares warns once and
+/// answers [`NO_ROLE`]: naming a role the theme does not have is a defect
+/// to report, never a decision about how the text should look.
 pub fn role(name: &str) -> Role {
     thread_local! {
         static ROLES: RefCell<HashMap<String, Role>> = RefCell::new(HashMap::new());
     }
     fn lookup(name: &str) -> Option<Role> {
+        // A name is resolved against the schema, and there is no schema
+        // until a theme has been loaded — `resolved` is what loads it, the
+        // same order `theme::enum_word_of` takes. The answer is memoised
+        // for the life of the process, so asking one moment too early
+        // would otherwise pin "no such role" on a role that exists.
+        let _ = theme::resolved();
         Some(Role {
             size: theme::id(&format!("type.{name}.size"))?,
+            min_px: theme::id(&format!("type.{name}.min_px")).unwrap_or(TokenId::MISSING),
+            max_px: theme::id(&format!("type.{name}.max_px")).unwrap_or(TokenId::MISSING),
             tracking: theme::id(&format!("type.{name}.tracking")).unwrap_or(TokenId::MISSING),
             leading: theme::id(&format!("type.{name}.leading")).unwrap_or(TokenId::MISSING),
             fg: theme::id(&format!("type.{name}.fg")).unwrap_or(TokenId::MISSING),
@@ -159,15 +221,9 @@ pub fn role(name: &str) -> Role {
         let resolved = lookup(name).unwrap_or_else(|| {
             warn_once(
                 &format!("role:{name}"),
-                &format!("unknown type role \"{name}\" — falling back to body"),
+                &format!("unknown type role \"{name}\" — nothing is drawn in it"),
             );
-            lookup("body").unwrap_or(Role {
-                size: TokenId::MISSING,
-                tracking: TokenId::MISSING,
-                leading: TokenId::MISSING,
-                fg: TokenId::MISSING,
-                alpha: TokenId::MISSING,
-            })
+            NO_ROLE
         });
         r.borrow_mut().insert(name.to_string(), resolved);
         resolved
@@ -179,20 +235,56 @@ pub fn role(name: &str) -> Role {
 pub fn bound_role(cell: &'static OnceLock<TokenId>, binding: &'static str) -> Role {
     let word = word_of(tok(cell, binding));
     if word.is_empty() {
-        role("body")
-    } else {
-        role(&word)
+        // The BINDING is what a reader has to go and fix, and it is the one
+        // thing the role-side warning cannot name: an empty word means
+        // either that this key is absent from the master or that a consumer
+        // asked for a key nobody declares, and both are the binding's story.
+        warn_once(
+            &format!("binding:{binding}"),
+            &format!("\"{binding}\" names no type role — nothing is drawn in it"),
+        );
+        return NO_ROLE;
     }
+    role(&word)
 }
 
 impl Role {
+    /// Whether this is [`NO_ROLE`]. The size token is the discriminant:
+    /// `lookup` refuses a role without one, so a missing size is never a
+    /// role that merely resolves small.
+    fn absent(&self) -> bool {
+        self.size.is_missing()
+    }
+
     /// The role's px for the panel being drawn, at the stack's shrink
     /// factor. The baked size carries the unit, density and user scale;
     /// `panel_scale` and `shrink` are runtime state, so they multiply here.
     pub fn px(&self, ctx: &Ctx, shrink: f32) -> f32 {
         static MIN: OnceLock<TokenId> = OnceLock::new();
+        // `type.min_px` is the floor under a role the master DECLARES;
+        // applying it to a role that does not exist would put the hole
+        // back on screen at legible size.
+        if self.absent() {
+            return 0.0;
+        }
         let t = theme::resolved();
-        (t.px(self.size) * ctx.panel_scale * shrink).max(t.px(tok(&MIN, "type.min_px")))
+        let raw = t.px(self.size) * ctx.panel_scale * shrink;
+        // The master gives every role its OWN floor and ceiling, and the
+        // shipped file writes each floor as `@type.min_px` — so reading the
+        // role's own is the same number until a theme says otherwise, which
+        // is exactly the point: a display face may want a higher floor than
+        // running text, and until now it had no way to ask.
+        //
+        // The arithmetic itself is [`theme::role_px`] and is called rather
+        // than repeated: the other resolver, `view::paint::role_look`, has
+        // to answer this identically, and a rule written on both sides of
+        // the library is a rule that stops matching itself somewhere.
+        theme::role_px(
+            raw,
+            t.px(self.min_px),
+            t.px(tok(&MIN, "type.min_px")),
+            t.px(self.max_px),
+        )
     }
 
     /// Letter spacing in px for a run of this role at `px`. Tracking tokens
@@ -201,18 +293,19 @@ impl Role {
         px * theme::resolved().px(self.tracking)
     }
 
-    /// Line height as a multiple of the resolved px.
+    /// Line height as a multiple of the resolved px. A role whose master
+    /// states no `leading` measures zero: an unstated line height is a
+    /// broken role, and the height of a broken role is not this file's to
+    /// invent — the same ruling as [`NO_ROLE`], one rung down.
     pub fn leading(&self) -> f32 {
-        let l = theme::resolved().px(self.leading);
-        if l > 0.0 {
-            l
-        } else {
-            1.0
-        }
+        theme::resolved().px(self.leading)
     }
 
     /// The colour this role draws in: fg × its constant alpha.
     pub fn color(&self) -> Color {
+        if self.absent() {
+            return Color::TRANSPARENT;
+        }
         let t = theme::resolved();
         let c = t.color(self.fg);
         let a = t.px(self.alpha);
@@ -291,15 +384,57 @@ fn role_px(ctx: &Ctx, cell: &'static OnceLock<TokenId>, name: &'static str) -> f
 ///
 /// The arithmetic itself lives in [`paint::center_line_y`], where the
 /// views on the far side of the plugin boundary reach it too; this is
-/// the host's way in.
-fn center_line_y(ctx: &mut Ctx, y: f32, box_h: f32, px: f32, leading: f32) -> f32 {
+/// the host's way in — `pub(crate)` because the script host centres rows
+/// of its own, and a second guess at a cap height there is how the whole
+/// program came to have two of them.
+pub(crate) fn center_line_y(ctx: &mut Ctx, y: f32, box_h: f32, px: f32, leading: f32) -> f32 {
     paint::center_line_y(&mut CtxSurface::new(ctx), y, box_h, px, leading)
 }
 
 /// Top edge for a block of known natural height, centred vertically in
 /// `r` and never pushed above it.
 pub fn block_top(r: &Rect, natural: f32) -> f32 {
-    r.y + ((r.h - natural) / 2.0).max(0.0)
+    block_top_aligned(r, natural, Vy::Middle)
+}
+
+/// Where a block of known height stands in a box taller than itself.
+/// `top | middle | bottom` is the vocabulary every alignment key in the
+/// master uses, and the words are compared as words.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Vy {
+    Top,
+    Middle,
+    Bottom,
+    /// `baseline`, which the master spells for `meter.bar_align` and
+    /// which has no shared baseline to sit on yet. It reads as `middle`
+    /// until the optical-centring primitive exists — the same standing
+    /// `smallcaps` has against `upper`.
+    Baseline,
+}
+
+/// The word an alignment token stands at. Unknown words read as `top`:
+/// the block goes where the box begins, which is the one placement that
+/// invents nothing.
+pub fn vy_of(word: &str) -> Vy {
+    match word {
+        "middle" => Vy::Middle,
+        "bottom" => Vy::Bottom,
+        "baseline" => Vy::Baseline,
+        _ => Vy::Top,
+    }
+}
+
+/// [`block_top`] with the placement stated rather than assumed. Never
+/// pushed above the box: a block taller than its room starts at the top
+/// whatever the theme asked for, because the alternative is a block whose
+/// head is off screen.
+pub fn block_top_aligned(r: &Rect, natural: f32, vy: Vy) -> f32 {
+    let slack = (r.h - natural).max(0.0);
+    r.y + match vy {
+        Vy::Top => 0.0,
+        Vy::Middle | Vy::Baseline => slack / 2.0,
+        Vy::Bottom => slack,
+    }
 }
 
 /// Trims text with a trailing ellipsis so it fits `max_w`, measured at
@@ -485,7 +620,21 @@ pub fn dot_matrix(ctx: &mut Ctx, r: Rect, frac: f32, shrink: f32) {
     let t = theme::resolved();
     let cell = (t.px(tok(&PITCH, "script.dots_cell")) * shrink)
         .max(t.px(tok(&PITCH_MIN, "script.dots_cell_min_px")));
-    let step = cell.max(t.px(tok(&CELL_MIN, "dotmatrix.cell_min_px"))).max(1.0);
+    let step = cell.max(t.px(tok(&CELL_MIN, "dotmatrix.cell_min_px")));
+    // The pitch is a DIVISOR, and the two theme floors above are what a
+    // master states to keep it off zero. A `.max(1.0)` here would be a
+    // one-pixel cell written in Rust; refusing to draw is the honest
+    // reading of a matrix whose cell the theme sized to nothing — and
+    // the guard the division needs, since `r.w / 0.0` is infinity and an
+    // infinite column count is a frame that never ends.
+    if !(step > 0.0) {
+        warn_once(
+            "dotmatrix:cell",
+            "`script.dots_cell` and `dotmatrix.cell_min_px` leave the dot pitch at zero — \
+             the matrix has no cell to draw",
+        );
+        return;
+    }
     let cols = ((r.w / step).floor() as usize).max(1);
     let rows = ((r.h / step).floor() as usize).max(1);
     let total = cols * rows;
@@ -499,10 +648,14 @@ pub fn dot_matrix(ctx: &mut Ctx, r: Rect, frac: f32, shrink: f32) {
     } else {
         0.0
     };
+    // `dotmatrix.fill_min_px` is the theme's own floor under the dot;
+    // the trailing clamp is at zero, not at a pixel, because a gap wider
+    // than the pitch is arithmetic going negative and not a size anyone
+    // stated.
     let size = (step * ratio)
         .max(t.px(tok(&FILL_MIN, "dotmatrix.fill_min_px")))
         .min(step - t.px(tok(&GAP_MIN, "dotmatrix.gap_min_px")))
-        .max(1.0);
+        .max(0.0);
     let on = col(&ON, "component.matrix.cell_on");
     let off = col(&OFF, "component.matrix.cell_off");
     for i in 0..total {
@@ -1469,10 +1622,22 @@ pub fn runs(ctx: &mut Ctx, r: Rect, items: &[Run], align: Align, shrink: f32) ->
             (px, track, w)
         })
         .collect();
-    let start_w: f32 =
-        items.iter().zip(&sized).filter(|(run, _)| !run.end).map(|(_, (_, _, w))| *w).sum();
-    let end_w: f32 =
-        items.iter().zip(&sized).filter(|(run, _)| run.end).map(|(_, (_, _, w))| *w).sum();
+    // The gap between two neighbouring runs. It used to be faked with
+    // literal spaces inside the scripts themselves — which put a piece of
+    // the layout in the content, at whatever width the font gave a space.
+    static RUNS_GAP: OnceLock<TokenId> = OnceLock::new();
+    let gap = theme::resolved().px(tok(&RUNS_GAP, "script.runs_gap")) * shrink;
+    let cluster = |end: bool| -> f32 {
+        let ws: Vec<f32> = items
+            .iter()
+            .zip(&sized)
+            .filter(|(run, _)| run.end == end)
+            .map(|(_, (_, _, w))| *w)
+            .collect();
+        ws.iter().sum::<f32>() + gap * ws.len().saturating_sub(1) as f32
+    };
+    let start_w = cluster(false);
+    let end_w = cluster(true);
     let max_px = sized.iter().map(|(px, _, _)| *px).fold(0.0, f32::max);
     // The start cluster aligns in the room the end cluster leaves.
     let room = r.w - end_w;
@@ -1496,7 +1661,7 @@ pub fn runs(ctx: &mut Ctx, r: Rect, items: &[Run], align: Align, shrink: f32) ->
         let y = r.y + (max_px - px);
         let cursor = if run.end { &mut ex } else { &mut x };
         ctx.dl.text(ctx.fonts, FONT_UI, *px, *cursor, y, &run.text, c, *track);
-        *cursor += w;
+        *cursor += w + gap;
     }
     start_w + end_w
 }
@@ -1516,10 +1681,10 @@ pub enum BadgeStyle {
 
 /// The CRITICAL / CONTAINED pill of images 1, 3 and 4 (u2 §3.1 #11): a
 /// filled, ringed capsule around a short text, its four colours from the
-/// severity at draw time. The pill's corner honours `badge.corner` as far
-/// as the renderer can: a positive radius cuts a chamfer, `pill` (R5)
-/// degrades to square — family A's look either way. Returns the pill
-/// width.
+/// severity at draw time. The pill's corner is the theme's, both halves
+/// of it: `badge.corner` for the radius — `pill` included, which is what
+/// makes the capsule this thing is named after — and the style slot of
+/// `shape.badge.corners` for the cut. Returns the pill width.
 pub fn badge(
     ctx: &mut Ctx,
     r: Rect,
@@ -1575,5 +1740,143 @@ pub fn group_header(ctx: &mut Ctx, r: Rect, label: &str, shrink: f32) {
         let y = r.bottom() - stroke / 2.0;
         ctx.dl
             .line(r.x, y, r.right(), y, stroke, col(&RULE_C, "component.script.rule"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::draw::DrawList;
+    use crate::font::FontSystem;
+
+    /// A frame's worth of context, at the reference viewport and with no
+    /// scaling of its own, so a measured px is the theme's alone.
+    fn ctx<'a>(dl: &'a mut DrawList, fonts: &'a mut FontSystem) -> Ctx<'a> {
+        Ctx {
+            dl,
+            fonts,
+            w: 1920.0,
+            h: 1080.0,
+            t: 0.0,
+            mouse: (0.0, 0.0),
+            term_font_scale: 1.0,
+            ui_font_scale: 1.0,
+            panel_scale: 1.0,
+            focus: None,
+            tips: None,
+        }
+    }
+
+    #[test]
+    fn a_role_the_master_does_not_declare_measures_nothing_and_inks_nothing() {
+        let mut dl = DrawList::new();
+        let mut fonts = FontSystem::new();
+        let c = ctx(&mut dl, &mut fonts);
+
+        let body = role("body");
+        assert!(body.px(&c, 1.0) > 0.0);
+        assert!(body.leading() > 0.0);
+        assert!(body.color().a > 0.0);
+
+        // This used to answer body's own ladder: a legible, plausible,
+        // wrong interface that a release would have walked straight past.
+        let ghost = role("no.such.role.the.master.declares");
+        assert_eq!(ghost.px(&c, 1.0), 0.0);
+        assert_eq!(ghost.leading(), 0.0);
+        assert_eq!(ghost.color().a, 0.0);
+    }
+
+    #[test]
+    fn a_binding_picks_the_ladder_and_a_binding_that_names_nothing_draws_nothing() {
+        static ITEM: OnceLock<TokenId> = OnceLock::new();
+        static TITLE: OnceLock<TokenId> = OnceLock::new();
+        static ABSENT: OnceLock<TokenId> = OnceLock::new();
+        let mut dl = DrawList::new();
+        let mut fonts = FontSystem::new();
+        let c = ctx(&mut dl, &mut fonts);
+
+        // Two bindings, two words, two sizes on screen: the word inside the
+        // token is what picks the ladder, so repointing it repaints.
+        let item = bound_role(&ITEM, "menu.item.role");
+        let title = bound_role(&TITLE, "winframe.title.role");
+        assert!(item.px(&c, 1.0) > 0.0);
+        assert!(title.px(&c, 1.0) != item.px(&c, 1.0));
+
+        // A binding the master does not declare names no role at all, and
+        // an unnamed role is a defect to report rather than a look to pick.
+        let none = bound_role(&ABSENT, "no.such.binding.in.the.master");
+        assert_eq!(none.px(&c, 1.0), 0.0);
+        assert_eq!(none.leading(), 0.0);
+        assert_eq!(none.color().a, 0.0);
+    }
+
+    /// There are TWO role resolvers in this library — this file's, for
+    /// objects drawing against [`Ctx`], and [`paint::bound_role`], for
+    /// every view, every script table and the whole ABI side drawing
+    /// against [`Surface`] — and they are one ruling, not two. A fix
+    /// applied to one of them reads as done and leaves the other half of
+    /// the program painting a `body` ladder behind a name nobody wrote,
+    /// which is a worse state than fixing neither: it is invisible. So
+    /// the two are pinned to each other here, on the bindings the
+    /// SHIPPED master declares, and a divergence fails a test rather
+    /// than a screen.
+    #[test]
+    fn the_two_resolvers_answer_one_binding_the_same_way() {
+        // One cell per binding: `bound_role` memoises the id in it, the
+        // same way its callers do at module scope.
+        static CELLS: [OnceLock<TokenId>; 6] = [
+            OnceLock::new(),
+            OnceLock::new(),
+            OnceLock::new(),
+            OnceLock::new(),
+            OnceLock::new(),
+            OnceLock::new(),
+        ];
+        // Both halves' own bindings: the first two are read through this
+        // file, the rest through `paint` — a list of one side's only
+        // would prove the resolvers agree where nobody looks.
+        const BINDINGS: [&str; 6] = [
+            "menu.item.role",
+            "winframe.title.role",
+            "list.label_role",
+            "script.table_head_role",
+            "tab.role",
+            "segmented.role",
+        ];
+
+        let mut dl = DrawList::new();
+        let mut fonts = FontSystem::new();
+        let mut c = ctx(&mut dl, &mut fonts);
+        for (cell, binding) in CELLS.iter().zip(BINDINGS) {
+            let here = bound_role(cell, binding);
+            let px = here.px(&c, 1.0);
+            let (track, leading, color) = (here.tracking_px(px), here.leading(), here.color());
+            assert!(px > 0.0, "{binding} draws nothing: the master lost a binding");
+            let mut sf = CtxSurface::new(&mut c);
+            let there = paint::bound_role(&mut sf, binding, 1.0);
+            assert_eq!(px, there.px, "{binding}");
+            assert_eq!(track, there.track, "{binding}");
+            assert_eq!(leading, there.leading, "{binding}");
+            assert_eq!(color.a, there.color.a, "{binding}");
+        }
+
+        // And the hole is the same hole on both sides. Measured against
+        // the SHIPPED theme rather than a fixture, because the thing
+        // that used to put the hole back on screen was the global floor:
+        // `type.min_px` is 8 px here, and a role that does not exist has
+        // no size for it to lift.
+        let mut sf = CtxSurface::new(&mut c);
+        assert!(
+            sf.px("type.min_px") > 0.0,
+            "with no floor in the theme this proves nothing"
+        );
+        let ghost = paint::role_look(&mut sf, "no.such.role.the.master.declares", 1.0);
+        assert_eq!(ghost.px, 0.0);
+        assert_eq!(ghost.leading, 0.0);
+        assert_eq!(ghost.color.a, 0.0);
+        let ghost = paint::bound_role(&mut sf, "no.such.binding.in.the.master", 1.0);
+        assert_eq!(ghost.px, 0.0);
+        assert_eq!(ghost.leading, 0.0);
+        assert_eq!(ghost.color.a, 0.0);
     }
 }

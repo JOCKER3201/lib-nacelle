@@ -28,14 +28,34 @@ fn col(c: theme::ThemeColor) -> Color {
     Color { r: c.r, g: c.g, b: c.b, a: c.a }
 }
 
-/// The resolved ring treatment, read fresh each call: (width, offset,
-/// colour), or None while `focus.ring.enabled` is off or the width
+/// The resolved ring treatment, read fresh each call.
+struct Ring {
+    w: f32,
+    off: f32,
+    color: Color,
+    /// `focus.ring.style = dashed` resolved to its two lengths, or None
+    /// for a solid band.
+    dash: Option<(f32, f32)>,
+    /// The ring's own corner. A square band around a rounded field is two
+    /// shapes claiming one control, and the ring is the overlay a user
+    /// sees on the roundest thing on screen.
+    cut: CornerStyle,
+    radius: f32,
+}
+
+/// The treatment, or None while `focus.ring.enabled` is off or the width
 /// degrades to nothing.
-fn treatment() -> Option<(f32, f32, Color)> {
+fn treatment() -> Option<Ring> {
     static ENABLED: OnceLock<TokenId> = OnceLock::new();
     static WIDTH: OnceLock<TokenId> = OnceLock::new();
     static OFFSET: OnceLock<TokenId> = OnceLock::new();
     static COLOR: OnceLock<TokenId> = OnceLock::new();
+    static STYLE: OnceLock<TokenId> = OnceLock::new();
+    static DASHED: OnceLock<Option<u16>> = OnceLock::new();
+    static DASH: OnceLock<TokenId> = OnceLock::new();
+    static GAP: OnceLock<TokenId> = OnceLock::new();
+    static CORNER: OnceLock<TokenId> = OnceLock::new();
+    static CUT: OnceLock<TokenId> = OnceLock::new();
     let t = theme::resolved();
     if !t.flag(tok(&ENABLED, "focus.ring.enabled")) {
         return None;
@@ -45,7 +65,30 @@ fn treatment() -> Option<(f32, f32, Color)> {
         return None;
     }
     let off = t.px(tok(&OFFSET, "focus.ring.offset")).max(0.0);
-    Some((w, off, col(t.color(tok(&COLOR, "focus.ring.color")))))
+    // Only the word slot is remembered — the enum's own index moves with
+    // the theme, so it is read every frame like every other token here.
+    let style = tok(&STYLE, "focus.ring.style");
+    let dash = (*DASHED.get_or_init(|| theme::enum_index(style, "dashed")) == Some(t.enum_of(style)))
+        // The ring's OWN rhythm. It used to borrow border.edge.dash /
+        // .gap, whose declaration reserves them for the `segmented` style
+        // of a container's outline: a different object at a different
+        // scale, which no theme could move one of without moving both.
+        .then(|| (t.px(tok(&DASH, "focus.ring.dash")), t.px(tok(&GAP, "focus.ring.gap"))));
+    // The cut is a WORD, compared as one: an enum's indices intern in load
+    // order, so a remembered index means nothing after a theme swap.
+    let cut = match crate::ui::theme_word(tok(&CUT, "focus.ring.corner_style")).as_str() {
+        "round" => CornerStyle::Round,
+        "chamfer" => CornerStyle::Chamfer,
+        _ => CornerStyle::Square,
+    };
+    Some(Ring {
+        w,
+        off,
+        color: col(t.color(tok(&COLOR, "focus.ring.color"))),
+        dash,
+        cut,
+        radius: t.px(tok(&CORNER, "focus.ring.corner")),
+    })
 }
 
 /// Draws the keyboard focus ring AROUND `r`, outside the control's own
@@ -54,38 +97,114 @@ fn treatment() -> Option<(f32, f32, Color)> {
 /// plus the `glow.focus_ring` halo when a theme enables that class.
 /// No-op when `focus.ring.enabled` is false.
 pub fn draw(ctx: &mut Ctx, r: Rect) {
-    let Some((w, off, color)) = treatment() else {
+    let Some(t) = treatment() else {
         return;
     };
-    // rect_outline strokes INSIDE its rect, so the ring rect grows by
-    // offset + width on every side and the band lands wholly outside
-    // the control: [offset, offset + width] past its edge.
-    let d = off + w;
+    // The ring strokes INSIDE its rect, so the rect grows by offset +
+    // width on every side and the band lands wholly outside the control:
+    // [offset, offset + width] past its edge.
+    let d = t.off + t.w;
     let ring = Rect::new(r.x - d, r.y - d, r.w + 2.0 * d, r.h + 2.0 * d);
-    ctx.dl.rect_outline(ring.x, ring.y, ring.w, ring.h, w, color);
-    glow(ctx, ring, color);
+    // The ring stands `d` outside the control, so its radius grows by the
+    // same distance the boundary moved: a concentric arc, which is what
+    // keeps the band an even width all the way round the corner.
+    let outer = Corner::sized(t.cut, t.radius, r).inset(-d);
+    let corners = [outer; 4];
+    let seg = crate::draw::ring_segments(outer.size, 0.25, segments_ceiling());
+    match t.dash {
+        None => ctx.dl.ring(ring, &corners, seg, t.w, t.color),
+        // A dash is a stroke centred on its path, so the path is the
+        // band's own centreline — half a width inside the ring rect,
+        // which is where the solid band's middle lands.
+        Some((dash, gap)) => {
+            let h = t.w * 0.5;
+            let c = Rect::new(ring.x + h, ring.y + h, ring.w - t.w, ring.h - t.w);
+            let mut path = Vec::new();
+            crate::draw::ring_points(c, &[outer.inset(h); 4], seg, &mut path);
+            dashes(ctx, &path, t.w, dash, gap, t.color);
+        }
+    }
+    glow(ctx, ring, outer, t.color);
+}
+
+/// The theme's arc-tessellation ceiling, asked per ring like every other
+/// token in this file.
+fn segments_ceiling() -> u8 {
+    static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
+    theme::resolved().px(tok(&SEGMENTS, "corner.segments")) as u8
 }
 
 /// The parallelogram variant — a button's slanted quad. Same treatment,
 /// stroked as a closed polyline centred on the outward-offset outline.
 pub fn draw_quad(ctx: &mut Ctx, q: [[f32; 2]; 4]) {
-    let Some((w, off, color)) = treatment() else {
+    let Some(t) = treatment() else {
         return;
     };
     // polyline centres its stroke on the path, so the path runs through
     // the band's middle: offset + width/2 out from the control's edge.
-    let outer = offset_convex_quad(q, off + w * 0.5);
-    ctx.dl.polyline(&outer, w, color, true);
+    let outer = offset_convex_quad(q, t.off + t.w * 0.5);
+    match t.dash {
+        None => ctx.dl.polyline(&outer, t.w, t.color, true),
+        Some((dash, gap)) => dashes(ctx, &outer, t.w, dash, gap, t.color),
+    }
     // No halo here yet: glow_ring speaks rects only. Default ships the
     // glow class disabled; a theme that enables it halos the
     // rectangular controls, and the parallelograms join when the glow
     // primitives grow a quad form.
 }
 
+/// Strokes a CLOSED path as `dash`-long marks separated by `gap`, each
+/// mark `w` thick and centred on the path.
+///
+/// The cycle carries across corners rather than restarting at each one:
+/// a ring whose every corner begins a fresh dash reads as four separate
+/// strokes. A cycle of no length draws nothing — that is what a theme
+/// asking for zero-length dashes asked for, and it is also what keeps
+/// the walk finite.
+fn dashes(ctx: &mut Ctx, path: &[[f32; 2]], w: f32, dash: f32, gap: f32, color: Color) {
+    let step = dash + gap;
+    if dash <= 0.0 || step <= 0.0 {
+        return;
+    }
+    // How far into the current cycle the walk already is.
+    let mut phase = 0.0f32;
+    for i in 0..path.len() {
+        let a = path[i];
+        let b = path[(i + 1) % path.len()];
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len <= 0.0 {
+            continue;
+        }
+        let (ux, uy) = (dx / len, dy / len);
+        let mut s = 0.0f32;
+        while s < len {
+            if phase < dash {
+                let end = (s + (dash - phase)).min(len);
+                ctx.dl.line(
+                    a[0] + ux * s,
+                    a[1] + uy * s,
+                    a[0] + ux * end,
+                    a[1] + uy * end,
+                    w,
+                    color,
+                );
+            }
+            let next = (s + (step - phase)).min(len);
+            let advance = next - s;
+            if advance <= 0.0 {
+                break;
+            }
+            phase = (phase + advance) % step;
+            s = next;
+        }
+    }
+}
+
 /// The `glow.focus_ring` halo around the ring band — `element` tint
 /// rule, exactly as `panel_edge_glow`: the halo wears the ring's own
 /// resolved colour, at the class's alpha scaled by the one global knob.
-fn glow(ctx: &mut Ctx, ring: Rect, tint: Color) {
+fn glow(ctx: &mut Ctx, ring: Rect, corner: Corner, tint: Color) {
     static ON: OnceLock<TokenId> = OnceLock::new();
     static RADIUS: OnceLock<TokenId> = OnceLock::new();
     static ALPHA: OnceLock<TokenId> = OnceLock::new();
@@ -101,8 +220,11 @@ fn glow(ctx: &mut Ctx, ring: Rect, tint: Color) {
     if radius <= 0.0 || alpha <= 0.0 {
         return;
     }
-    let c = [Corner { style: CornerStyle::Square, size: 0.0 }; 4];
-    ctx.dl.glow_ring(ring, &c, 1, radius, tint.alpha(alpha), FontSystem::mask_soft_uv());
+    // The halo wears the band's own corner: a square glow around a
+    // rounded ring is the two-shapes bug with the volume turned down.
+    let c = [corner; 4];
+    let seg = crate::draw::ring_segments(corner.size, 0.25, segments_ceiling());
+    ctx.dl.glow_ring(ring, &c, seg, radius, tint.alpha(alpha), FontSystem::mask_soft_uv());
 }
 
 /// Offsets a convex quad outward by `d`: each edge's line moves `d`

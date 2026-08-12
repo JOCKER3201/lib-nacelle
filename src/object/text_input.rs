@@ -26,7 +26,7 @@
 //! can replace the measure function without touching the model.
 
 use super::focus_ring;
-use crate::draw::{Corner, CornerStyle};
+use crate::draw::Corner;
 use crate::focus::{Caps, FocusId, Key, KeyEv, Mods};
 use crate::font::FONT_UI;
 use crate::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
@@ -690,7 +690,11 @@ fn is_word_grapheme(s: &str) -> bool {
 /// edit, not per frame).
 #[derive(Default)]
 struct ViewCache {
-    key: (u32, usize, Option<usize>, u32),
+    /// The theme epoch leads, because the other four describe the TEXT
+    /// and the widths cached here are text measured through the theme:
+    /// tracking, leading and the bound role all move without the value,
+    /// the caret or the resolved size moving with them.
+    key: (u32, u32, usize, Option<usize>, u32),
     caret_x: f32,
     sel_x: Option<(f32, f32)>,
     text_w: f32,
@@ -834,6 +838,8 @@ pub fn draw(
     static BORDER_W: OnceLock<TokenId> = OnceLock::new();
     static BORDER_WF: OnceLock<TokenId> = OnceLock::new();
     static CORNER: OnceLock<TokenId> = OnceLock::new();
+    static CORNER_STYLE: OnceLock<TokenId> = OnceLock::new();
+    static CORNER_IDX: OnceLock<(Option<u16>, Option<u16>)> = OnceLock::new();
     static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
     static PAD_X: OnceLock<TokenId> = OnceLock::new();
     static SCROLL_MARGIN: OnceLock<TokenId> = OnceLock::new();
@@ -858,9 +864,16 @@ pub fn draw(
     let t = theme::resolved();
 
     // ---- the box ----------------------------------------------------
-    let corner = t.px(tok(&CORNER, "field.corner")).max(0.0);
-    let c = [Corner { style: CornerStyle::Round, size: corner }; 4];
-    let seg = super::window::corner_segments(t, &SEGMENTS, corner);
+    // `field.corner_style` follows the button's, which follows the
+    // panel's: a theme that chamfers its controls must not be left with
+    // the one control you type into still rounded.
+    let cut = super::window::corner_style(t, tok(&CORNER_STYLE, "field.corner_style"), &CORNER_IDX);
+    // The radius goes through `Corner::sized`, which is where §5.0's
+    // `pill` stops being a negative number and becomes half this box —
+    // a clamp at zero would spell it "square" and never say so.
+    let corner = Corner::sized(cut, t.px(tok(&CORNER, "field.corner")), r);
+    let c = [corner; 4];
+    let seg = super::window::corner_segments(t, &SEGMENTS, corner.size);
     ctx.dl.ring_fill(r, &c, seg, col(t.bed(tok(&FILL, "component.field.fill"))));
     // The ladder's wash over the bed (idle is a wash too, the button
     // idiom); the field has no press/drag rung of its own.
@@ -951,7 +964,8 @@ pub fn draw(
     let caret_disp = before.len() + pre_cursor;
 
     // ---- measures (cached per edit, §3.7) ---------------------------
-    let key = (model.edit_seq, model.cursor, model.sel_anchor, px.to_bits());
+    let key =
+        (theme::epoch(), model.edit_seq, model.cursor, model.sel_anchor, px.to_bits());
     if model.cache.key != key {
         let caret_x = ctx.fonts.measure(FONT_UI, px, &disp[..caret_disp], track);
         let sel_x = sel_disp.map(|(a, b)| {

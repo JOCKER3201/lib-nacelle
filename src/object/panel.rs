@@ -9,14 +9,16 @@
 //! handed the CONTENT BOX and draws content, never chrome.
 //!
 //! Every colour and metric is a theme token (`panel.*`, `elev.panel.*`,
-//! `type.title.panel.*`, `component.panel.*`). There is no fallback
-//! underneath any read: a missing token degrades through the engine's
-//! per-kind default and is allowed to look raw.
+//! the type role `panel.title.role` names, `component.panel.*`). There
+//! is no fallback underneath any read: a missing token degrades through
+//! the engine's per-kind default and is allowed to look raw.
 
 use super::window::{corner_segments, corner_style, panel_edge_glow};
 use crate::draw::Corner;
 use crate::font::FONT_UI;
 use crate::theme::{self, Color, TokenId};
+use crate::ui;
+use crate::view::surface::{CtxSurface, Surface};
 use crate::widget::Chrome;
 use crate::{Ctx, Rect};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -225,10 +227,13 @@ pub fn draw(ctx: &mut Ctx, r: Rect, chrome: &Chrome, panel_idx: usize) -> Rect {
     // the body is the fill; the glass pair joins when the renderer's
     // blur ranks do (Appendix B R3/R6 — the container does not wait).
     let fill = col(t.bed(tok(&FILL, "elev.panel.fill")));
-    let cut = t.px(tok(&RADIUS, "elev.panel.radius")).max(0.0);
     let style = corner_style(t, tok(&CORNER_MODE, "elev.panel.corner"), &CORNER_IDX);
-    let corners = [Corner { style, size: cut }; 4];
-    let seg = corner_segments(t, &SEGMENTS, cut);
+    // Through `Corner::sized`, not a clamp: `elev.panel.radius` is a
+    // length a master may write as `pill`, and `pill` bakes negative
+    // because it has no value until there is a box to be round on.
+    let cut = Corner::sized(style, t.px(tok(&RADIUS, "elev.panel.radius")), r);
+    let corners = [cut; 4];
+    let seg = corner_segments(t, &SEGMENTS, cut.size);
     if fill.a > 0.0 {
         ctx.dl.ring_fill(r, &corners, seg, fill);
     }
@@ -260,13 +265,7 @@ fn draw_band(
     chrome: &Chrome,
     panel_idx: usize,
 ) {
-    static SIZE: OnceLock<TokenId> = OnceLock::new();
-    static SIZE_MIN: OnceLock<TokenId> = OnceLock::new();
-    static TRACKING: OnceLock<TokenId> = OnceLock::new();
-    static LEADING: OnceLock<TokenId> = OnceLock::new();
-    static CASE: OnceLock<TokenId> = OnceLock::new();
-    static CASE_IDX: OnceLock<(Option<u16>, Option<u16>)> = OnceLock::new();
-    static ALPHA: OnceLock<TokenId> = OnceLock::new();
+    static ROLE: OnceLock<TokenId> = OnceLock::new();
     static INSET_X: OnceLock<TokenId> = OnceLock::new();
     static GAP: OnceLock<TokenId> = OnceLock::new();
     static LEFT_C: OnceLock<TokenId> = OnceLock::new();
@@ -276,33 +275,42 @@ fn draw_band(
     static RULE_C: OnceLock<TokenId> = OnceLock::new();
     let t = theme::resolved();
 
-    // The `title.panel` role: size, tracking, case and leading are the
-    // role's; the container-query factor is runtime state, so it
-    // multiplies here — and a collapsed band caps the size so the text
-    // never overruns the band it was shrunk to keep.
-    let mut px = (t.px(tok(&SIZE, "type.title.panel.size")) * ctx.panel_scale)
-        .max(t.px(tok(&SIZE_MIN, "type.title.panel.min_px")));
-    let leading = t.px(tok(&LEADING, "type.title.panel.leading")).max(1.0);
-    if collapsed && px * leading > band.h {
+    // The role `panel.title.role` NAMES — size, tracking, case, leading and
+    // the role's own alpha all move together when a theme repoints the
+    // binding, which is what the binding is for. The container-query factor
+    // is runtime state, so it multiplies here, and a collapsed band caps the
+    // size so the text never overruns the band it was shrunk to keep.
+    let role = ui::bound_role(&ROLE, "panel.title.role");
+    // Two keys of the role that `Role` does not carry. They hang off the
+    // role's NAME, which the binding states in a word, so they are spelled
+    // from that word rather than pinned to `title.panel` here. The case is
+    // compared as a WORD: each role declares its own enum list, so an index
+    // memoised across roles would name a different transform in each. The
+    // px floor is NOT among them any more — `Role::px` applies the role's
+    // own, so a floor spelled again here would be a second answer.
+    let (case, alpha) = {
+        let mut sf = CtxSurface::new(ctx);
+        let word = sf.word("panel.title.role");
+        (
+            sf.word(&format!("type.{word}.case")),
+            sf.px(&format!("type.{word}.alpha")).clamp(0.0, 1.0),
+        )
+    };
+    let mut px = role.px(ctx, 1.0);
+    let leading = role.leading();
+    // A leading of zero is a broken role, not a short band: dividing by it
+    // is what must not happen, and the role draws whatever it draws.
+    if collapsed && leading > 0.0 && px * leading > band.h {
         px = (band.h / leading).max(1.0);
     }
-    let spacing = px * t.px(tok(&TRACKING, "type.title.panel.tracking"));
-    let alpha = t.px(tok(&ALPHA, "type.title.panel.alpha")).clamp(0.0, 1.0);
+    let spacing = role.tracking_px(px);
 
-    // Case transform; `smallcaps` is approximated as upper until
-    // FontSystem can set true small caps (§5.16 owes it the face work).
-    let case = tok(&CASE, "type.title.panel.case");
-    let (lower, none) = *CASE_IDX.get_or_init(|| {
-        (theme::enum_index(case, "lower"), theme::enum_index(case, "none"))
-    });
-    let cased = |s: &str| {
-        if Some(t.enum_of(case)) == none {
-            s.to_string()
-        } else if Some(t.enum_of(case)) == lower {
-            s.to_lowercase()
-        } else {
-            s.to_uppercase()
-        }
+    // `smallcaps` is approximated as upper until FontSystem can set true
+    // small caps (§5.16 owes it the face work).
+    let cased = |s: &str| match case.as_str() {
+        "none" => s.to_string(),
+        "lower" => s.to_lowercase(),
+        _ => s.to_uppercase(),
     };
 
     let inset = t.px(tok(&INSET_X, "panel.title.inset_x")).max(0.0);
@@ -336,7 +344,7 @@ fn draw_band(
             // on one directory are still two things to explain.
             let tw = ctx.fonts.measure(FONT_UI, px, &shown, spacing);
             crate::view::paint::explain_trim(
-                &mut crate::view::surface::CtxSurface::new(ctx),
+                &mut CtxSurface::new(ctx),
                 crate::object::tooltip::cell_key(0, panel_idx, &right),
                 Rect::new(band.right() - inset - tw, band.y, tw, band.h),
                 &shown,
