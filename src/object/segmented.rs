@@ -178,7 +178,10 @@ pub fn control<S: Surface>(
 
 /// [`control`] on the host's own surface.
 pub fn draw(ctx: &mut Ctx, r: Rect, labels: &[&str], st: &StripState) -> Vec<Rect> {
-    let style = StripStyle { text_scale: ctx.ui_font_scale };
+    // `text_scale` is the strip's own shrink, not the user's interface
+    // scale: that one rides in `metric.ui_scale` and is already in every
+    // baked size. Feeding it here as well drew 125 % at 156 %.
+    let style = StripStyle::default();
     control(&mut CtxSurface::new(ctx), r, labels, st, &style, None)
 }
 

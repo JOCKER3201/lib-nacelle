@@ -113,7 +113,9 @@ pub fn draw(ctx: &mut Ctx, r: Rect, label: &str, st: ButtonState) {
     // and one place is the point of them: this file used to spell the key
     // from the binding's word by hand, which every other consumer of every
     // other binding did not.
-    let px = role.px(ctx, ctx.ui_font_scale);
+    // No `ui_font_scale`: the viewport carries the user's scale into u,
+    // and the role's size is written in u — applying it here too squares it.
+    let px = role.px(ctx, 1.0);
     let leading = role.leading();
     ctx.dl.text_center(
         ctx.fonts,

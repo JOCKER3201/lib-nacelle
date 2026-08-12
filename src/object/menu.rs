@@ -307,11 +307,13 @@ impl MenuState {
         let overlap = t.px(tok(&OVERLAP, "menu.submenu_overlap")).max(0.0);
 
         let role = ui::bound_role(&ROLE, "menu.item.role");
-        let px = role.px(ctx, ctx.ui_font_scale);
+        // No `ui_font_scale`: the viewport carries the user's scale into u,
+        // and the role's size is written in u — applying it here too squares it.
+        let px = role.px(ctx, 1.0);
         let track = role.tracking_px(px);
         let leading = role.leading();
         let hint_role = ui::bound_role(&HINT_ROLE, "menu.hint_role");
-        let hpx = hint_role.px(ctx, ctx.ui_font_scale);
+        let hpx = hint_role.px(ctx, 1.0);
         let htrack = hint_role.tracking_px(hpx);
         let hleading = hint_role.leading();
 

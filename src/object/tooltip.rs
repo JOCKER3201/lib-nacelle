@@ -211,7 +211,9 @@ impl Tooltips {
         let max_w = t.px(tok(&MAX_W, "tooltip.max_w")).max(0.0);
         let min_h = t.px(tok(&H, "tooltip.h")).max(0.0);
         let role = ui::bound_role(&ROLE, "tooltip.role");
-        let px = role.px(ctx, ctx.ui_font_scale);
+        // No `ui_font_scale`: the viewport carries the user's scale into u,
+        // and the role's size is written in u — applying it here too squares it.
+        let px = role.px(ctx, 1.0);
         let track = role.tracking_px(px);
         let leading = role.leading();
 

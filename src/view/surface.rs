@@ -791,6 +791,11 @@ pub(crate) mod tests {
         pub rings: Vec<(Rect, CornerStyle, f32)>,
         /// Every stroked ring, same.
         pub strokes: Vec<(Rect, CornerStyle, f32)>,
+        /// Every polyline, as the points it was given. The icon
+        /// vocabulary — the sort marker, the disclosure triangle — says
+        /// what it means by WHERE it puts three points, so a fake that
+        /// dropped them could not tell one arrow from its opposite.
+        pub polylines: Vec<Vec<[f32; 2]>>,
         /// The tooltip requests the view filed, in the order it filed
         /// them — the last of a frame is the one the manager answers.
         pub tips: Vec<(u64, Rect, String)>,
@@ -818,6 +823,7 @@ pub(crate) mod tests {
                 clips: Vec::new(),
                 rings: Vec::new(),
                 strokes: Vec::new(),
+                polylines: Vec::new(),
                 tips: Vec::new(),
                 depth: 0,
                 can_clip: true,
@@ -860,7 +866,9 @@ pub(crate) mod tests {
         }
         fn rect_outline(&mut self, _r: Rect, _w: f32, _c: Color) {}
         fn line(&mut self, _a: f32, _b: f32, _c: f32, _d: f32, _w: f32, _col: Color) {}
-        fn polyline(&mut self, _p: &[[f32; 2]], _w: f32, _c: Color, _closed: bool) {}
+        fn polyline(&mut self, p: &[[f32; 2]], _w: f32, _c: Color, _closed: bool) {
+            self.polylines.push(p.to_vec());
+        }
         /// Recorded as a SHAPE, not degraded to its bounding rectangle:
         /// a fake that answered a ring with a rectangle could not tell a
         /// capsule from the square it was drawn instead of.

@@ -109,7 +109,9 @@ pub fn draw(ctx: &mut Ctx, row: Rect, label: &str, checked: bool, hover: bool) {
         tick(ctx, mark, col(t.color(tok(&TICK, "component.checkbox.tick"))));
     }
     let role = ui::bound_role(&ROLE, "checkbox.role");
-    let px = role.px(ctx, ctx.ui_font_scale);
+    // No `ui_font_scale`: the viewport carries the user's scale into u,
+    // and the role's size is written in u — applying it here too squares it.
+    let px = role.px(ctx, 1.0);
     let leading = role.leading();
     ctx.dl.text(
         ctx.fonts,
