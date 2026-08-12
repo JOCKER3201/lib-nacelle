@@ -127,7 +127,7 @@ Supporting changes outside `theme/`:
 
 | file | change |
 |---|---|
-| `libnacelle/src/font.rs` | 8 face slots, `[Option<Font>; 8]`, alias table, atlas 1024²→2048² **with a reserved mask band the shelf packer never allocates from and `reset_atlas()` never clears** (§5.12), `mask()`, `figure_advance()`, `cap_height` in `line_metrics`, dirty-rect atlas upload, `load_default_mono()` must stop panicking |
+| `libnacelle/src/font.rs` | **done:** 8 face slots as `[Font; 8]` (a slot that resolves to nothing aliases rather than staying empty, so no draw path carries an `Option`), `FACE_IDS` + `face_slot(word)` as the one word→slot rule both sides of the ABI use, §5.16's resolution ladder at load (requested weight → Regular + `synthetic_bold` at ≥600 → `fallback` chain, cycles cut at 8 → `FACE_UI`/`FACE_MONO`), `FaceChoice` folding the user's family/weight in as a delta so the master's ladder survives a settings change, `Figures` (§5.17's tabular box) with its own cache beside the glyph cache, atlas 1024²→2048² **with a reserved mask band the shelf packer never allocates from and `reset_atlas()` never clears** (§5.12), `mask()`, dirty-rect atlas upload. **Still open:** `cap_height` in `line_metrics`, `load_default_mono()` must stop panicking |
 | `libnacelle/src/draw.rs` | `quad_c`, `rect_grad`, `fan_c`, `image_uv`, `soft_box`, `ring`/`shape` (generalised corners), `chevron_*`, `tab_*`, `hex_*`, `push_clip`/`pop_clip`; `module_title` becomes a thin wrapper over the host's title band (§5.25) and is deprecated |
 | `libnacelle/src/base.rs` | `Ctx::u`, `Ctx::gu`, `Ctx::stroke`, `Ctx::ty`, `Ctx::text_role`, `Ctx::measure_role`, `Ctx::severity`, per-panel type cache; `Ctx::theme` becomes `&ResolvedTheme`; `Ctx` hands a widget its **content box**, the host having already drawn the container |
 | `libnacelle/src/ui.rs` | `table` (`ui.rs:163-263`) and `columns` (`ui.rs:267-288`) stop naming `base.alpha(k)`: heading, rule, zebra and body cells take `component.table.*` + `table.head_role`/`table.cell_role`; label/value take `component.columns.*` + `columns.label_role`/`columns.value_role` (§5.25, §5.26) |
@@ -3139,10 +3139,12 @@ which is not thin · `progress.border @stroke.hair` · `progress.inset @stroke.h
 `meter.label_gap 0.6u` · `meter.value_gap 0.6u` · `meter.row_h @rhythm.row` ·
 `meter.bar_align middle`.
 
-**gauge** (7) — `gauge.h @size.sm` · `gauge.gap @space.1` · `gauge.cols 2` ·
-`gauge.border @stroke.hair` · `gauge.label_role caption` · `gauge.label_inset 0.6u` ·
-`gauge.label_clearance 1.2u` (fill closer than this and the number flips colour —
-`ui.rs:138`'s real contrast decision, now named) · `gauge.min_h_for_label 1.4x @type.caption.size`.
+**gauge** (8) — `gauge.h @size.sm` · `gauge.gap @space.1` · `gauge.cols 2` ·
+`gauge.border @stroke.hair` · `gauge.label_role caption` (the `C0` half) ·
+`gauge.value_role value` (the `12%` half, the role every other numeric readout in
+the master is bound to) · `gauge.value_inset 0.6u` ·
+`gauge.value_clearance 1.2u` (fill closer than this and the number flips colour —
+`ui.rs:138`'s real contrast decision, now named) · `gauge.min_h_for_value 1.4x @type.value.size`.
 
 **dotmatrix** (5) — `dotmatrix.cell 1.6u` (8.6; today `vh(0.8)`) ·
 `dotmatrix.cell_min_px 6px` · `dotmatrix.fill_ratio 0.6x @dotmatrix.cell` ·

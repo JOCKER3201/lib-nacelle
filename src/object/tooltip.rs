@@ -21,7 +21,6 @@
 //! which is honest rather than half-animated.
 
 use crate::draw::Corner;
-use crate::font::FONT_UI;
 use crate::theme::{self, Color, TokenId};
 use crate::{ui, Ctx, Rect};
 use std::collections::hash_map::DefaultHasher;
@@ -216,12 +215,16 @@ impl Tooltips {
         let px = role.px(ctx, 1.0);
         let track = role.tracking_px(px);
         let leading = role.leading();
+        // `tooltip.role`'s own face: the box wraps, measures and draws in
+        // one family, which it could not while the wrap read the role and
+        // the measure wrote FONT_UI.
+        let face = role.font();
 
         // ---- the lines --------------------------------------------------
-        let lines = ui::wrap_text(ctx, px, &text, max_w, track);
+        let lines = ui::wrap_text(ctx, face, px, &text, max_w, track);
         let mut text_w: f32 = 0.0;
         for l in &lines {
-            text_w = text_w.max(ctx.fonts.measure(FONT_UI, px, l, track));
+            text_w = text_w.max(ctx.fonts.measure(face, px, l, track));
         }
         let line_h = px * leading;
         let block_h = line_h * lines.len() as f32;
@@ -258,7 +261,7 @@ impl Tooltips {
         let ink = col(t.color(tok(&INK, "component.tooltip.text")));
         let mut ty = r.y + (h - block_h) / 2.0;
         for l in &lines {
-            ctx.dl.text(ctx.fonts, FONT_UI, px, r.x + pad_x, ty, l, ink, track);
+            ctx.dl.text(ctx.fonts, face, px, r.x + pad_x, ty, l, ink, track);
             ty += line_h;
         }
     }

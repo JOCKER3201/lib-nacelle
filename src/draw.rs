@@ -10,7 +10,7 @@
 //! both: one of the two is what the commit is allowed to move.
 
 use crate::base::Rect;
-use crate::font::{FontSystem, Glyph};
+use crate::font::{Figures, FontSystem, Glyph};
 use crate::theme::Color;
 use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -336,6 +336,12 @@ pub enum DrawCmd {
         font: u8,
         px: f32,
         tracking: f32,
+        /// The figure box this run was set under, 0.0 for a proportional
+        /// one. It belongs in the register because it is GEOMETRY: two
+        /// runs of the same string at the same px occupy different widths
+        /// depending on it, and a register that cannot tell them apart
+        /// cannot witness the feature it is here to witness.
+        tabular: f32,
         color: Color,
         text: String,
     },
@@ -628,7 +634,7 @@ impl fmt::Display for DrawCmd {
                 field(f, "radius", *radius, PX)?;
                 rgba(f, *color)
             }
-            DrawCmd::Text { at, anchor, font, px, tracking, color, text } => {
+            DrawCmd::Text { at, anchor, font, px, tracking, tabular, color, text } => {
                 f.write_str("text at")?;
                 nums(f, at, PX)?;
                 f.write_str(match anchor {
@@ -639,6 +645,12 @@ impl fmt::Display for DrawCmd {
                 write!(f, " font {font}")?;
                 field(f, "px", *px, PX)?;
                 field(f, "track", *tracking, PX)?;
+                // Written only when there IS a box, so a proportional run
+                // dumps the line it has always dumped and the corpus of
+                // recorded images stays comparable across this change.
+                if *tabular > 0.0 {
+                    field(f, "figure", *tabular, PX)?;
+                }
                 rgba(f, *color)?;
                 f.write_str(" ")?;
                 quoted(f, text)
@@ -1651,16 +1663,37 @@ impl DrawList {
         color: Color,
         letter_spacing: f32,
     ) {
+        self.text_fig(fs, font, px, x, y, text, color, letter_spacing, &Figures::NONE);
+    }
+
+    /// [`DrawList::text`] under a figure box (§5.17): every character the
+    /// box holds is stepped by it and centred in it, so the run keeps its
+    /// width when its digits change. `&Figures::NONE` is the proportional
+    /// run every caller drew before the box existed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_fig(
+        &mut self,
+        fs: &mut FontSystem,
+        font: u8,
+        px: f32,
+        x: f32,
+        y: f32,
+        text: &str,
+        color: Color,
+        letter_spacing: f32,
+        fig: &Figures,
+    ) {
         self.cmd(|| DrawCmd::Text {
             at: [x, y],
             anchor: TextAnchor::Left,
             font,
             px,
             tracking: letter_spacing,
+            tabular: fig.advance(),
             color,
             text: text.to_string(),
         });
-        self.text_verts(fs, font, px, x, y, text, color, letter_spacing);
+        self.text_verts(fs, font, px, x, y, text, color, letter_spacing, fig);
     }
 
     /// The glyphs of [`DrawList::text`] without the command. Which
@@ -1679,14 +1712,43 @@ impl DrawList {
         text: &str,
         color: Color,
         letter_spacing: f32,
+        fig: &Figures,
     ) {
         let (ascent, _) = fs.line_metrics(font, px);
         let baseline = y + ascent;
+        // §5.16's fake bold: a slot that asked for >=600 and found only a
+        // Regular file draws every glyph twice, the second pass offset by
+        // `face.<id>.synthetic_bold` em. The ADVANCE is untouched — the
+        // fake thickens ink and never widens a step — so a tabular column
+        // measures the same whether its face is real or faked, and
+        // `measure` needs to know nothing about this at all.
+        let fake = fs.synthetic_bold(font) * px;
         let mut pen = x;
-        for ch in text.chars() {
-            if let Some(g) = fs.glyph(font, px, ch) {
-                self.glyph_quad(&g, pen, baseline, color);
-                pen += g.advance + letter_spacing;
+        for (prev, ch, next) in crate::font::with_neighbours(text) {
+            let boxed = fig.advance_of(prev, ch, next);
+            match fs.glyph(font, px, ch) {
+                Some(g) => {
+                    // Centred in its box rather than left-aligned in it: a
+                    // narrow '1' beside a wide '8' has to keep the column's
+                    // optical rhythm, which is the whole point of paying
+                    // for the box in the first place.
+                    let off = boxed.map_or(0.0, |a| Figures::centre_in(a, g.advance));
+                    self.glyph_quad(&g, pen + off, baseline, color);
+                    if fake > 0.0 {
+                        self.glyph_quad(&g, pen + off + fake, baseline, color);
+                    }
+                    pen += boxed.unwrap_or(g.advance) + letter_spacing;
+                }
+                // The atlas filled up mid-frame and this glyph waits a
+                // frame. A boxed character still steps its box, because a
+                // tabular column that closes the gap around a missing
+                // figure reflows the very thing the box exists to hold
+                // still; an unboxed one behaves as it always has.
+                None => {
+                    if let Some(a) = boxed {
+                        pen += a + letter_spacing;
+                    }
+                }
             }
         }
     }
@@ -1704,17 +1766,35 @@ impl DrawList {
         color: Color,
         letter_spacing: f32,
     ) {
+        self.text_center_fig(fs, font, px, cx, y, text, color, letter_spacing, &Figures::NONE);
+    }
+
+    /// [`DrawList::text_center`] under a figure box.
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_center_fig(
+        &mut self,
+        fs: &mut FontSystem,
+        font: u8,
+        px: f32,
+        cx: f32,
+        y: f32,
+        text: &str,
+        color: Color,
+        letter_spacing: f32,
+        fig: &Figures,
+    ) {
         self.cmd(|| DrawCmd::Text {
             at: [cx, y],
             anchor: TextAnchor::Centre,
             font,
             px,
             tracking: letter_spacing,
+            tabular: fig.advance(),
             color,
             text: text.to_string(),
         });
-        let w = fs.measure(font, px, text, letter_spacing);
-        self.text_verts(fs, font, px, cx - w / 2.0, y, text, color, letter_spacing);
+        let w = fs.measure_fig(font, px, text, letter_spacing, fig);
+        self.text_verts(fs, font, px, cx - w / 2.0, y, text, color, letter_spacing, fig);
     }
 
     /// Text right-aligned to the rx edge.
@@ -1730,18 +1810,41 @@ impl DrawList {
         color: Color,
         letter_spacing: f32,
     ) {
+        self.text_right_fig(fs, font, px, rx, y, text, color, letter_spacing, &Figures::NONE);
+    }
+
+    /// [`DrawList::text_right`] under a figure box. This is the alignment
+    /// the box was asked for: a right-aligned numeric column under a box
+    /// has a left edge that does not move when the number does.
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_right_fig(
+        &mut self,
+        fs: &mut FontSystem,
+        font: u8,
+        px: f32,
+        rx: f32,
+        y: f32,
+        text: &str,
+        color: Color,
+        letter_spacing: f32,
+        fig: &Figures,
+    ) {
         self.cmd(|| DrawCmd::Text {
             at: [rx, y],
             anchor: TextAnchor::Right,
             font,
             px,
             tracking: letter_spacing,
+            tabular: fig.advance(),
             color,
             text: text.to_string(),
         });
-        self.text_right_verts(fs, font, px, rx, y, text, color, letter_spacing);
+        self.text_right_verts(fs, font, px, rx, y, text, color, letter_spacing, fig);
     }
 
+    /// The glyphs of [`DrawList::text_right`] without the command — the
+    /// right-hand half of a module title records itself as part of the
+    /// title, not as a text run of its own.
     #[allow(clippy::too_many_arguments)]
     fn text_right_verts(
         &mut self,
@@ -1753,9 +1856,10 @@ impl DrawList {
         text: &str,
         color: Color,
         letter_spacing: f32,
+        fig: &Figures,
     ) {
-        let w = fs.measure(font, px, text, letter_spacing);
-        self.text_verts(fs, font, px, rx - w, y, text, color, letter_spacing);
+        let w = fs.measure_fig(font, px, text, letter_spacing, fig);
+        self.text_verts(fs, font, px, rx - w, y, text, color, letter_spacing, fig);
     }
 
     /// Module header: text on the left, optionally on the right, and an
@@ -1803,7 +1907,9 @@ impl DrawList {
         let spacing = px * t.px(tokc(&TRACK, "component.module.tracking")).max(0.0);
         let pad = px * t.px(tokc(&PAD, "component.module.pad")).max(0.0);
         let gap = px * t.px(tokc(&GAP, "component.module.gap")).max(0.0);
-        self.text_verts(fs, font, px, x + pad, y, left, color, spacing);
+        // A module title is not a numeric run: it takes the proportional
+        // box, as it always has.
+        self.text_verts(fs, font, px, x + pad, y, left, color, spacing, &Figures::NONE);
         if !right.is_empty() {
             // The right-hand text is trimmed to whatever the left one
             // leaves. Without this the two simply overlapped in a narrow
@@ -1813,7 +1919,9 @@ impl DrawList {
             let room = (w - used).max(0.0);
             let shown = fit_tail(fs, font, px, right, spacing, room);
             if !shown.is_empty() {
-                self.text_right_verts(fs, font, px, x + w - pad, y, &shown, color, spacing);
+                self.text_right_verts(
+                    fs, font, px, x + w - pad, y, &shown, color, spacing, &Figures::NONE,
+                );
             }
         }
         if underline {
@@ -2561,6 +2669,7 @@ mod tests {
             font: 1,
             px: 14.0,
             tracking: 0.5,
+            tabular: 0.0,
             color: ink(),
             text: "a\"b\\c\nd\te\u{7f}".to_string(),
         };

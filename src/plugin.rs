@@ -1284,10 +1284,14 @@ mod tests {
     /// is a read past the end of an array, from a typo in a widget.
     #[test]
     fn out_of_range_numbers_from_a_plugin_are_clamped() {
-        assert_eq!(font_in(0), 0);
-        assert_eq!(font_in(1), 1);
+        // Every slot the master numbers is passed through untouched —
+        // eight of them since §5.16's face blocks reached the atlas, and
+        // a plugin naming `ui_medium` (2) must not be clamped to `mono`.
+        for slot in 0..FONT_COUNT {
+            assert_eq!(font_in(slot as u32), slot, "face slot {slot}");
+        }
         // Past the end, and absurd, and wrapped: all land inside.
-        assert_eq!(font_in(2), FONT_COUNT - 1);
+        assert_eq!(font_in(FONT_COUNT as u32), FONT_COUNT - 1);
         assert_eq!(font_in(9999), FONT_COUNT - 1);
         assert_eq!(font_in(u32::MAX), FONT_COUNT - 1);
 

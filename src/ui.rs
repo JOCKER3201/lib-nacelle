@@ -11,13 +11,14 @@
 //! single place where the look of every board panel is decided, so a
 //! literal here would be a literal everywhere.
 
-use crate::font::FONT_UI;
+use crate::font::{Figures, FontSystem, FONT_UI};
 use crate::theme::{self, Color, TokenId};
 use crate::view::paint;
 use crate::view::surface::{CtxSurface, Surface};
 use crate::{Ctx, Rect};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::OnceLock;
 
 /// Token id resolved once by name; MISSING degrades through the engine's
@@ -165,10 +166,21 @@ pub fn sev_text(s: Sev) -> Color {
 #[derive(Clone, Copy)]
 pub struct Role {
     size: TokenId,
+    /// `type.<role>.face` — WHICH FACE this role is set in.
+    ///
+    /// Declared once per role in the master and read, until now, by
+    /// nothing on this side of the plugin boundary: every text call in
+    /// the toolkit and in the desktop named [`FONT_UI`] or [`FONT_MONO`]
+    /// by hand. The plugin side has always read it (`tile::face_slot`),
+    /// so `type.data.face = mono` meant monospace in a widget's own
+    /// drawing and the interface face in the toolkit's — one role, two
+    /// families, which is exactly the split `tabular` had.
+    face: TokenId,
     min_px: TokenId,
     max_px: TokenId,
     tracking: TokenId,
     leading: TokenId,
+    tabular: TokenId,
     fg: TokenId,
     alpha: TokenId,
 }
@@ -182,10 +194,12 @@ pub struct Role {
 /// ink for it, so the defect shows as a hole rather than as a near-miss.
 const NO_ROLE: Role = Role {
     size: TokenId::MISSING,
+    face: TokenId::MISSING,
     min_px: TokenId::MISSING,
     max_px: TokenId::MISSING,
     tracking: TokenId::MISSING,
     leading: TokenId::MISSING,
+    tabular: TokenId::MISSING,
     fg: TokenId::MISSING,
     alpha: TokenId::MISSING,
 };
@@ -206,10 +220,12 @@ pub fn role(name: &str) -> Role {
         let _ = theme::resolved();
         Some(Role {
             size: theme::id(&format!("type.{name}.size"))?,
+            face: theme::id(&format!("type.{name}.face")).unwrap_or(TokenId::MISSING),
             min_px: theme::id(&format!("type.{name}.min_px")).unwrap_or(TokenId::MISSING),
             max_px: theme::id(&format!("type.{name}.max_px")).unwrap_or(TokenId::MISSING),
             tracking: theme::id(&format!("type.{name}.tracking")).unwrap_or(TokenId::MISSING),
             leading: theme::id(&format!("type.{name}.leading")).unwrap_or(TokenId::MISSING),
+            tabular: theme::id(&format!("type.{name}.tabular")).unwrap_or(TokenId::MISSING),
             fg: theme::id(&format!("type.{name}.fg")).unwrap_or(TokenId::MISSING),
             alpha: theme::id(&format!("type.{name}.alpha")).unwrap_or(TokenId::MISSING),
         })
@@ -301,6 +317,53 @@ impl Role {
         theme::resolved().px(self.leading)
     }
 
+    /// The font slot this role's `face` names.
+    ///
+    /// A face is a CLOSED word set of eight — the master declares eight
+    /// `[face.*]` blocks and numbers them itself — and it is read as a
+    /// WORD and not as an index: an index would turn `display` into
+    /// monospace on the day a theme reordered its face blocks. The word
+    /// goes to [`crate::font::face_slot`], which is the one place that
+    /// knows the master's numbering.
+    ///
+    /// It used to answer only `FONT_UI` or `FONT_MONO`, because those were
+    /// the only two slots the atlas had. That is what collapsed
+    /// `ui_medium` (500), `ui_bold` (700) and `display` (600) onto the one
+    /// Regular file: the master's four weights had two boxes to arrive in.
+    ///
+    /// The SAME rule the plugin side applies (`launcher-core`'s
+    /// `face_slot`, `ai`'s, `filesystem`'s), said once here so that the
+    /// two sides of the boundary cannot answer "which family is this role"
+    /// differently.
+    ///
+    /// A role the master does not declare has no face to name, and the
+    /// interface slot is the one an undesigned run has always landed in.
+    pub fn font(&self) -> u8 {
+        if self.absent() {
+            return FONT_UI;
+        }
+        crate::font::face_slot(&word_of(self.face))
+    }
+
+    /// Whether this role sets its figures on a fixed advance (§5.16's
+    /// `tabular`). A role the master does not declare has no figures to
+    /// box — the same ruling every other accessor here makes.
+    pub fn tabular(&self) -> bool {
+        !self.absent() && theme::resolved().flag(self.tabular)
+    }
+
+    /// The figure box to draw and measure this role's text under, at the
+    /// px the caller resolved. [`Figures::NONE`] for a role that does not
+    /// ask for one, which is the proportional run every text path drew
+    /// before the token was implemented.
+    ///
+    /// Read ONCE per draw and carried into the row loop beside `px` and
+    /// `track`: the box costs a theme read and — on the first call for a
+    /// (face, px) — ten glyph lookups.
+    pub fn figures(&self, fonts: &mut FontSystem, font: u8, px: f32) -> Figures {
+        figures(fonts, font, px, self.tabular())
+    }
+
     /// The colour this role draws in: fg × its constant alpha.
     pub fn color(&self) -> Color {
         if self.absent() {
@@ -316,6 +379,68 @@ impl Role {
             a: c.a * if a > 0.0 { a.min(1.0) } else { 1.0 },
         }
     }
+}
+
+// ------------------------------------------------------------ tabular figures
+//
+// The two `num.*` tokens that say WHICH characters a tabular role boxes.
+// The mechanism — how wide the box is and how a glyph sits in it — is
+// [`crate::font::Figures`]; this is the theme's half of it, kept here so
+// that the font layer owns faces and this one owns tokens.
+
+/// `num.tabular_set` — the characters a tabular role advances by the
+/// figure box.
+///
+/// A TEXT token, so it lives in the cold-path diagnostics and is found
+/// there by a linear scan of every text token the theme declares. Memoised
+/// per theme epoch: this must be read once per theme, never per draw.
+///
+/// An `Rc<str>` rather than a `String` because the answer is handed out on
+/// a DRAW path — one text call per label per frame — and a `String` here
+/// is an allocation per label per frame behind a library whose stated rule
+/// is zero per-draw allocation. Cloning the handle is a refcount bump.
+fn tabular_set() -> Rc<str> {
+    thread_local! {
+        static SET: RefCell<Option<(u32, Rc<str>)>> = const { RefCell::new(None) };
+    }
+    let epoch = theme::epoch();
+    SET.with(|s| {
+        let mut s = s.borrow_mut();
+        if let Some((e, v)) = s.as_ref() {
+            if *e == epoch {
+                return v.clone();
+            }
+        }
+        // A master that declares no set has said nothing about which
+        // characters get the box, and inventing "0123456789" here would
+        // put a look in this file — the one thing it may never hold.
+        // An empty set answers `Figures::NONE`, so the defect shows.
+        let v: Rc<str> = theme::diagnostics().text("num.tabular_set").unwrap_or_default().into();
+        if v.is_empty() {
+            warn_once(
+                "num.tabular_set",
+                "num.tabular_set is empty or absent — no role sets tabular figures",
+            );
+        }
+        *s = Some((epoch, v.clone()));
+        v
+    })
+}
+
+/// The figure box for a run at `px` in `font`, or [`Figures::NONE`] when
+/// the role does not ask for one.
+///
+/// The single resolver: the objects drawing against `Ctx` reach it through
+/// [`Role::figures`], the views through [`CtxSurface`]. Two answers to
+/// "how wide is a figure here" is how a measured column comes to be drawn
+/// at a width it was not measured at.
+pub fn figures(fonts: &mut FontSystem, font: u8, px: f32, tabular: bool) -> Figures {
+    static PUNCT: OnceLock<TokenId> = OnceLock::new();
+    if !tabular {
+        return Figures::NONE;
+    }
+    let punct = theme::resolved().flag(tok(&PUNCT, "num.tabular_punct"));
+    fonts.figures(font, px, &tabular_set(), punct)
 }
 
 // ---------------------------------------------------------------- motion
@@ -367,15 +492,13 @@ pub fn blink_factor(id: &str, t: f64) -> f32 {
     }
 }
 
-/// A type role's px for the panel being drawn. The baked size already
-/// carries the unit, the density and the user's scale; the panel's
-/// container-query factor is runtime state, so it multiplies here rather
-/// than in the bake.
-fn role_px(ctx: &Ctx, cell: &'static OnceLock<TokenId>, name: &'static str) -> f32 {
-    static MIN: OnceLock<TokenId> = OnceLock::new();
-    let t = theme::resolved();
-    (t.px(tok(cell, name)) * ctx.panel_scale).max(t.px(tok(&MIN, "type.min_px")))
-}
+// `role_px` stood here: one `type.<name>.size` read by NAME, with the
+// global floor and neither the role's own floor nor its ceiling. Its last
+// caller was the gauge, which now follows `gauge.label_role` and
+// `gauge.value_role` like everything else — so every type size in this
+// file comes through [`Role`], which is the only reader that answers the
+// whole ladder. A helper that resolves half a role is how two halves of
+// one program come to disagree about how big a role is.
 
 /// Top of a single line centred in a box of `box_h`. The line occupies
 /// its role's leading; in optical mode the cap-height bias nudges it.
@@ -437,14 +560,23 @@ pub fn block_top_aligned(r: &Rect, natural: f32, vy: Vy) -> f32 {
     }
 }
 
-/// Trims text with a trailing ellipsis so it fits `max_w`, measured at
-/// the SAME letter tracking the caller draws with. `base::fit_end`
-/// measures at a fixed legacy tracking; under a role whose tracking
-/// differs, a string would trim against one width and draw at another —
-/// which is how a content-measured table column came to ellipsise the
-/// very cell it was sized from.
-fn fit_end_tracked(ctx: &mut Ctx, px: f32, text: &str, max_w: f32, track: f32) -> String {
-    paint::fit_end(&mut CtxSurface::new(ctx), px, text, max_w, track)
+/// Trims text with a trailing ellipsis so it fits `max_w`, measured in the
+/// SAME face, at the same tracking and under the same figure box the
+/// caller draws with. `base::fit_end` measures at a fixed legacy tracking
+/// in a fixed face; under a role that states either differently, a string
+/// would trim against one width and draw at another — which is how a
+/// content-measured table column came to ellipsise the very cell it was
+/// sized from.
+fn fit_end_tracked_tab(
+    ctx: &mut Ctx,
+    face: u8,
+    px: f32,
+    text: &str,
+    max_w: f32,
+    track: f32,
+    tabular: bool,
+) -> String {
+    paint::fit_end_tab(&mut CtxSurface::new(ctx), face, px, text, max_w, track, tabular)
 }
 
 /// [`paint::explain_trim`] for the primitives that still draw against
@@ -465,8 +597,15 @@ fn explain_trim(ctx: &mut Ctx, id: u64, anchor: Rect, shown: &str, full: &str) {
 ///
 /// The tooltip is its first caller; the text phase will be its second,
 /// which is why it is public vocabulary rather than a private helper.
-pub fn wrap_text(ctx: &mut Ctx, px: f32, text: &str, max_w: f32, track: f32) -> Vec<String> {
-    paint::wrap(&mut CtxSurface::new(ctx), px, text, max_w, track)
+pub fn wrap_text(
+    ctx: &mut Ctx,
+    face: u8,
+    px: f32,
+    text: &str,
+    max_w: f32,
+    track: f32,
+) -> Vec<String> {
+    paint::wrap(&mut CtxSurface::new(ctx), face, px, text, max_w, track)
 }
 
 /// How a `rows` block sizes its label column (u2 §3.1 #4).
@@ -522,6 +661,21 @@ pub fn rows_label_value(ctx: &mut Ctx, r: Rect, rows: &[RowItem], st: &RowsStyle
     let vpx = st.value_role.px(ctx, st.shrink);
     let ltrack = st.label_role.tracking_px(lpx);
     let vtrack = st.value_role.tracking_px(vpx);
+    // The figure boxes of the two halves of the line, resolved once and
+    // carried into the loop below. This is the line the owner was
+    // looking at: NETWORK's address and UPTIME's counter are both a
+    // `value` half, and without the box each of them changes width
+    // whenever a 1 replaces an 8 in it.
+    // Each half in its ROLE's face, not this call site's guess at one.
+    // `gauge_rows` two hundred lines down already asked, and the same file
+    // answering the same question two ways is how `script.table_cell_role
+    // = data` came to be drawn in the interface face while the master said
+    // `type.data.face = mono`.
+    let lface = st.label_role.font();
+    let vface = st.value_role.font();
+    let lfig = st.label_role.figures(ctx.fonts, lface, lpx);
+    let vfig = st.value_role.figures(ctx.fonts, vface, vpx);
+    let vtab = st.value_role.tabular();
     let pad = t.px(tok(&LABEL_PAD, "rhythm.label_pad")) * st.shrink;
     let gap = t.px(tok(&COL_GAP, "script.rows_col_gap")) * st.shrink;
     let label_c = col(&LABEL_C, "component.script.label");
@@ -535,7 +689,7 @@ pub fn rows_label_value(ctx: &mut Ctx, r: Rect, rows: &[RowItem], st: &RowsStyle
             let line = i / cols;
             let cells_on_line = (rows.len() - line * cols).min(cols);
             let j = if cells_on_line < cols { 0 } else { i % cols };
-            let w = ctx.fonts.measure(FONT_UI, lpx, &row.label, ltrack);
+            let w = ctx.fonts.measure_fig(lface, lpx, &row.label, ltrack, &lfig);
             label_w[j] = label_w[j].max(w);
         }
     }
@@ -550,15 +704,15 @@ pub fn rows_label_value(ctx: &mut Ctx, r: Rect, rows: &[RowItem], st: &RowsStyle
         let y = top + row_h * line as f32;
         let lty = center_line_y(ctx, y, row_h, lpx, st.label_role.leading());
         let vty = center_line_y(ctx, y, row_h, vpx, st.value_role.leading());
-        ctx.dl.text(ctx.fonts, FONT_UI, lpx, cx, lty, &row.label, label_c, ltrack);
+        ctx.dl.text_fig(ctx.fonts, lface, lpx, cx, lty, &row.label, label_c, ltrack, &lfig);
         let vc = row.sev.map(sev_text).unwrap_or(value_c);
         match st.label_width {
             LabelWidth::Max => {
                 let colw = if cells_on_line < cols { label_w[0] } else { label_w[j] };
                 let vx = cx + colw + pad;
                 let room = (cx + cell_w - vx).max(pad);
-                let shown = fit_end_tracked(ctx, vpx, &row.value, room, vtrack);
-                ctx.dl.text(ctx.fonts, FONT_UI, vpx, vx, vty, &shown, vc, vtrack);
+                let shown = fit_end_tracked_tab(ctx, vface, vpx, &row.value, room, vtrack, vtab);
+                ctx.dl.text_fig(ctx.fonts, vface, vpx, vx, vty, &shown, vc, vtrack, &vfig);
                 // The label is drawn whole and the value is what the
                 // room runs out on, so the value's own box is what the
                 // pointer has to rest on to be answered. The identity is
@@ -570,11 +724,12 @@ pub fn rows_label_value(ctx: &mut Ctx, r: Rect, rows: &[RowItem], st: &RowsStyle
                 explain_trim(ctx, id, Rect::new(vx, y, room, row_h), &shown, &row.value);
             }
             LabelWidth::Auto => {
-                let lw = ctx.fonts.measure(FONT_UI, lpx, &row.label, ltrack);
+                let lw = ctx.fonts.measure_fig(lface, lpx, &row.label, ltrack, &lfig);
                 let room = (cell_w - lw - pad).max(pad);
-                let shown = fit_end_tracked(ctx, vpx, &row.value, room, vtrack);
-                ctx.dl
-                    .text_right(ctx.fonts, FONT_UI, vpx, cx + cell_w, vty, &shown, vc, vtrack);
+                let shown = fit_end_tracked_tab(ctx, vface, vpx, &row.value, room, vtrack, vtab);
+                ctx.dl.text_right_fig(
+                    ctx.fonts, vface, vpx, cx + cell_w, vty, &shown, vc, vtrack, &vfig,
+                );
                 // Right-aligned, so the value's box ends at the cell's
                 // right edge and starts `room` before it.
                 let id = crate::object::tooltip::cell_key(0, i, &row.label);
@@ -722,9 +877,7 @@ pub fn gauge_grid(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
     }
     let cols = st.cols;
     static GAP: OnceLock<TokenId> = OnceLock::new();
-    static CAP_SIZE: OnceLock<TokenId> = OnceLock::new();
-    static CAP_LEAD: OnceLock<TokenId> = OnceLock::new();
-    static CAP_TRACK: OnceLock<TokenId> = OnceLock::new();
+    static VALUE_ROLE: OnceLock<TokenId> = OnceLock::new();
     static MIN_H: OnceLock<TokenId> = OnceLock::new();
     static BORDER: OnceLock<TokenId> = OnceLock::new();
     static CLEARANCE: OnceLock<TokenId> = OnceLock::new();
@@ -737,15 +890,27 @@ pub fn gauge_grid(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
     let gap = t.px(tok(&GAP, "gauge.gap"));
     let gw = (r.w - gap * (cols as f32 - 1.0)) / cols as f32;
     let gh = ((r.h - gap * (rows as f32 - 1.0)) / rows as f32).max(1.0);
-    let px = role_px(ctx, &CAP_SIZE, "type.caption.size");
-    let leading = t.px(tok(&CAP_LEAD, "type.caption.leading"));
-    let track = px * t.px(tok(&CAP_TRACK, "type.caption.tracking"));
-    // min_h_for_label is baked from the caption's resting size, so it
+    // The readout is a NUMBER, so it is set in the role the master binds
+    // every other number to. Spelling `type.caption.*` out here read the
+    // ladder of whichever role happened to be named `caption`, left
+    // `gauge.value_role` with no reader at all, and — since the row form
+    // below spelled the same three tokens out for its LABEL — set a
+    // reading and its own key at one size, which no other instrument row
+    // in the program does.
+    let value_role = bound_role(&VALUE_ROLE, "gauge.value_role");
+    let px = value_role.px(ctx, 1.0);
+    let leading = value_role.leading();
+    let track = value_role.tracking_px(px);
+    // The role's own FACE, not this call site's guess at one: a theme
+    // that sets its readouts in the monospace face gets monospace here.
+    let face = value_role.font();
+    let fig = value_role.figures(ctx.fonts, face, px);
+    // min_h_for_value is baked from the readout's resting size, so it
     // follows the same container-query factor the drawn px does.
-    let min_h = t.px(tok(&MIN_H, "gauge.min_h_for_label")) * ctx.panel_scale;
+    let min_h = t.px(tok(&MIN_H, "gauge.min_h_for_value")) * ctx.panel_scale;
     let bw = t.px(tok(&BORDER, "gauge.border"));
-    let clearance = t.px(tok(&CLEARANCE, "gauge.label_clearance"));
-    let inset = t.px(tok(&INSET, "gauge.label_inset"));
+    let clearance = t.px(tok(&CLEARANCE, "gauge.value_clearance"));
+    let inset = t.px(tok(&INSET, "gauge.value_inset"));
     let text_c = col(&TEXT_C, "component.gauge.text");
     let on_fill_c = col(&ON_FILL_C, "component.bar.text_on_fill");
     for (i, v) in values.iter().enumerate() {
@@ -759,7 +924,10 @@ pub fn gauge_grid(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
             continue;
         }
         let text = gauge_value(*v, st.value_fmt);
-        let tw = ctx.fonts.measure(FONT_UI, px, &text, track);
+        // Measured under the role's OWN figure box: the readout is drawn
+        // through it, and a contrast flip decided on a proportional width
+        // fires at a different fill for `11%` than for `88%`.
+        let tw = ctx.fonts.measure_fig(face, px, &text, track, &fig);
         let fill_w = (gw - 2.0 * bw) * (v / 100.0).clamp(0.0, 1.0);
         // The number sits at the far END of the gauge, where the fill
         // arrives last. On the near end — where it used to be — every
@@ -768,8 +936,9 @@ pub fn gauge_grid(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
         let swallowed = fill_w >= gw - 2.0 * bw - tw - clearance;
         let c = if swallowed { on_fill_c } else { text_c };
         let ty = center_line_y(ctx, gy, gh, px, leading);
-        ctx.dl
-            .text_right(ctx.fonts, FONT_UI, px, gx + gw - inset, ty, &text, c, track);
+        ctx.dl.text_right_fig(
+            ctx.fonts, face, px, gx + gw - inset, ty, &text, c, track, &fig,
+        );
     }
 }
 
@@ -786,9 +955,8 @@ fn gauge_value(v: f32, fmt: GaugeValueFmt) -> String {
 /// images align, they do not centre (u2 §2.5).
 fn gauge_rows(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
     static GAP: OnceLock<TokenId> = OnceLock::new();
-    static CAP_SIZE: OnceLock<TokenId> = OnceLock::new();
-    static CAP_LEAD: OnceLock<TokenId> = OnceLock::new();
-    static CAP_TRACK: OnceLock<TokenId> = OnceLock::new();
+    static LABEL_ROLE: OnceLock<TokenId> = OnceLock::new();
+    static VALUE_ROLE: OnceLock<TokenId> = OnceLock::new();
     static LABEL_GAP: OnceLock<TokenId> = OnceLock::new();
     static VALUE_GAP: OnceLock<TokenId> = OnceLock::new();
     static BAR_H: OnceLock<TokenId> = OnceLock::new();
@@ -799,9 +967,28 @@ fn gauge_rows(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
     let gap = t.px(tok(&GAP, "gauge.gap")) * st.shrink;
     let gw = (r.w - gap * (cols as f32 - 1.0)) / cols as f32;
     let gh = ((r.h - gap * (rows as f32 - 1.0)) / rows as f32).max(1.0);
-    let px = role_px(ctx, &CAP_SIZE, "type.caption.size") * st.shrink;
-    let leading = t.px(tok(&CAP_LEAD, "type.caption.leading"));
-    let track = px * t.px(tok(&CAP_TRACK, "type.caption.tracking"));
+    // A gauge row is label + track + value — the same three parts a
+    // `meter` row has, so it reads the same PAIR of bindings the master
+    // gives that row (`gauge.label_role` / `gauge.value_role`, the
+    // siblings of `script.meter_label_role` / `script.meter_value_role`).
+    // Both halves used to be `type.caption.*` spelled out by name, which
+    // set `C0` and `12%` at one size and left both bindings unread.
+    let label_role = bound_role(&LABEL_ROLE, "gauge.label_role");
+    let value_role = bound_role(&VALUE_ROLE, "gauge.value_role");
+    let lpx = label_role.px(ctx, st.shrink);
+    let vpx = value_role.px(ctx, st.shrink);
+    let llead = label_role.leading();
+    let vlead = value_role.leading();
+    let ltrack = label_role.tracking_px(lpx);
+    let vtrack = value_role.tracking_px(vpx);
+    // Each half in its OWN face, for the same reason each is at its own
+    // size: which family a role is set in is the role's to say.
+    let lface = label_role.font();
+    let vface = value_role.font();
+    // The readout's figure box, resolved once and carried into the row
+    // loop: a column of numbers measured proportionally is a column that
+    // moves every time a reading changes width.
+    let vfig = value_role.figures(ctx.fonts, vface, vpx);
     let lgap = t.px(tok(&LABEL_GAP, "meter.label_gap")) * st.shrink;
     let vgap = t.px(tok(&VALUE_GAP, "meter.value_gap")) * st.shrink;
     let bar_h = t.px(tok(&BAR_H, "script.meter_bar_h")) * st.shrink;
@@ -818,18 +1005,25 @@ fn gauge_rows(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
     let mut label_w = 0.0f32;
     let mut value_w = 0.0f32;
     for (i, v) in values.iter().enumerate() {
-        label_w = label_w.max(ctx.fonts.measure(FONT_UI, px, &label_of(i), track));
+        label_w = label_w.max(ctx.fonts.measure(lface, lpx, &label_of(i), ltrack));
         let val = gauge_value(*v, st.value_fmt);
-        value_w = value_w.max(ctx.fonts.measure(FONT_UI, px, &val, track));
+        // Measured under the box it is DRAWN under, so the column is
+        // sized at the width the readings really occupy.
+        value_w = value_w.max(ctx.fonts.measure_fig(vface, vpx, &val, vtrack, &vfig));
     }
     let label_col = if label_w > 0.0 { label_w + lgap } else { 0.0 };
     for (i, v) in values.iter().enumerate() {
         let gx = r.x + (i % cols) as f32 * (gw + gap);
         let gy = r.y + (i / cols) as f32 * (gh + gap);
-        let ty = center_line_y(ctx, gy, gh, px, leading);
+        // Two roles now, so two line boxes: each half is centred on the
+        // row in its OWN leading, which is what put a `rows` line's key
+        // and value on one optical centre and what a single shared px
+        // could not say.
+        let lty = center_line_y(ctx, gy, gh, lpx, llead);
+        let vty = center_line_y(ctx, gy, gh, vpx, vlead);
         let label = label_of(i);
         if !label.is_empty() {
-            ctx.dl.text(ctx.fonts, FONT_UI, px, gx, ty, &label, text_c, track);
+            ctx.dl.text(ctx.fonts, lface, lpx, gx, lty, &label, text_c, ltrack);
         }
         let bar = Rect::new(
             gx + label_col,
@@ -841,7 +1035,9 @@ fn gauge_rows(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
         // A row always has room for its number, so the number is always
         // drawn — item 4 of the cpu inventory stops being conditional.
         let val = gauge_value(*v, st.value_fmt);
-        ctx.dl.text_right(ctx.fonts, FONT_UI, px, gx + gw, ty, &val, text_c, track);
+        ctx.dl.text_right_fig(
+            ctx.fonts, vface, vpx, gx + gw, vty, &val, text_c, vtrack, &vfig,
+        );
     }
 }
 
@@ -985,6 +1181,20 @@ pub fn table_surface<S: Surface>(
     let cell_role = paint::bound_role(sf, "script.table_cell_role", st.shrink);
     let (head_px, head_track) = (head_role.px, head_role.track);
     let (cell_px, cell_track) = (cell_role.px, cell_role.track);
+    // §5.16's `tabular`, carried beside px and track because a table is
+    // the surface it was written for: `script.table_cell_role` binds a
+    // column of pids, ports and percentages, and a seven-digit pid that
+    // measures 33 px in one row and 35 px in the next drags its whole
+    // column sideways as the process list turns over. The MEASURE below
+    // reads it too — trimming against proportional widths and drawing
+    // under a box would ellipsise a cell that fits.
+    let (head_tab, cell_tab) = (head_role.tabular, cell_role.tabular);
+    // And §5.16's `face`, carried the same way and for the same reason.
+    // The master sets `script.table_cell_role = data` and `type.data.face
+    // = mono`; this path drew the interface face regardless, so one role
+    // came out in two families depending on which side of the library
+    // reached the pixel.
+    let (head_face, cell_face) = (head_role.face, cell_role.face);
     // The severity column is style, not content: the display columns are
     // the row's cells with that entry removed — but only when the row
     // actually carries the extra entry, so a script that declares the
@@ -1186,14 +1396,15 @@ pub fn table_surface<S: Surface>(
     };
     let mut measured: Vec<crate::view::table::ColMeasure> = Vec::with_capacity(columns.len());
     for (i, c) in columns.iter().enumerate() {
-        let head = sf.measure(head_px, &c.title, head_track);
+        let head = sf.measure_tab(head_face, head_px, &c.title, head_track, head_tab);
         let mut content = head;
         if c.width == ColWidth::Content && i != st.elastic {
             for d in measured_span.clone() {
                 let Some(row) = rows.get(model_of(d)) else { continue };
                 let slot = sev_slot(row);
                 if let Some(text) = row.get(cell_of(slot, i)) {
-                    content = content.max(sf.measure(cell_px, text, cell_track));
+                    content =
+                        content.max(sf.measure_tab(cell_face, cell_px, text, cell_track, cell_tab));
                 }
             }
         }
@@ -1271,7 +1482,8 @@ pub fn table_surface<S: Surface>(
             let marker = if sorted { glyph + glyph_gap } else { 0.0 };
             let budget = (trim_w(*w) - marker).max(1.0);
             let cell_w = (span(*w) - marker).max(1.0);
-            let text = paint::fit_end(sf, head_px, &c.title, budget, head_track);
+            let text =
+                paint::fit_end_tab(sf, head_face, head_px, &c.title, budget, head_track, head_tab);
             // A heading the ellipsis cut short finishes its sentence when
             // the pointer rests on it (F2 §8.1). The sort marker is part
             // of the budget, so a heading that fits until it is sorted
@@ -1286,7 +1498,10 @@ pub fn table_surface<S: Surface>(
                     &c.title,
                 );
             }
-            paint::cell_text(sf, x, r.y, cell_w, c.align, head_px, &text, text_c, head_track);
+            paint::cell_text_tab(
+                sf, x, r.y, cell_w, c.align, head_face, head_px, &text, text_c, head_track,
+                head_tab,
+            );
             if marker > 0.0 {
                 if let Some((_, dir)) = sort {
                     paint::sort_marker(sf, x + span(*w) - glyph, r.y, glyph, head_px, dir, text_c);
@@ -1371,7 +1586,10 @@ pub fn table_surface<S: Surface>(
             };
             match c.kind {
                 CellKind::Text => {
-                    let shown = paint::fit_end(sf, cell_px, text, trim_w(*w), cell_track);
+                    let shown =
+                        paint::fit_end_tab(
+                            sf, cell_face, cell_px, text, trim_w(*w), cell_track, cell_tab,
+                        );
                     // The elastic column is the one the ellipsis usually
                     // reaches, but any column can be cut short by a
                     // dragged width, so the test is what HAPPENED rather
@@ -1389,14 +1607,15 @@ pub fn table_surface<S: Surface>(
                             text,
                         );
                     }
-                    paint::cell_text(
-                        sf, x, row_y, span(*w), c.align, cell_px, &shown, color, cell_track,
+                    paint::cell_text_tab(
+                        sf, x, row_y, span(*w), c.align, cell_face, cell_px, &shown, color,
+                        cell_track, cell_tab,
                     );
                 }
                 CellKind::Bar { of } => {
                     // The number is unchanged; the track behind it is a
                     // second reading of the same value (u2 §2.7).
-                    let tw = sf.measure(cell_px, text, cell_track);
+                    let tw = sf.measure_tab(cell_face, cell_px, text, cell_track, cell_tab);
                     let avail = (span(*w) - tw - vgap).max(0.0).min(bar_w);
                     if avail > 1.0 && of > 0.0 {
                         let v = paint::leading_number(text).unwrap_or(0.0);
@@ -1408,7 +1627,8 @@ pub fn table_surface<S: Surface>(
                         );
                         paint::meter(sf, bar, v / of, sev, true);
                     }
-                    sf.text(
+                    sf.text_tab(
+                        cell_face,
                         cell_px,
                         x + span(*w),
                         row_y,
@@ -1416,6 +1636,7 @@ pub fn table_surface<S: Surface>(
                         color,
                         cell_track,
                         Align::Right,
+                        cell_tab,
                     );
                 }
                 CellKind::Badge => {
@@ -1506,6 +1727,17 @@ pub fn columns(ctx: &mut Ctx, r: Rect, cells: &[ColumnCell], st: &ColumnsStyle) 
     let vp = st.value_role.px(ctx, st.shrink);
     let ltrack = st.label_role.tracking_px(lp);
     let vtrack = st.value_role.tracking_px(vp);
+    // Face and figure box, resolved once and carried into the cell loop —
+    // the same pair `rows` resolves, because a `columns` value is the same
+    // KIND of thing as a `rows` value and the master binds both to
+    // `value`. Until this line the strip drew FONT_UI proportionally, so
+    // SYSINFO's clock crept 8 px sideways between `11:11:11` and
+    // `88:88:88` while the comment in the script promised it would not.
+    let lface = st.label_role.font();
+    let vface = st.value_role.font();
+    let lfig = st.label_role.figures(ctx.fonts, lface, lp);
+    let vfig = st.value_role.figures(ctx.fonts, vface, vp);
+    let vtab = st.value_role.tabular();
     // The baseline step from label to value is the shape itself, so it
     // has a token of its own rather than riding on the label's size.
     let vgap = t.px(tok(&LABEL_GAP, "columns.label_gap")) * st.shrink;
@@ -1526,8 +1758,11 @@ pub fn columns(ctx: &mut Ctx, r: Rect, cells: &[ColumnCell], st: &ColumnsStyle) 
         let nat: Vec<f32> = cells
             .iter()
             .map(|cell| {
-                let lw = ctx.fonts.measure(FONT_UI, lp, &cell.label, ltrack);
-                let vw = ctx.fonts.measure(FONT_UI, vp, &cell.value, vtrack);
+                // Measured under the box the cell is DRAWN under, so a
+                // content-sized strip is sized at the width its readings
+                // really occupy.
+                let lw = ctx.fonts.measure_fig(lface, lp, &cell.label, ltrack, &lfig);
+                let vw = ctx.fonts.measure_fig(vface, vp, &cell.value, vtrack, &vfig);
                 lw.max(vw) + 2.0 * gutter
             })
             .collect();
@@ -1538,26 +1773,33 @@ pub fn columns(ctx: &mut Ctx, r: Rect, cells: &[ColumnCell], st: &ColumnsStyle) 
     let mut x0 = r.x;
     for (i, (cell, cw)) in cells.iter().zip(widths.iter().copied()).enumerate() {
         let vc = cell.sev.map(sev_text).unwrap_or(value_c);
-        let shown = fit_end_tracked(ctx, vp, &cell.value, cw - 2.0 * gutter, vtrack);
+        let shown =
+            fit_end_tracked_tab(ctx, vface, vp, &cell.value, cw - 2.0 * gutter, vtrack, vtab);
         match align {
             Align::Center => {
                 let cx = x0 + cw / 2.0;
-                ctx.dl
-                    .text_center(ctx.fonts, FONT_UI, lp, cx, y, &cell.label, label_c, ltrack);
-                ctx.dl
-                    .text_center(ctx.fonts, FONT_UI, vp, cx, y + vgap, &shown, vc, vtrack);
+                ctx.dl.text_center_fig(
+                    ctx.fonts, lface, lp, cx, y, &cell.label, label_c, ltrack, &lfig,
+                );
+                ctx.dl.text_center_fig(
+                    ctx.fonts, vface, vp, cx, y + vgap, &shown, vc, vtrack, &vfig,
+                );
             }
             Align::Left => {
                 let cx = x0 + gutter;
-                ctx.dl.text(ctx.fonts, FONT_UI, lp, cx, y, &cell.label, label_c, ltrack);
-                ctx.dl.text(ctx.fonts, FONT_UI, vp, cx, y + vgap, &shown, vc, vtrack);
+                ctx.dl
+                    .text_fig(ctx.fonts, lface, lp, cx, y, &cell.label, label_c, ltrack, &lfig);
+                ctx.dl
+                    .text_fig(ctx.fonts, vface, vp, cx, y + vgap, &shown, vc, vtrack, &vfig);
             }
             Align::Right => {
                 let cx = x0 + cw - gutter;
-                ctx.dl
-                    .text_right(ctx.fonts, FONT_UI, lp, cx, y, &cell.label, label_c, ltrack);
-                ctx.dl
-                    .text_right(ctx.fonts, FONT_UI, vp, cx, y + vgap, &shown, vc, vtrack);
+                ctx.dl.text_right_fig(
+                    ctx.fonts, lface, lp, cx, y, &cell.label, label_c, ltrack, &lfig,
+                );
+                ctx.dl.text_right_fig(
+                    ctx.fonts, vface, vp, cx, y + vgap, &shown, vc, vtrack, &vfig,
+                );
             }
         }
         // The strip is sized from its CONTENT, so a cell is trimmed only
@@ -1613,13 +1855,26 @@ pub fn runs(ctx: &mut Ctx, r: Rect, items: &[Run], align: Align, shrink: f32) ->
         return 0.0;
     }
     static VALUE_C: OnceLock<TokenId> = OnceLock::new();
-    let sized: Vec<(f32, f32, f32)> = items
+    // Each run in ITS OWN role's face, at its own size, under its own
+    // figure box — resolved once here and carried into the draw loop, so a
+    // run is measured by the same rule it is drawn by.
+    //
+    // This line is the desktop clock. `clock.rhai` draws the time through
+    // `runs` and nothing else, its runs name `display.clock` (tabular in
+    // the master), and this function measured and drew FONT_UI
+    // proportionally: `11:11:11` came to 135.61 px and `88:88:88` to
+    // 182.25 px, so a centred clock jumped 22 px sideways the moment a 1
+    // appeared in the time. The comment in the script said the tabular
+    // role was what stopped that happening. It is now.
+    let sized: Vec<(f32, f32, f32, u8, Figures)> = items
         .iter()
         .map(|run| {
             let px = run.role.px(ctx, shrink);
             let track = run.role.tracking_px(px);
-            let w = ctx.fonts.measure(FONT_UI, px, &run.text, track);
-            (px, track, w)
+            let face = run.role.font();
+            let fig = run.role.figures(ctx.fonts, face, px);
+            let w = ctx.fonts.measure_fig(face, px, &run.text, track, &fig);
+            (px, track, w, face, fig)
         })
         .collect();
     // The gap between two neighbouring runs. It used to be faked with
@@ -1632,13 +1887,13 @@ pub fn runs(ctx: &mut Ctx, r: Rect, items: &[Run], align: Align, shrink: f32) ->
             .iter()
             .zip(&sized)
             .filter(|(run, _)| run.end == end)
-            .map(|(_, (_, _, w))| *w)
+            .map(|(_, (_, _, w, _, _))| *w)
             .collect();
         ws.iter().sum::<f32>() + gap * ws.len().saturating_sub(1) as f32
     };
     let start_w = cluster(false);
     let end_w = cluster(true);
-    let max_px = sized.iter().map(|(px, _, _)| *px).fold(0.0, f32::max);
+    let max_px = sized.iter().map(|(px, _, _, _, _)| *px).fold(0.0, f32::max);
     // The start cluster aligns in the room the end cluster leaves.
     let room = r.w - end_w;
     let mut x = match align {
@@ -1648,7 +1903,7 @@ pub fn runs(ctx: &mut Ctx, r: Rect, items: &[Run], align: Align, shrink: f32) ->
     };
     let mut ex = r.right() - end_w;
     let fallback = col(&VALUE_C, "component.script.value");
-    for (run, (px, track, w)) in items.iter().zip(sized.iter()) {
+    for (run, (px, track, w, face, fig)) in items.iter().zip(sized.iter()) {
         let mut c = run.sev.map(sev_text).unwrap_or_else(|| {
             let rc = run.role.color();
             // A role with no ink of its own (empty theme) still shows.
@@ -1660,7 +1915,7 @@ pub fn runs(ctx: &mut Ctx, r: Rect, items: &[Run], align: Align, shrink: f32) ->
         // Bottom-aligned em boxes stand in for the shared baseline.
         let y = r.y + (max_px - px);
         let cursor = if run.end { &mut ex } else { &mut x };
-        ctx.dl.text(ctx.fonts, FONT_UI, *px, *cursor, y, &run.text, c, *track);
+        ctx.dl.text_fig(ctx.fonts, *face, *px, *cursor, y, &run.text, c, *track, fig);
         *cursor += w + gap;
     }
     start_w + end_w
@@ -1731,9 +1986,14 @@ pub fn group_header(ctx: &mut Ctx, r: Rect, label: &str, shrink: f32) {
     let px = role.px(ctx, shrink);
     let track = role.tracking_px(px);
     let ty = center_line_y(ctx, r.y, r.h, px, role.leading());
-    ctx.dl.text(
-        ctx.fonts, FONT_UI, px, r.x, ty, label,
-        col(&LABEL_C, "component.script.label"), track,
+    // The group caption is a section label like any other, so it is set in
+    // the face its role names — a header is not a place the toolkit gets
+    // to pick a family.
+    let face = role.font();
+    let fig = role.figures(ctx.fonts, face, px);
+    ctx.dl.text_fig(
+        ctx.fonts, face, px, r.x, ty, label,
+        col(&LABEL_C, "component.script.label"), track, &fig,
     );
     let stroke = t.px(tok(&RULE_W, "script.group_rule"));
     if stroke > 0.0 {
