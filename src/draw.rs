@@ -1,10 +1,19 @@
 //! Draw list — everything as triangles. Most of them sample the glyph
 //! atlas (text by its glyphs, solid shapes by the atlas's white
 //! pixel); a run may instead sample an application-registered image.
+//!
+//! Beside the triangles the list can keep a REGISTER of what it was
+//! asked to draw — [`DrawCmd`], one entry per public call, armed by
+//! `NACELLE_DRAW_CMDS` and off in every other run. Triangles answer
+//! "did the geometry change"; the register answers "did the scene
+//! change", and a change to the drawing pipeline is only provable with
+//! both: one of the two is what the commit is allowed to move.
 
 use crate::base::Rect;
 use crate::font::{FontSystem, Glyph};
 use crate::theme::Color;
+use std::fmt;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -66,7 +75,7 @@ pub enum CornerStyle {
 /// radius for Round, ignored by Square. The size is a design value and
 /// therefore always arrives as a parameter from a token; nothing here
 /// defaults it.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Corner {
     pub style: CornerStyle,
     pub size: f32,
@@ -231,6 +240,439 @@ pub struct DrawRun {
     pub clip: Option<[f32; 4]>,
 }
 
+// ---------------------------------------------------------------------
+// The command register: what the caller ASKED FOR, kept beside what the
+// tessellator made of it.
+
+/// Where a text command's anchor point sits: [`DrawList::text`] pins the
+/// left edge of the box, [`DrawList::text_center`] its middle,
+/// [`DrawList::text_right`] its right edge. Three calls, one intent with
+/// three anchors — the x they finally hand the glyph loop differs
+/// because the measured width differs, what the caller asked for does
+/// not.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TextAnchor {
+    Left,
+    Centre,
+    Right,
+}
+
+/// One drawing call as the caller MEANT it: the kind, the box, the
+/// colour, the corner treatment, the string — and deliberately not the
+/// vertices it became.
+///
+/// The vertex list already proves that two builds tessellate alike. That
+/// is the wrong question for a change that is ALLOWED to tessellate
+/// differently: an SDF core draws a rounded panel as one quad where the
+/// ring generator drew twenty-eight, and a hash of vertices then reports
+/// "different frame" for a picture that is identical. The register
+/// answers the other question — did the SCENE change — so a commit can
+/// state which of the two it is permitted to move: hydraulics under the
+/// picture (D0's matrix) moves neither, a tessellation core moves the
+/// vertices and not the register, and anything that moves the register
+/// moved what the program meant to draw.
+///
+/// So nothing a tessellator may legitimately choose belongs in here.
+/// `segments` is absent from [`DrawCmd::Ring`] because it IS the
+/// tessellation knob; the mask band is absent from [`DrawCmd::GlowRing`]
+/// and [`DrawCmd::MaskQuad`] because it names texels in an atlas an SDF
+/// core has no use for. What a corner is — round, 4 px — is intent; how
+/// many chords it takes to draw it is not.
+///
+/// Rects arrive here as `[x, y, w, h]` whatever the call spelled them,
+/// so a rect and a ring over the same box print the same box.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DrawCmd {
+    /// [`DrawList::push_clip`] — the rect the caller ASKED for, not the
+    /// intersection the stack made of it. The intersection is a function
+    /// of the pushes already in the register, and printing it as well
+    /// would report one decision twice.
+    ClipPush { r: [f32; 4] },
+    ClipPop,
+    /// [`DrawList::restore_clips`] — the host putting a foreign drawer's
+    /// stack back. Recorded even when it restores what was already
+    /// there, because "the host insisted" is the fact worth pinning.
+    ClipRestore { stack: Vec<[f32; 4]> },
+    Rect { r: [f32; 4], color: Color },
+    RectOutline { r: [f32; 4], stroke: f32, color: Color },
+    Quad { p: [[f32; 2]; 4], color: Color },
+    QuadC { p: [[f32; 2]; 4], c: [Color; 4] },
+    Line { from: [f32; 2], to: [f32; 2], stroke: f32, color: Color },
+    Polyline { pts: Vec<[f32; 2]>, stroke: f32, color: Color, closed: bool },
+    ChamferFrame { r: [f32; 4], cut: f32, stroke: f32, color: Color },
+    ChamferFill { r: [f32; 4], cut: f32, color: Color },
+    Ring { r: [f32; 4], corners: [Corner; 4], stroke: f32, color: Color },
+    RingFill { r: [f32; 4], corners: [Corner; 4], color: Color },
+    RectGrad { r: [f32; 4], stops: Vec<(f32, Color)>, angle: f32 },
+    FanC { centre: [f32; 2], c_centre: Color, rim: Vec<([f32; 2], Color)> },
+    Image { r: [f32; 4], id: ImageId, tint: Color },
+    ImageUv { r: [f32; 4], uv: [[f32; 2]; 4], id: ImageId, tint: Color },
+    Blur { r: [f32; 4], tint: Color },
+    MaskQuad { p: [[f32; 2]; 4], uv: [[f32; 2]; 4], color: Color, additive: bool },
+    GlowRing { r: [f32; 4], corners: [Corner; 4], radius: f32, color: Color },
+    SoftBox { r: [f32; 4], radius: f32, color: Color },
+    Shadow { r: [f32; 4], offset: [f32; 2], radius: f32, color: Color },
+    Text {
+        at: [f32; 2],
+        anchor: TextAnchor,
+        font: u8,
+        px: f32,
+        tracking: f32,
+        color: Color,
+        text: String,
+    },
+    ModuleTitle {
+        at: [f32; 2],
+        w: f32,
+        px: f32,
+        color: Color,
+        underline: bool,
+        left: String,
+        right: String,
+    },
+}
+
+/// Decimals for a length in pixels: a thousandth, the grain the frame
+/// hash already rounds to — fine enough that nothing an eye or a pixel
+/// grid can hold is lost, coarse enough that a compiler reassociating a
+/// multiply cannot make two identical scenes disagree.
+const PX: usize = 3;
+/// Decimals for a colour channel. A ten-thousandth is finer than the
+/// 8-bit output can carry (1/255 ≈ 0.0039), so every difference that
+/// can reach a pixel survives and the float noise under it does not.
+const CH: usize = 4;
+/// Decimals for the unit-interval and angular quantities — texture
+/// coordinates, gradient stop positions, radians. A millionth of a
+/// radian moves a point a five-hundredth of a pixel across a 2000 px
+/// window: just under the pixel grain, which is where this grain
+/// belongs.
+const FINE: usize = 6;
+
+/// One number at a FIXED number of decimals.
+///
+/// Fixed precision is the whole point: `{}` on an f32 prints the
+/// shortest text that round-trips, so 0.1 and 0.1 + 1e-9 print
+/// differently and two runs of the same scene could disagree over a bit
+/// no pixel can show. Quantising first and printing a fixed width makes
+/// the text a FUNCTION of the picture instead of the float.
+fn num(f: &mut fmt::Formatter<'_>, v: f32, places: usize) -> fmt::Result {
+    if !v.is_finite() {
+        // The three ways a frame goes wrong here stay distinguishable
+        // instead of all arriving as some rounded number.
+        return f.write_str(if v.is_nan() {
+            "nan"
+        } else if v > 0.0 {
+            "inf"
+        } else {
+            "-inf"
+        });
+    }
+    let scale = 10f64.powi(places as i32);
+    let q = (v as f64 * scale).round() / scale;
+    // Negative zero and a value that rounded down to zero must print
+    // alike: -0.0 + 0.0 is +0.0 under round-to-nearest, and two runs
+    // that differ only in a sign bit no eye can see are one frame.
+    write!(f, "{:.*}", places, q + 0.0)
+}
+
+fn nums(f: &mut fmt::Formatter<'_>, vs: &[f32], places: usize) -> fmt::Result {
+    for v in vs {
+        f.write_str(" ")?;
+        num(f, *v, places)?;
+    }
+    Ok(())
+}
+
+/// One named number, ` name value` — the shape every scalar field on a
+/// command line takes, so a reader (and a `grep`) can find one by name
+/// instead of by counting columns.
+fn field(f: &mut fmt::Formatter<'_>, name: &str, v: f32, places: usize) -> fmt::Result {
+    write!(f, " {name} ")?;
+    num(f, v, places)
+}
+
+fn rgba(f: &mut fmt::Formatter<'_>, c: Color) -> fmt::Result {
+    f.write_str(" rgba")?;
+    nums(f, &c.to_array(), CH)
+}
+
+fn points(f: &mut fmt::Formatter<'_>, p: &[[f32; 2]]) -> fmt::Result {
+    for q in p {
+        nums(f, q, PX)?;
+    }
+    Ok(())
+}
+
+fn uvs(f: &mut fmt::Formatter<'_>, uv: &[[f32; 2]; 4]) -> fmt::Result {
+    f.write_str(" uv")?;
+    for q in uv {
+        nums(f, q, FINE)?;
+    }
+    Ok(())
+}
+
+/// One corner as `style:size`, except that a Square corner prints its
+/// style alone — `ring_points` ignores the size of a Square, so a stray
+/// size there draws nothing, and two commands that draw the same picture
+/// must print the same line.
+fn corner(f: &mut fmt::Formatter<'_>, c: Corner) -> fmt::Result {
+    match c.style {
+        CornerStyle::Square => f.write_str(" square"),
+        CornerStyle::Round => {
+            f.write_str(" round:")?;
+            num(f, c.size, PX)
+        }
+        CornerStyle::Chamfer => {
+            f.write_str(" chamfer:")?;
+            num(f, c.size, PX)
+        }
+    }
+}
+
+fn corners(f: &mut fmt::Formatter<'_>, c: &[Corner; 4]) -> fmt::Result {
+    f.write_str(" corners")?;
+    for k in c {
+        corner(f, *k)?;
+    }
+    Ok(())
+}
+
+/// A string as ONE token: quoted, and escaped so that no content can
+/// smuggle a line break, a quote or a control character into a dump that
+/// is compared line by line.
+fn quoted(f: &mut fmt::Formatter<'_>, s: &str) -> fmt::Result {
+    f.write_str("\"")?;
+    for ch in s.chars() {
+        match ch {
+            '"' => f.write_str("\\\"")?,
+            '\\' => f.write_str("\\\\")?,
+            '\n' => f.write_str("\\n")?,
+            '\r' => f.write_str("\\r")?,
+            '\t' => f.write_str("\\t")?,
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => write!(f, "\\u{{{:x}}}", c as u32)?,
+            c => write!(f, "{c}")?,
+        }
+    }
+    f.write_str("\"")
+}
+
+/// One command as one line, no trailing newline — the register's
+/// canonical form. The consumer numbers the lines; two dumps of the same
+/// scene are byte-for-byte equal, so the text itself is what a guard
+/// compares or hashes, and no second rounding rule is needed anywhere
+/// downstream.
+impl fmt::Display for DrawCmd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DrawCmd::ClipPush { r } => {
+                f.write_str("clip push")?;
+                nums(f, r, PX)
+            }
+            DrawCmd::ClipPop => f.write_str("clip pop"),
+            DrawCmd::ClipRestore { stack } => {
+                write!(f, "clip restore {}", stack.len())?;
+                for r in stack {
+                    nums(f, r, PX)?;
+                }
+                Ok(())
+            }
+            DrawCmd::Rect { r, color } => {
+                f.write_str("rect at")?;
+                nums(f, r, PX)?;
+                rgba(f, *color)
+            }
+            DrawCmd::RectOutline { r, stroke, color } => {
+                f.write_str("rect_outline at")?;
+                nums(f, r, PX)?;
+                field(f, "stroke", *stroke, PX)?;
+                rgba(f, *color)
+            }
+            DrawCmd::Quad { p, color } => {
+                f.write_str("quad p")?;
+                points(f, p)?;
+                rgba(f, *color)
+            }
+            DrawCmd::QuadC { p, c } => {
+                f.write_str("quad_c p")?;
+                points(f, p)?;
+                for k in c {
+                    rgba(f, *k)?;
+                }
+                Ok(())
+            }
+            DrawCmd::Line { from, to, stroke, color } => {
+                f.write_str("line from")?;
+                nums(f, from, PX)?;
+                f.write_str(" to")?;
+                nums(f, to, PX)?;
+                field(f, "stroke", *stroke, PX)?;
+                rgba(f, *color)
+            }
+            DrawCmd::Polyline { pts, stroke, color, closed } => {
+                write!(f, "polyline {}", pts.len())?;
+                points(f, pts)?;
+                field(f, "stroke", *stroke, PX)?;
+                rgba(f, *color)?;
+                f.write_str(if *closed { " closed" } else { " open" })
+            }
+            DrawCmd::ChamferFrame { r, cut, stroke, color } => {
+                f.write_str("chamfer_frame at")?;
+                nums(f, r, PX)?;
+                field(f, "cut", *cut, PX)?;
+                field(f, "stroke", *stroke, PX)?;
+                rgba(f, *color)
+            }
+            DrawCmd::ChamferFill { r, cut, color } => {
+                f.write_str("chamfer_fill at")?;
+                nums(f, r, PX)?;
+                field(f, "cut", *cut, PX)?;
+                rgba(f, *color)
+            }
+            DrawCmd::Ring { r, corners: c, stroke, color } => {
+                f.write_str("ring at")?;
+                nums(f, r, PX)?;
+                corners(f, c)?;
+                field(f, "stroke", *stroke, PX)?;
+                rgba(f, *color)
+            }
+            DrawCmd::RingFill { r, corners: c, color } => {
+                f.write_str("ring_fill at")?;
+                nums(f, r, PX)?;
+                corners(f, c)?;
+                rgba(f, *color)
+            }
+            DrawCmd::RectGrad { r, stops, angle } => {
+                f.write_str("rect_grad at")?;
+                nums(f, r, PX)?;
+                field(f, "angle", *angle, FINE)?;
+                write!(f, " stops {}", stops.len())?;
+                for (t, c) in stops {
+                    f.write_str(" ")?;
+                    num(f, *t, FINE)?;
+                    rgba(f, *c)?;
+                }
+                Ok(())
+            }
+            DrawCmd::FanC { centre, c_centre, rim } => {
+                f.write_str("fan_c centre")?;
+                nums(f, centre, PX)?;
+                rgba(f, *c_centre)?;
+                write!(f, " rim {}", rim.len())?;
+                for (p, c) in rim {
+                    nums(f, p, PX)?;
+                    rgba(f, *c)?;
+                }
+                Ok(())
+            }
+            DrawCmd::Image { r, id, tint } => {
+                f.write_str("image at")?;
+                nums(f, r, PX)?;
+                write!(f, " id {}", id.0)?;
+                rgba(f, *tint)
+            }
+            DrawCmd::ImageUv { r, uv, id, tint } => {
+                f.write_str("image_uv at")?;
+                nums(f, r, PX)?;
+                uvs(f, uv)?;
+                write!(f, " id {}", id.0)?;
+                rgba(f, *tint)
+            }
+            DrawCmd::Blur { r, tint } => {
+                f.write_str("blur at")?;
+                nums(f, r, PX)?;
+                rgba(f, *tint)
+            }
+            DrawCmd::MaskQuad { p, uv, color, additive } => {
+                f.write_str("mask_quad p")?;
+                points(f, p)?;
+                uvs(f, uv)?;
+                rgba(f, *color)?;
+                f.write_str(if *additive { " add" } else { " cover" })
+            }
+            DrawCmd::GlowRing { r, corners: c, radius, color } => {
+                f.write_str("glow_ring at")?;
+                nums(f, r, PX)?;
+                corners(f, c)?;
+                field(f, "radius", *radius, PX)?;
+                rgba(f, *color)
+            }
+            DrawCmd::SoftBox { r, radius, color } => {
+                f.write_str("soft_box at")?;
+                nums(f, r, PX)?;
+                field(f, "radius", *radius, PX)?;
+                rgba(f, *color)
+            }
+            DrawCmd::Shadow { r, offset, radius, color } => {
+                f.write_str("shadow at")?;
+                nums(f, r, PX)?;
+                f.write_str(" offset")?;
+                nums(f, offset, PX)?;
+                field(f, "radius", *radius, PX)?;
+                rgba(f, *color)
+            }
+            DrawCmd::Text { at, anchor, font, px, tracking, color, text } => {
+                f.write_str("text at")?;
+                nums(f, at, PX)?;
+                f.write_str(match anchor {
+                    TextAnchor::Left => " anchor left",
+                    TextAnchor::Centre => " anchor centre",
+                    TextAnchor::Right => " anchor right",
+                })?;
+                write!(f, " font {font}")?;
+                field(f, "px", *px, PX)?;
+                field(f, "track", *tracking, PX)?;
+                rgba(f, *color)?;
+                f.write_str(" ")?;
+                quoted(f, text)
+            }
+            DrawCmd::ModuleTitle { at, w, px, color, underline, left, right } => {
+                f.write_str("module_title at")?;
+                nums(f, at, PX)?;
+                field(f, "w", *w, PX)?;
+                field(f, "px", *px, PX)?;
+                rgba(f, *color)?;
+                f.write_str(if *underline { " rule" } else { " no_rule" })?;
+                f.write_str(" left ")?;
+                quoted(f, left)?;
+                f.write_str(" right ")?;
+                quoted(f, right)
+            }
+        }
+    }
+}
+
+/// The register's switch, resolved once: 0 unread, 1 off, 2 on.
+static CMD_REGISTER: AtomicU8 = AtomicU8::new(0);
+
+/// What a value of `NACELLE_DRAW_CMDS` means. Pure, so the parsing is
+/// testable — the reader below can only be exercised once per process.
+fn armed_by(v: Option<&str>) -> bool {
+    matches!(v, Some(v) if !v.is_empty() && v != "0")
+}
+
+/// Whether lists made from here on record their commands.
+/// `NACELLE_DRAW_CMDS` arms the register and nothing else does; unarmed
+/// is the shipping case and costs a relaxed load per list, per frame.
+pub fn cmds_armed() -> bool {
+    match CMD_REGISTER.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = armed_by(std::env::var("NACELLE_DRAW_CMDS").ok().as_deref());
+            CMD_REGISTER.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+/// Arms the register whatever the environment says — for an application
+/// that has a switch of its own and wants the register to follow it. One
+/// way on purpose: an armed run is a measurement, not a session, and
+/// half a measured frame is worth nothing.
+pub fn arm_cmds() {
+    CMD_REGISTER.store(2, Ordering::Relaxed);
+}
+
 pub struct DrawList {
     pub verts: Vec<Vertex>,
     pub runs: Vec<DrawRun>,
@@ -241,6 +683,12 @@ pub struct DrawList {
     /// mem::take so a ring costs no allocation after the first frame.
     scratch_a: Vec<[f32; 2]>,
     scratch_b: Vec<[f32; 2]>,
+    /// The command register, absent unless armed. `None` is a null
+    /// pointer's worth of state and no allocation at all: an unarmed
+    /// frame pays one branch per drawing call and never builds a
+    /// command, which is why the strings and point lists in [`DrawCmd`]
+    /// cost a shipping run nothing.
+    cmds: Option<Vec<DrawCmd>>,
 }
 
 impl DrawList {
@@ -251,13 +699,55 @@ impl DrawList {
             clips: Vec::new(),
             scratch_a: Vec::new(),
             scratch_b: Vec::new(),
+            cmds: cmds_armed().then(Vec::new),
         }
+    }
+
+    /// A list that records its commands whatever the environment says —
+    /// the door the guard's own tests come in by, and an application
+    /// that arms one list without arming the process.
+    pub fn recording() -> Self {
+        DrawList { cmds: Some(Vec::new()), ..DrawList::new() }
     }
 
     pub fn clear(&mut self) {
         self.verts.clear();
         self.runs.clear();
         self.clips.clear();
+        match &mut self.cmds {
+            Some(cmds) => cmds.clear(),
+            // A list built before the register was armed picks it up at
+            // the frame boundary, so an application is free to read its
+            // own switch after it has made its list. Never the other
+            // way: arming is one-way, so a list that records keeps
+            // recording.
+            none => *none = cmds_armed().then(Vec::new),
+        }
+    }
+
+    /// The commands this frame asked for, in call order — empty when the
+    /// register is off. One line each through [`DrawCmd`]'s `Display`.
+    pub fn cmds(&self) -> &[DrawCmd] {
+        self.cmds.as_deref().unwrap_or(&[])
+    }
+
+    /// Whether this list records commands at all. `cmds().is_empty()`
+    /// cannot answer that — an armed frame that drew nothing looks the
+    /// same.
+    pub fn is_recording(&self) -> bool {
+        self.cmds.is_some()
+    }
+
+    /// Records one command, if this list records at all.
+    ///
+    /// The closure is what makes the unarmed case free: a text call
+    /// would otherwise copy its string sixty times a second for nobody,
+    /// and a polyline its points. Off, this is one branch on a pointer.
+    #[inline]
+    fn cmd(&mut self, f: impl FnOnce() -> DrawCmd) {
+        if let Some(cmds) = &mut self.cmds {
+            cmds.push(f());
+        }
     }
 
     /// Clip everything drawn until the matching pop to this rect,
@@ -265,6 +755,7 @@ impl DrawList {
     /// forgiven at clear() — a widget that early-returns must not wedge the
     /// whole frame.
     pub fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        self.cmd(|| DrawCmd::ClipPush { r: [x, y, w, h] });
         let new = match self.clips.last() {
             Some(&[cx, cy, cw, ch]) => {
                 let x0 = x.max(cx);
@@ -285,6 +776,7 @@ impl DrawList {
     }
 
     pub fn pop_clip(&mut self) {
+        self.cmd(|| DrawCmd::ClipPop);
         self.clips.pop();
         let clip = self.clips.last().copied();
         self.runs.push(DrawRun {
@@ -317,6 +809,7 @@ impl DrawList {
     /// again. A caller that left the stack as it found it costs one
     /// comparison and stamps no run.
     pub fn restore_clips(&mut self, saved: &[[f32; 4]]) {
+        self.cmd(|| DrawCmd::ClipRestore { stack: saved.to_vec() });
         if self.clips == saved {
             return;
         }
@@ -381,6 +874,7 @@ impl DrawList {
     /// multiplies the image — white leaves it as it is, the alpha
     /// fades it.
     pub fn image(&mut self, x: f32, y: f32, w: f32, h: f32, id: ImageId, tint: Color) {
+        self.cmd(|| DrawCmd::Image { r: [x, y, w, h], id, tint });
         self.run_for(Some(id));
         let c = tint.to_array();
         let p = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
@@ -397,6 +891,7 @@ impl DrawList {
     /// afterwards — an animation can carry the glass around and the
     /// frost stays put on the picture beneath.
     pub fn blur(&mut self, x: f32, y: f32, w: f32, h: f32, tint: Color) {
+        self.cmd(|| DrawCmd::Blur { r: [x, y, w, h], tint });
         self.run_for(Some(BLUR_IMAGE));
         let c = tint.to_array();
         let (u, v) = FontSystem::white_uv();
@@ -409,28 +904,59 @@ impl DrawList {
 
     /// Arbitrary quadrilateral (vertices along the perimeter).
     pub fn quad(&mut self, p: [[f32; 2]; 4], color: Color) {
+        self.cmd(|| DrawCmd::Quad { p, color });
+        self.quad_verts(p, color);
+    }
+
+    /// The vertices of [`DrawList::quad`] without the command.
+    ///
+    /// This is the shape of every shape here that is built out of
+    /// another one: the PUBLIC name records the caller's intent and then
+    /// calls a `_verts` twin, and the shapes above it call the twin.
+    /// Otherwise a rect outline would enter the register as an outline
+    /// AND four rects, and the day a tessellation core stops cutting it
+    /// into four the register would report a scene change where the
+    /// scene never moved. What this file decomposes a shape into is
+    /// exactly what the register must not see.
+    fn quad_verts(&mut self, p: [[f32; 2]; 4], color: Color) {
         let (u, v) = FontSystem::white_uv();
         self.push_quad(p, [[u, v]; 4], color);
     }
 
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
-        self.quad([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], color);
+        self.cmd(|| DrawCmd::Rect { r: [x, y, w, h], color });
+        self.rect_verts(x, y, w, h, color);
+    }
+
+    fn rect_verts(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
+        self.quad_verts([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], color);
     }
 
     pub fn rect_outline(&mut self, x: f32, y: f32, w: f32, h: f32, t: f32, color: Color) {
-        self.rect(x, y, w, t, color);
-        self.rect(x, y + h - t, w, t, color);
-        self.rect(x, y + t, t, h - 2.0 * t, color);
-        self.rect(x + w - t, y + t, t, h - 2.0 * t, color);
+        self.cmd(|| DrawCmd::RectOutline { r: [x, y, w, h], stroke: t, color });
+        self.rect_verts(x, y, w, t, color);
+        self.rect_verts(x, y + h - t, w, t, color);
+        self.rect_verts(x, y + t, t, h - 2.0 * t, color);
+        self.rect_verts(x + w - t, y + t, t, h - 2.0 * t, color);
     }
 
     pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, t: f32, color: Color) {
+        self.cmd(|| DrawCmd::Line {
+            from: [x0, y0],
+            to: [x1, y1],
+            stroke: t,
+            color,
+        });
+        self.line_verts(x0, y0, x1, y1, t, color);
+    }
+
+    fn line_verts(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, t: f32, color: Color) {
         let dx = x1 - x0;
         let dy = y1 - y0;
         let len = (dx * dx + dy * dy).sqrt().max(0.0001);
         let nx = -dy / len * t * 0.5;
         let ny = dx / len * t * 0.5;
-        self.quad(
+        self.quad_verts(
             [
                 [x0 + nx, y0 + ny],
                 [x1 + nx, y1 + ny],
@@ -442,16 +968,22 @@ impl DrawList {
     }
 
     pub fn polyline(&mut self, pts: &[[f32; 2]], t: f32, color: Color, closed: bool) {
+        self.cmd(|| DrawCmd::Polyline {
+            pts: pts.to_vec(),
+            stroke: t,
+            color,
+            closed,
+        });
         if pts.len() < 2 {
             return;
         }
         for w in pts.windows(2) {
-            self.line(w[0][0], w[0][1], w[1][0], w[1][1], t, color);
+            self.line_verts(w[0][0], w[0][1], w[1][0], w[1][1], t, color);
         }
         if closed {
             let a = pts[pts.len() - 1];
             let b = pts[0];
-            self.line(a[0], a[1], b[0], b[1], t, color);
+            self.line_verts(a[0], a[1], b[0], b[1], t, color);
         }
     }
 
@@ -471,27 +1003,38 @@ impl DrawList {
     /// shrinks by (2−√2)·t/2 ≈ 0.293·t. The earlier t/2 guess left the face
     /// 0.44 px outside the rect at stroke.regular (r1's derivation).
     pub fn chamfer_frame(&mut self, x: f32, y: f32, w: f32, h: f32, cut: f32, t: f32, color: Color) {
+        self.cmd(|| DrawCmd::ChamferFrame {
+            r: [x, y, w, h],
+            cut,
+            stroke: t,
+            color,
+        });
         // A wrapper over the one ring generator (r1 §3.3): identical band —
         // outer face on the rect, inner face `t` further in, the 45° face
         // shortened per Corner::inset — at the same 48 vertices, but
         // watertight where the polyline overlapped and notched at joints.
-        self.ring(Rect::new(x, y, w, h), &[Corner::chamfer(cut); 4], 3, t, color);
+        self.ring_verts(Rect::new(x, y, w, h), &[Corner::chamfer(cut); 4], 3, t, color);
     }
 
     /// The filled counterpart of `chamfer_frame`: the very octagon the
     /// frame outlines, as three quads. A background drawn with this
     /// stays inside the border instead of poking past the cut corners.
     pub fn chamfer_fill(&mut self, x: f32, y: f32, w: f32, h: f32, cut: f32, color: Color) {
+        self.cmd(|| DrawCmd::ChamferFill { r: [x, y, w, h], cut, color });
+        self.chamfer_fill_verts(x, y, w, h, cut, color);
+    }
+
+    fn chamfer_fill_verts(&mut self, x: f32, y: f32, w: f32, h: f32, cut: f32, color: Color) {
         let cut = cut.min(w * 0.5).min(h * 0.5).max(0.0);
-        self.quad(
+        self.quad_verts(
             [[x + cut, y], [x + w - cut, y], [x + w - cut, y + h], [x + cut, y + h]],
             color,
         );
-        self.quad(
+        self.quad_verts(
             [[x, y + cut], [x + cut, y], [x + cut, y + h], [x, y + h - cut]],
             color,
         );
-        self.quad(
+        self.quad_verts(
             [[x + w - cut, y], [x + w, y + cut], [x + w, y + h - cut], [x + w - cut, y + h]],
             color,
         );
@@ -511,6 +1054,16 @@ impl DrawList {
     /// (chamfer_frame's), round 6·(S+1) per corner; `segments` from
     /// ring_segments() with the theme's ceiling.
     pub fn ring(&mut self, r: Rect, c: &[Corner; 4], segments: u8, stroke: f32, color: Color) {
+        self.cmd(|| DrawCmd::Ring {
+            r: [r.x, r.y, r.w, r.h],
+            corners: *c,
+            stroke,
+            color,
+        });
+        self.ring_verts(r, c, segments, stroke, color);
+    }
+
+    fn ring_verts(&mut self, r: Rect, c: &[Corner; 4], segments: u8, stroke: f32, color: Color) {
         if r.w <= 0.0 || r.h <= 0.0 {
             return;
         }
@@ -554,15 +1107,20 @@ impl DrawList {
     /// ORIGINAL rect: the fill must reach the rect edge under the border,
     /// and the z-order puts the ring above it.
     pub fn ring_fill(&mut self, r: Rect, c: &[Corner; 4], segments: u8, color: Color) {
+        self.cmd(|| DrawCmd::RingFill {
+            r: [r.x, r.y, r.w, r.h],
+            corners: *c,
+            color,
+        });
         if r.w <= 0.0 || r.h <= 0.0 {
             return;
         }
         if c.iter().all(|k| k.style == CornerStyle::Square) {
-            self.rect(r.x, r.y, r.w, r.h, color);
+            self.rect_verts(r.x, r.y, r.w, r.h, color);
             return;
         }
         if c.iter().all(|k| k.style == CornerStyle::Chamfer && k.size == c[0].size) {
-            self.chamfer_fill(r.x, r.y, r.w, r.h, c[0].size, color);
+            self.chamfer_fill_verts(r.x, r.y, r.w, r.h, c[0].size, color);
             return;
         }
         let mut pts = std::mem::take(&mut self.scratch_a);
@@ -591,6 +1149,7 @@ impl DrawList {
     /// function exactly on any triangulation: no diagonal seam, no bands,
     /// 6 verts at any angle.
     pub fn quad_c(&mut self, p: [[f32; 2]; 4], c: [Color; 4]) {
+        self.cmd(|| DrawCmd::QuadC { p, c });
         let (u, v) = FontSystem::white_uv();
         self.push_quad4(
             None,
@@ -613,11 +1172,16 @@ impl DrawList {
     /// gradients arrive here already sampled: the resolver did that, the
     /// list never reads tokens.
     pub fn rect_grad(&mut self, r: Rect, stops: &[(f32, Color)], angle: f32) {
+        self.cmd(|| DrawCmd::RectGrad {
+            r: [r.x, r.y, r.w, r.h],
+            stops: stops.to_vec(),
+            angle,
+        });
         if r.w <= 0.0 || r.h <= 0.0 || stops.is_empty() {
             return;
         }
         if stops.len() == 1 {
-            self.rect(r.x, r.y, r.w, r.h, stops[0].1);
+            self.rect_verts(r.x, r.y, r.w, r.h, stops[0].1);
             return;
         }
         // Corners tl,tr,br,bl with their normalised projection onto the
@@ -694,6 +1258,13 @@ impl DrawList {
     /// (r1 §6.3, 3·k verts). An open wedge is quad_c's job; closing is what
     /// makes a k-gon k triangles. Fewer than 3 rim points draw nothing.
     pub fn fan_c(&mut self, centre: [f32; 2], rim: &[[f32; 2]], c_centre: Color, c_rim: &[Color]) {
+        self.cmd(|| DrawCmd::FanC {
+            centre,
+            c_centre,
+            // Paired, and cut to the shorter of the two: the fan draws
+            // that many wedges and the register may not claim more.
+            rim: rim.iter().copied().zip(c_rim.iter().copied()).collect(),
+        });
         let n = rim.len().min(c_rim.len());
         if n < 3 {
             return;
@@ -716,6 +1287,12 @@ impl DrawList {
     /// reserved handle here is deliberate, not policed, because the sprite
     /// glow endgame is exactly ADD_ATLAS with explicit UVs.
     pub fn image_uv(&mut self, r: Rect, uv: [[f32; 2]; 4], id: ImageId, tint: Color) {
+        self.cmd(|| DrawCmd::ImageUv {
+            r: [r.x, r.y, r.w, r.h],
+            uv,
+            id,
+            tint,
+        });
         let p = [
             [r.x, r.y],
             [r.x + r.w, r.y],
@@ -747,6 +1324,7 @@ impl DrawList {
         color: Color,
         additive: bool,
     ) {
+        self.cmd(|| DrawCmd::MaskQuad { p, uv, color, additive });
         if color.a <= 0.0 {
             return;
         }
@@ -798,6 +1376,12 @@ impl DrawList {
         color: Color,
         mask_uv: (f32, f32, f32, f32),
     ) {
+        self.cmd(|| DrawCmd::GlowRing {
+            r: [r.x, r.y, r.w, r.h],
+            corners: *c,
+            radius,
+            color,
+        });
         if !(radius > 0.0) || color.a <= 0.0 || r.w <= 0.0 || r.h <= 0.0 {
             return;
         }
@@ -903,12 +1487,17 @@ impl DrawList {
     /// to reach past an edge — shadow() below does exactly that). 54 verts.
     /// An empty `mask_uv` degrades raw to a plain filled rect.
     pub fn soft_box(&mut self, r: Rect, radius: f32, color: Color, mask_uv: (f32, f32, f32, f32)) {
+        self.cmd(|| DrawCmd::SoftBox { r: [r.x, r.y, r.w, r.h], radius, color });
+        self.soft_box_verts(r, radius, color, mask_uv);
+    }
+
+    fn soft_box_verts(&mut self, r: Rect, radius: f32, color: Color, mask_uv: (f32, f32, f32, f32)) {
         if r.w <= 0.0 || r.h <= 0.0 || color.a <= 0.0 {
             return;
         }
         let (u0, v0, u1, v1) = mask_uv;
         if u1 <= u0 || v1 <= v0 {
-            self.rect(r.x, r.y, r.w, r.h, color);
+            self.rect_verts(r.x, r.y, r.w, r.h, color);
             return;
         }
         self.nine_slice(None, r, radius.max(0.0), mask_uv, color, true);
@@ -922,8 +1511,14 @@ impl DrawList {
     /// caller's tokens (shadow.dx/dy, shadow.radius, shadow.color);
     /// nothing here defaults them.
     pub fn shadow(&mut self, r: Rect, offset: [f32; 2], radius: f32, color: Color, mask_uv: (f32, f32, f32, f32)) {
+        self.cmd(|| DrawCmd::Shadow {
+            r: [r.x, r.y, r.w, r.h],
+            offset,
+            radius,
+            color,
+        });
         let radius = radius.max(0.0);
-        self.soft_box(
+        self.soft_box_verts(
             Rect::new(
                 r.x + offset[0] - radius,
                 r.y + offset[1] - radius,
@@ -1007,7 +1602,37 @@ impl DrawList {
     }
 
     /// Draws text; (x, y) is the top-left corner of the text box.
+    #[allow(clippy::too_many_arguments)]
     pub fn text(
+        &mut self,
+        fs: &mut FontSystem,
+        font: u8,
+        px: f32,
+        x: f32,
+        y: f32,
+        text: &str,
+        color: Color,
+        letter_spacing: f32,
+    ) {
+        self.cmd(|| DrawCmd::Text {
+            at: [x, y],
+            anchor: TextAnchor::Left,
+            font,
+            px,
+            tracking: letter_spacing,
+            color,
+            text: text.to_string(),
+        });
+        self.text_verts(fs, font, px, x, y, text, color, letter_spacing);
+    }
+
+    /// The glyphs of [`DrawList::text`] without the command. Which
+    /// glyphs a string becomes — and how many quads each one is worth —
+    /// is the atlas's business; the register holds the STRING, so a
+    /// change of rasteriser, of hinting or of the atlas's packing moves
+    /// the vertex dump and leaves the register alone.
+    #[allow(clippy::too_many_arguments)]
+    fn text_verts(
         &mut self,
         fs: &mut FontSystem,
         font: u8,
@@ -1042,8 +1667,17 @@ impl DrawList {
         color: Color,
         letter_spacing: f32,
     ) {
+        self.cmd(|| DrawCmd::Text {
+            at: [cx, y],
+            anchor: TextAnchor::Centre,
+            font,
+            px,
+            tracking: letter_spacing,
+            color,
+            text: text.to_string(),
+        });
         let w = fs.measure(font, px, text, letter_spacing);
-        self.text(fs, font, px, cx - w / 2.0, y, text, color, letter_spacing);
+        self.text_verts(fs, font, px, cx - w / 2.0, y, text, color, letter_spacing);
     }
 
     /// Text right-aligned to the rx edge.
@@ -1059,8 +1693,32 @@ impl DrawList {
         color: Color,
         letter_spacing: f32,
     ) {
+        self.cmd(|| DrawCmd::Text {
+            at: [rx, y],
+            anchor: TextAnchor::Right,
+            font,
+            px,
+            tracking: letter_spacing,
+            color,
+            text: text.to_string(),
+        });
+        self.text_right_verts(fs, font, px, rx, y, text, color, letter_spacing);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn text_right_verts(
+        &mut self,
+        fs: &mut FontSystem,
+        font: u8,
+        px: f32,
+        rx: f32,
+        y: f32,
+        text: &str,
+        color: Color,
+        letter_spacing: f32,
+    ) {
         let w = fs.measure(font, px, text, letter_spacing);
-        self.text(fs, font, px, rx - w, y, text, color, letter_spacing);
+        self.text_verts(fs, font, px, rx - w, y, text, color, letter_spacing);
     }
 
     /// Module header: text on the left, optionally on the right, and an
@@ -1079,6 +1737,15 @@ impl DrawList {
         color: Color,
         underline: bool,
     ) {
+        self.cmd(|| DrawCmd::ModuleTitle {
+            at: [x, y],
+            w,
+            px,
+            color,
+            underline,
+            left: left.to_string(),
+            right: right.to_string(),
+        });
         // The five constants that survived the first wave, tokened: this is
         // the one text path with no Ctx, so it reads the resolved theme
         // directly. em tokens bake to bare multipliers of the caller's px.
@@ -1099,7 +1766,7 @@ impl DrawList {
         let spacing = px * t.px(tokc(&TRACK, "component.module.tracking")).max(0.0);
         let pad = px * t.px(tokc(&PAD, "component.module.pad")).max(0.0);
         let gap = px * t.px(tokc(&GAP, "component.module.gap")).max(0.0);
-        self.text(fs, font, px, x + pad, y, left, color, spacing);
+        self.text_verts(fs, font, px, x + pad, y, left, color, spacing);
         if !right.is_empty() {
             // The right-hand text is trimmed to whatever the left one
             // leaves. Without this the two simply overlapped in a narrow
@@ -1109,13 +1776,13 @@ impl DrawList {
             let room = (w - used).max(0.0);
             let shown = fit_tail(fs, font, px, right, spacing, room);
             if !shown.is_empty() {
-                self.text_right(fs, font, px, x + w - pad, y, &shown, color, spacing);
+                self.text_right_verts(fs, font, px, x + w - pad, y, &shown, color, spacing);
             }
         }
         if underline {
             let rw = t.px(tokc(&RULE, "component.module.rule")).max(0.0);
             let rc = t.color(tokc(&RULE_COL, "component.module.rule_color"));
-            self.line(
+            self.line_verts(
                 x,
                 y + h,
                 x + w,
@@ -1160,6 +1827,7 @@ pub(crate) fn fit_tail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
 
     /// The frame's stroke stays INSIDE the rect it frames. The rect is
     /// layout's and the width is the theme's, so a theme thickening a border
@@ -1593,4 +2261,287 @@ mod tests {
             assert!((x + w - px) + (y + h - py) >= cut - e, "bottom-right corner leaks");
         }
     }
+
+    // -----------------------------------------------------------------
+    // The command register.
+
+    /// Counts the heap allocations THIS THREAD makes, which is what lets
+    /// "the unarmed register allocates nothing" be measured instead of
+    /// asserted. The counter is thread-local because the test harness
+    /// runs tests in parallel threads and a process-wide number would
+    /// only measure the neighbours; it is const-initialised and reached
+    /// through `try_with` because an allocator that allocates, or that
+    /// panics while a thread is being torn down, is a hang.
+    mod meter {
+        use std::alloc::{GlobalAlloc, Layout, System};
+        use std::cell::Cell;
+
+        thread_local! {
+            static N: Cell<u64> = const { Cell::new(0) };
+        }
+
+        pub struct Counting;
+
+        unsafe impl GlobalAlloc for Counting {
+            unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+                let _ = N.try_with(|n| n.set(n.get() + 1));
+                System.alloc(l)
+            }
+            unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+                let _ = N.try_with(|n| n.set(n.get() + 1));
+                System.alloc_zeroed(l)
+            }
+            unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
+                let _ = N.try_with(|n| n.set(n.get() + 1));
+                System.realloc(p, l, new)
+            }
+            unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+                System.dealloc(p, l)
+            }
+        }
+
+        #[global_allocator]
+        static A: Counting = Counting;
+
+        pub fn allocations(f: impl FnOnce()) -> u64 {
+            let before = N.with(|n| n.get());
+            f();
+            N.with(|n| n.get()) - before
+        }
+    }
+
+    fn ink() -> Color {
+        Color::rgb8(10, 200, 30)
+    }
+
+    fn wash() -> Color {
+        Color::rgb8(250, 40, 90)
+    }
+
+    /// A scene wide enough to reach every kind of buffer the list keeps:
+    /// the clip stack, the ring scratch, the run list and the vertices.
+    fn scene(dl: &mut DrawList, tint: Color) {
+        let r = Rect::new(0.0, 0.0, 80.0, 40.0);
+        dl.push_clip(0.0, 0.0, 300.0, 200.0);
+        dl.rect(1.0, 2.0, 30.0, 40.0, tint);
+        dl.rect_outline(5.0, 5.0, 50.0, 20.0, 2.0, wash());
+        dl.ring(r, &[Corner::round(6.0); 4], 6, 2.0, tint);
+        dl.ring_fill(r, &[Corner::chamfer(4.0); 4], 6, wash());
+        dl.polyline(&[[0.0, 0.0], [10.0, 10.0], [20.0, 0.0]], 1.5, tint, true);
+        dl.rect_grad(r, &[(0.0, tint), (0.5, wash()), (1.0, tint)], 0.6);
+        dl.glow_ring(r, &[Corner::round(6.0); 4], 6, 8.0, wash(), FontSystem::mask_soft_uv());
+        dl.shadow(r, [2.0, 3.0], 4.0, wash(), FontSystem::mask_soft_uv());
+        dl.pop_clip();
+    }
+
+    fn dump(dl: &DrawList) -> String {
+        let mut s = String::new();
+        for (i, c) in dl.cmds().iter().enumerate() {
+            let _ = writeln!(s, "cmd {i} {c}");
+        }
+        s
+    }
+
+    #[test]
+    fn the_word_arms_the_register_and_anything_else_leaves_it_off() {
+        assert!(!armed_by(None));
+        assert!(!armed_by(Some("")));
+        assert!(!armed_by(Some("0")));
+        assert!(armed_by(Some("1")));
+        assert!(armed_by(Some("yes")));
+    }
+
+    /// The price of carrying the register in the shipping build, MEASURED:
+    /// a warmed list that is not recording allocates nothing at all while
+    /// it draws. The armed list beside it allocates on the same pass —
+    /// without that half the test would pass with a broken meter.
+    #[test]
+    fn an_unarmed_frame_allocates_nothing_and_an_armed_one_does() {
+        let mut off = DrawList::new();
+        // The first pass buys the capacity every later one reuses — the
+        // list is a per-process object drawn into sixty times a second,
+        // so the steady state is the thing worth measuring.
+        scene(&mut off, ink());
+        off.clear();
+        // Only now, and after the clear that would have re-read it:
+        // this test is about the default, and an armed shell must not be
+        // able to turn it either way.
+        off.cmds = None;
+        let n = meter::allocations(|| scene(&mut off, ink()));
+        assert_eq!(n, 0, "an unarmed frame allocated {n} times");
+
+        let mut on = DrawList::recording();
+        scene(&mut on, ink());
+        on.clear();
+        let n = meter::allocations(|| scene(&mut on, ink()));
+        assert!(n > 0, "the meter reads zero even for a recording list");
+    }
+
+    /// The claim the whole register rests on: the same scene twice is the
+    /// same text, byte for byte — nothing in a command reads an address,
+    /// an allocation or a clock, and the fixed-precision numbers leave no
+    /// room for a shortest-round-trip printer to disagree with itself.
+    #[test]
+    fn the_same_scene_dumps_byte_for_byte() {
+        let (mut a, mut b) = (DrawList::recording(), DrawList::recording());
+        scene(&mut a, ink());
+        scene(&mut b, ink());
+        assert!(!dump(&a).is_empty());
+        assert_eq!(dump(&a), dump(&b));
+        assert_eq!(dump(&DrawList::recording()), "");
+    }
+
+    /// And the other half: a register that never moves proves nothing.
+    #[test]
+    fn a_recoloured_scene_is_a_different_dump() {
+        let (mut a, mut b) = (DrawList::recording(), DrawList::recording());
+        scene(&mut a, ink());
+        scene(&mut b, Color { a: 0.99, ..ink() });
+        assert_ne!(dump(&a), dump(&b));
+        assert_eq!(a.cmds().len(), b.cmds().len(), "only the colour moved");
+    }
+
+    /// THE test this register exists for. The same commands tessellated
+    /// two different ways — the segment count is the tessellation knob —
+    /// give different vertex lists and the SAME dump. An SDF core that
+    /// draws a rounded corner as one quad instead of twenty-eight is a
+    /// bigger version of exactly this, and it must be able to prove the
+    /// scene did not move while the geometry did.
+    #[test]
+    fn the_register_holds_the_intent_and_not_the_tessellation() {
+        let r = Rect::new(10.0, 20.0, 200.0, 100.0);
+        let c = [Corner::round(12.0); 4];
+        let uv = FontSystem::mask_soft_uv();
+        let two = |segments: u8| {
+            let mut dl = DrawList::recording();
+            dl.ring(r, &c, segments, 2.0, ink());
+            dl.ring_fill(r, &c, segments, wash());
+            dl.glow_ring(r, &c, segments, 6.0, ink(), uv);
+            dl
+        };
+        let (coarse, fine) = (two(3), two(12));
+        assert!(
+            fine.verts.len() > coarse.verts.len(),
+            "the two tessellations must actually differ, or the test proves nothing"
+        );
+        assert_eq!(dump(&coarse), dump(&fine));
+    }
+
+    /// A shape built out of other shapes enters the register ONCE, as
+    /// itself. Otherwise a rounded fill would be logged as a fill AND the
+    /// rect it takes a shortcut through, and the day the shortcut goes
+    /// the register would report a scene change that never happened.
+    #[test]
+    fn a_shape_records_itself_and_not_its_parts() {
+        let r = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let uv = FontSystem::mask_soft_uv();
+        let one = |f: &dyn Fn(&mut DrawList)| {
+            let mut dl = DrawList::recording();
+            f(&mut dl);
+            dl.cmds().len()
+        };
+        // rect_outline is four rects, chamfer_frame a ring, ring_fill a
+        // rect or a chamfer_fill by fast path, polyline a run of lines,
+        // shadow a soft_box, rect_grad a rect when it has one stop.
+        assert_eq!(one(&|dl| dl.rect_outline(0.0, 0.0, 100.0, 50.0, 2.0, ink())), 1);
+        assert_eq!(one(&|dl| dl.chamfer_frame(0.0, 0.0, 100.0, 50.0, 8.0, 2.0, ink())), 1);
+        assert_eq!(one(&|dl| dl.ring_fill(r, &[Corner::SQUARE; 4], 6, ink())), 1);
+        assert_eq!(one(&|dl| dl.ring_fill(r, &[Corner::chamfer(8.0); 4], 6, ink())), 1);
+        assert_eq!(one(&|dl| dl.polyline(&[[0.0, 0.0], [1.0, 1.0], [2.0, 0.0]], 1.0, ink(), true)), 1);
+        assert_eq!(one(&|dl| dl.shadow(r, [1.0, 2.0], 3.0, ink(), uv)), 1);
+        assert_eq!(one(&|dl| dl.rect_grad(r, &[(0.0, ink())], 0.0)), 1);
+        assert_eq!(one(&|dl| dl.soft_box(r, 4.0, ink(), (0.0, 0.0, 0.0, 0.0))), 1);
+        // And the suppression is not a latch: the next call still lands.
+        let mut dl = DrawList::recording();
+        dl.rect_outline(0.0, 0.0, 100.0, 50.0, 2.0, ink());
+        dl.rect(0.0, 0.0, 1.0, 1.0, ink());
+        assert_eq!(dl.cmds().len(), 2);
+    }
+
+    /// The number grain, both ways: a difference under it is deliberately
+    /// invisible — that tolerance is what makes the register survive a
+    /// compiler reassociating a multiply — and a difference over it must
+    /// show. And the two spellings of zero print alike, because a sign
+    /// bit no pixel can carry is not a scene change.
+    #[test]
+    fn the_grain_is_a_thousandth_of_a_pixel_and_zero_has_one_spelling() {
+        let line = |x: f32| DrawCmd::Rect { r: [x, 0.0, 1.0, 1.0], color: ink() }.to_string();
+        assert_eq!(line(10.0), line(10.0004));
+        assert_ne!(line(10.0), line(10.001));
+        assert_eq!(line(0.0), line(-0.0));
+        assert_eq!(line(0.0), line(-0.0001));
+        assert!(line(0.0).starts_with("rect at 0.000 0.000 1.000 1.000 rgba "));
+        // A colour channel is finer, because 8-bit output is: a step of
+        // 1/255 must never round away.
+        let shade = |v: f32| {
+            DrawCmd::Rect { r: [0.0; 4], color: Color { r: v, g: 0.0, b: 0.0, a: 1.0 } }
+                .to_string()
+        };
+        assert_ne!(shade(0.5), shade(0.5 + 1.0 / 255.0));
+        // What cannot be drawn must still be greppable rather than
+        // silently rounded into a plausible number.
+        assert!(line(f32::NAN).contains("nan"));
+        assert!(line(f32::INFINITY).contains(" inf "));
+    }
+
+    /// One command is one line, whatever the payload: a string that
+    /// carries a newline, a quote or a control character may not break a
+    /// dump that is compared line by line.
+    #[test]
+    fn a_text_command_stays_on_one_line() {
+        let c = DrawCmd::Text {
+            at: [12.0, 30.0],
+            anchor: TextAnchor::Centre,
+            font: 1,
+            px: 14.0,
+            tracking: 0.5,
+            color: ink(),
+            text: "a\"b\\c\nd\te\u{7f}".to_string(),
+        };
+        let s = c.to_string();
+        assert!(!s.contains('\n'), "{s}");
+        assert!(s.ends_with(r#""a\"b\\c\nd\te\u{7f}""#), "{s}");
+        assert!(s.starts_with("text at 12.000 30.000 anchor centre font 1 px 14.000 track 0.500"));
+    }
+
+    /// A Square corner prints its style alone: `ring_points` ignores the
+    /// size of a Square, so a stray size there draws nothing, and two
+    /// commands that draw the same picture must print the same line.
+    #[test]
+    fn a_corner_prints_what_it_draws() {
+        let ring = |c: Corner| {
+            DrawCmd::Ring {
+                r: [0.0, 0.0, 10.0, 10.0],
+                corners: [c; 4],
+                stroke: 1.0,
+                color: ink(),
+            }
+            .to_string()
+        };
+        assert_eq!(ring(Corner::SQUARE), ring(Corner { style: CornerStyle::Square, size: 7.0 }));
+        assert!(ring(Corner::SQUARE).contains(" corners square square square square "));
+        assert!(ring(Corner::round(4.0)).contains(" corners round:4.000"));
+        assert!(ring(Corner::chamfer(4.0)).contains(" corners chamfer:4.000"));
+        assert_ne!(ring(Corner::round(4.0)), ring(Corner::chamfer(4.0)));
+    }
+
+    /// The register follows the clip stack, and records the rect the
+    /// caller ASKED for rather than the intersection — the intersection
+    /// is a function of the pushes already in the register.
+    #[test]
+    fn the_clip_stack_is_part_of_the_scene() {
+        let mut dl = DrawList::recording();
+        dl.push_clip(10.0, 10.0, 100.0, 100.0);
+        dl.push_clip(50.0, 50.0, 100.0, 100.0);
+        dl.pop_clip();
+        dl.restore_clips(&[[1.0, 2.0, 3.0, 4.0]]);
+        assert_eq!(
+            dump(&dl),
+            "cmd 0 clip push 10.000 10.000 100.000 100.000\n\
+             cmd 1 clip push 50.000 50.000 100.000 100.000\n\
+             cmd 2 clip pop\n\
+             cmd 3 clip restore 1 1.000 2.000 3.000 4.000\n"
+        );
+    }
 }
+
