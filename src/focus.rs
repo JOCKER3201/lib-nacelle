@@ -354,6 +354,22 @@ impl Mods {
     pub const fn contains(self, other: Mods) -> bool {
         self.0 & other.0 == other.0
     }
+
+    /// The raw bits — what [`crate::runtime::PluginApi::key`] carries
+    /// across the boundary, where a Rust type means nothing. `const`
+    /// because the ABI's own constants are checked against it at compile
+    /// time (`runtime::MODS_CTRL` and friends).
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// A set from bits that crossed the boundary. Bits this build does
+    /// not know are dropped rather than kept, exactly like [`Caps`]: an
+    /// unknown modifier held down must not stop a chord this build DOES
+    /// understand from matching.
+    pub const fn from_bits(bits: u8) -> Mods {
+        Mods(bits & 0b1111)
+    }
 }
 
 impl std::ops::BitOr for Mods {

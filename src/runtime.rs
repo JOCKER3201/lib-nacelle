@@ -88,14 +88,152 @@ pub const ACTION_PASTE_PRIMARY: u32 = 9;
 /// application for NOTHING — a scroll thumb, a column edge, a knob. F2
 /// §6 wanted a `press -> bool` for exactly this; the F1 ledger merged
 /// press into the single capture path, and this is that boolean in the
-/// channel the path already has. Answering it from `click` or `wheel`
-/// means nothing and does nothing.
+/// channel the path already has. Answering it from `click`, `wheel` or
+/// [`PluginApi::button`] means nothing and does nothing — `button`
+/// carries the OTHER half of a press (the state-ladder rung, and a
+/// release that arrives whether or not the drag was ever accepted), and
+/// leaving the capture here is what keeps it from becoming a second
+/// path to the same thing.
 pub const ACTION_CAPTURE: u32 = 10;
 
 /// [`PluginApi::drag`] phases — `DragPhase` as numbers.
 pub const DRAG_BEGIN: u32 = 0;
 pub const DRAG_MOVE: u32 = 1;
 pub const DRAG_END: u32 = 2;
+
+/// [`PluginApi::button`] phases — the pointer button going down and
+/// coming up. Numbered in their own space rather than continuing the
+/// `DRAG_*` one, because they are a different question asked on the same
+/// gesture: a reader that confused the two would be told "move" and hear
+/// "release".
+pub const BUTTON_PRESS: u32 = 0;
+pub const BUTTON_RELEASE: u32 = 1;
+
+/// The modifier mask [`PluginApi::key`] carries — `focus::Mods` as a
+/// number. The bits ARE that type's bits (asserted below), so the mask
+/// crosses the boundary without a translation table that could drift;
+/// the constants exist so neither side has to write `1 << 2` and hope.
+pub const MODS_NONE: u32 = 0;
+pub const MODS_CTRL: u32 = 1 << 0;
+pub const MODS_SHIFT: u32 = 1 << 1;
+pub const MODS_ALT: u32 = 1 << 2;
+pub const MODS_SUPER: u32 = 1 << 3;
+
+// The one place the two vocabularies are married. If a bit ever moves in
+// `focus::Mods`, this stops the build instead of shipping a Ctrl that a
+// plugin reads as Shift.
+const _: () = assert!(crate::focus::Mods::CTRL.bits() as u32 == MODS_CTRL);
+const _: () = assert!(crate::focus::Mods::SHIFT.bits() as u32 == MODS_SHIFT);
+const _: () = assert!(crate::focus::Mods::ALT.bits() as u32 == MODS_ALT);
+const _: () = assert!(crate::focus::Mods::SUPER.bits() as u32 == MODS_SUPER);
+
+/// The words the boundary spells its NAMED keys with — the contract
+/// [`PluginApi::key`] and [`PluginApi::key_feedback`] both carry.
+///
+/// It lives here, in one place, because it has to be read on both sides
+/// and until now it was written on neither: the host spelled five words
+/// inline where it built its feedback pair, and every plugin guessed the
+/// same five back in a `match` of its own. Two independent guesses at an
+/// unwritten table is how a plugin comes to understand HOME while the
+/// host has never sent it — which is precisely the state this replaces.
+///
+/// A key crosses as a CHARACTER or as a NAME, never as both: `ch` is a
+/// Unicode scalar and what a field inserts, a name is what a widget
+/// obeys. The whole set of names is:
+///
+/// | word | key |
+/// |------|-----|
+/// | `ENTER` | Enter / Return |
+/// | `ESC` | Escape |
+/// | `BACK` | Backspace |
+/// | `SPACE` | the space bar |
+/// | `TAB` | Tab |
+/// | `UP` `DOWN` `LEFT` `RIGHT` | the arrows |
+/// | `HOME` `END` | line ends |
+/// | `DELETE` | forward delete |
+/// | `PAGE_UP` `PAGE_DOWN` | paging |
+///
+/// Rules a reader may rely on:
+///
+/// * ASCII upper case, and a reader that upper-cases before comparing is
+///   exactly as correct — the host never sends anything else.
+/// * A key this table does not name is not delivered as a name at all.
+///   Insert, the menu key and the function keys stay the application's
+///   shortcuts; a widget that saw them would be competing with the
+///   shortcut registry for them.
+/// * An empty name with `ch == 0` is not an event and means nothing.
+pub mod keys {
+    use crate::focus::Key;
+
+    pub const ENTER: &str = "ENTER";
+    pub const ESC: &str = "ESC";
+    pub const BACK: &str = "BACK";
+    pub const SPACE: &str = "SPACE";
+    pub const TAB: &str = "TAB";
+    pub const UP: &str = "UP";
+    pub const DOWN: &str = "DOWN";
+    pub const LEFT: &str = "LEFT";
+    pub const RIGHT: &str = "RIGHT";
+    pub const HOME: &str = "HOME";
+    pub const END: &str = "END";
+    pub const DELETE: &str = "DELETE";
+    pub const PAGE_UP: &str = "PAGE_UP";
+    pub const PAGE_DOWN: &str = "PAGE_DOWN";
+
+    /// Every word, in the order the table above lists them — for a
+    /// caller that wants to check its own coverage against the contract
+    /// rather than against its memory of it.
+    pub const ALL: [&str; 14] = [
+        ENTER, ESC, BACK, SPACE, TAB, UP, DOWN, LEFT, RIGHT, HOME, END, DELETE, PAGE_UP,
+        PAGE_DOWN,
+    ];
+
+    /// The word for a neutral key, or None for one that crosses as a
+    /// character (or does not cross at all).
+    pub fn name_of(k: Key) -> Option<&'static str> {
+        Some(match k {
+            Key::Enter => ENTER,
+            Key::Escape => ESC,
+            Key::Backspace => BACK,
+            Key::Space => SPACE,
+            Key::Tab => TAB,
+            Key::Up => UP,
+            Key::Down => DOWN,
+            Key::Left => LEFT,
+            Key::Right => RIGHT,
+            Key::Home => HOME,
+            Key::End => END,
+            Key::Delete => DELETE,
+            Key::PageUp => PAGE_UP,
+            Key::PageDown => PAGE_DOWN,
+            // A character rides in `ch`; the rest are not delivered.
+            Key::Char(_) | Key::Insert | Key::Menu | Key::F(_) => return None,
+        })
+    }
+
+    /// The key a word means, case-insensitively. None for anything the
+    /// table does not hold — a word from a newer host must read as "no
+    /// key I know" rather than as the wrong one.
+    pub fn from_name(word: &str) -> Option<Key> {
+        Some(match word.to_ascii_uppercase().as_str() {
+            ENTER => Key::Enter,
+            ESC => Key::Escape,
+            BACK => Key::Backspace,
+            SPACE => Key::Space,
+            TAB => Key::Tab,
+            UP => Key::Up,
+            DOWN => Key::Down,
+            LEFT => Key::Left,
+            RIGHT => Key::Right,
+            HOME => Key::Home,
+            END => Key::End,
+            DELETE => Key::Delete,
+            PAGE_UP => Key::PageUp,
+            PAGE_DOWN => Key::PageDown,
+            _ => return None,
+        })
+    }
+}
 
 /// `TermSelectC::op`.
 pub const SELECT_OP_BEGIN: u32 = 0;
@@ -368,7 +506,107 @@ pub struct HostApi {
         w: f32,
         c: ColorC,
     ),
+    /// "The pointer is resting on `anchor`, and what I drew there really
+    /// says `text`" — [`crate::view::Surface::tooltip`] across the
+    /// boundary.
+    ///
+    /// The HOST draws it, and that is the whole reason the entry has to
+    /// exist rather than the plugin simply painting a box: a tooltip is
+    /// drawn OVER its neighbours and outside the rectangle its widget
+    /// was given, draw order is z-order, and a plugin draws in the
+    /// middle of the frame — anything it painted there would be covered
+    /// by the panels drawn after it, which is exactly why
+    /// [`crate::object::tooltip`] is drawn last of everything. So the
+    /// plugin states the fact and the host owns the timing, the
+    /// placement and the paint.
+    ///
+    /// `id` is what tells two neighbouring targets apart across frames:
+    /// the same id in the next frame is one target the pointer has not
+    /// left, a different one restarts the delay. `text` is UTF-8 with a
+    /// length, not a C string; empty is not a request. Filing it while
+    /// the pointer is outside `anchor` is not an error — the host tests
+    /// containment itself and drops it, because a box explaining a
+    /// rectangle the pointer is nowhere near is worse than no box.
+    pub tooltip: extern "C" fn(
+        ctx: *mut c_void,
+        id: u64,
+        anchor: RectC,
+        text: *const u8,
+        len: u32,
+    ),
+    /// Publishes `data` under `topic`, replacing whatever stood there,
+    /// and answers the topic's new sequence number — 0 when the call was
+    /// refused (a topic that is not UTF-8, or longer than
+    /// [`CHANNEL_TOPIC_MAX`]; a payload past [`CHANNEL_VALUE_MAX`]).
+    ///
+    /// The channel is a BOARD, not a queue: one value per topic, the
+    /// last one written, standing until it is written again. That is the
+    /// simplest shape that does all four things a widget-to-widget
+    /// channel has to do here, and every richer one fails at least one:
+    ///
+    /// * it survives a `.so` boundary — the value lives in the HOST's
+    ///   copy of the toolkit, so plugins opened `RTLD_LOCAL` with a
+    ///   static each still read ONE value. A shared static cannot: that
+    ///   is why the launcher's category selection stopped working the
+    ///   day its two widgets became two files.
+    /// * the topic is text and the payload is bytes, so neither side
+    ///   needs a type the other was compiled against.
+    /// * nobody has to be listening. A retained value is read whenever
+    ///   the reader next draws, so "which widget loaded first" and
+    ///   "which drew first" stop being questions.
+    /// * it cannot block drawing. There is no queue to fill, no reader
+    ///   to wait for, no wakeup to deliver: a publisher writes and
+    ///   returns, and a reader picks the value up on its next frame —
+    ///   at most one frame of latency, which is what every other fact in
+    ///   an immediate-mode interface already costs.
+    ///
+    /// A queue fails the last two (an undrained one grows forever, and
+    /// bounding it makes the publisher wait); a callback fails them too,
+    /// because the host would have to call into one plugin from
+    /// another's stack, mid-frame.
+    pub channel_publish: extern "C" fn(
+        topic: *const u8,
+        topic_len: u32,
+        data: *const u8,
+        data_len: u32,
+    ) -> u64,
+    /// The value standing under `topic`, written into `buf`.
+    ///
+    /// Answers the value's FULL length while writing `min(len, cap)`
+    /// bytes — deliberately unlike [`HostApi::shell_cwd`], which answers
+    /// what it wrote. A cwd's prefix is a shorter path; a payload's
+    /// prefix is a broken message, and half a message read as a whole
+    /// one is worse than none. So the caller can always TELL a
+    /// truncation from a fit and ask again with room.
+    ///
+    /// `seq`, when not null, receives the topic's sequence number: 0
+    /// means nothing was ever published there (so an empty payload and
+    /// an absent one are distinguishable), and a number that has not
+    /// moved since the last read means the value has not changed — how a
+    /// reader skips work without comparing payloads.
+    pub channel_read: extern "C" fn(
+        topic: *const u8,
+        topic_len: u32,
+        buf: *mut u8,
+        cap: u32,
+        seq: *mut u64,
+    ) -> u32,
 }
+
+/// The longest topic name the channel accepts. A name is a constant in
+/// somebody's source, never user input; the bound is here so a plugin
+/// passing a wild length cannot make the host allocate from it.
+pub const CHANNEL_TOPIC_MAX: usize = 128;
+
+/// The largest value the channel carries. A selection, a path, a small
+/// list — this is a place for facts, not a transport for files.
+pub const CHANNEL_VALUE_MAX: usize = 64 * 1024;
+
+/// How many distinct topics the board holds. Publishing to a new topic
+/// past this is refused rather than evicting somebody else's: a widget
+/// that quietly stopped hearing its partner is the failure this whole
+/// entry exists to end.
+pub const CHANNEL_TOPICS_MAX: usize = 256;
 
 /// Corner styles for [`HostApi::ring_fill`] and [`HostApi::ring`]. The
 /// numbers are the boundary's own vocabulary, not the theme's enum
@@ -404,6 +642,17 @@ pub const HOST_API_HAS_CLIP: usize =
 pub const HOST_API_HAS_RING: usize =
     std::mem::offset_of!(HostApi, ring) + std::mem::size_of::<usize>();
 
+/// The prefix that includes `tooltip`.
+pub const HOST_API_HAS_TOOLTIP: usize =
+    std::mem::offset_of!(HostApi, tooltip) + std::mem::size_of::<usize>();
+
+/// The prefix that includes BOTH channel entries. One gate for the pair,
+/// like the clips and the rings: a widget that can publish and cannot
+/// read is talking to itself, and one that can read and cannot publish
+/// is waiting for a message nobody in its process can send.
+pub const HOST_API_HAS_CHANNEL: usize =
+    std::mem::offset_of!(HostApi, channel_read) + std::mem::size_of::<usize>();
+
 /// [`HostApi::mask_quad`]: blend additively — the quad adds light, the
 /// way the host's own glow does. Without it the quad covers, the way its
 /// shadows do.
@@ -435,6 +684,21 @@ impl HostApi {
     /// rounded ones is a visible degradation, not a silent one.
     pub fn has_ring(&self) -> bool {
         self.api_size as usize >= HOST_API_HAS_RING
+    }
+
+    /// Whether this host draws tooltips for a plugin. Absent: the
+    /// request is not made and a trimmed label simply stays trimmed —
+    /// the degradation `Surface::tooltip`'s default already describes.
+    pub fn has_tooltip(&self) -> bool {
+        self.api_size as usize >= HOST_API_HAS_TOOLTIP
+    }
+
+    /// Whether this host carries the widget-to-widget channel. Absent:
+    /// a publish reaches nobody and a read finds nothing, so a widget
+    /// that steers another one falls back to whatever it shows when
+    /// nothing has been chosen — never to a wrong choice.
+    pub fn has_channel(&self) -> bool {
+        self.api_size as usize >= HOST_API_HAS_CHANNEL
     }
 }
 
@@ -550,8 +814,6 @@ pub struct PluginApi {
     /// Appended past `drag`, `api_size`-gated: a plugin whose table
     /// ends before it is never asked, and its panel keeps the ordinary
     /// cursor.
-    ///
-    /// next append: `press`, `release` (F2 §6, per the ledger).
     pub pointer: extern "C" fn(
         instance: *mut c_void,
         x: f32,
@@ -560,6 +822,84 @@ pub struct PluginApi {
         win_w: f32,
         win_h: f32,
     ) -> u32,
+    /// A key delivered to the widget that OWNS THE KEYBOARD — the entry
+    /// [`PluginApi::key_feedback`] could never be.
+    ///
+    /// `key_feedback` stays exactly what it was and is not touched: a
+    /// BROADCAST to every instance, so an on-screen keyboard can light
+    /// up the key somebody else is typing. This is its opposite in the
+    /// three ways that matter, which is why it is a second entry and not
+    /// a wider first one:
+    ///
+    /// * it is delivered to ONE widget, so two text fields on one board
+    ///   stop both eating the same character;
+    /// * it carries `mods` — the [`MODS_CTRL`] bits, `focus::Mods` as a
+    ///   number — so select-all, undo and the clipboard chords are
+    ///   reachable inside a field at all;
+    /// * it ANSWERS. Nonzero means the key was consumed and the host
+    ///   must not also spend it on focus navigation, a shortcut or the
+    ///   shell's bytes; `out` may ask the application for something the
+    ///   way `click` does (a search field's Enter launching what it
+    ///   found is the first). Zero leaves the key entirely to the host.
+    ///
+    /// `label`/`label_len` is one of the [`keys`] words (UTF-8 with a
+    /// length, not a C string) for a named key and empty for a
+    /// character; `ch` is a Unicode scalar and 0 for a named key.
+    /// Rebuild it with `char::from_u32(v)`, never a transmute — an
+    /// invalid scalar value is undefined behaviour.
+    ///
+    /// What it deliberately does NOT carry: the platform's composed
+    /// TEXT (a multi-character IME commit is not one key and does not
+    /// come through here), and the auto-repeat bit (a held key arrives
+    /// as another key, which is what auto-repeat is for). Both are
+    /// stated so a widget author reads a limit rather than discovering
+    /// one.
+    ///
+    /// Appended past `pointer`, `api_size`-gated: a plugin whose table
+    /// ends before it is never called, and the host spends the key on
+    /// itself exactly as it does today.
+    pub key: extern "C" fn(
+        instance: *mut c_void,
+        ch: u32,
+        label: *const u8,
+        label_len: u32,
+        mods: u32,
+        out: *mut ActionC,
+    ) -> u32,
+    /// A pointer button going down and coming up over the widget —
+    /// `Widget::press` and `Widget::release` across the boundary.
+    ///
+    /// ONE entry carrying a phase, because that is what `drag` already
+    /// is: the press, the motion and the release are phases of a single
+    /// gesture, and giving half of it a second shape is how two
+    /// mechanisms for one thing begin. `phase` is [`BUTTON_PRESS`] or
+    /// [`BUTTON_RELEASE`], and the coordinates, rect and window size are
+    /// `drag`'s, in the same order, for the same reason.
+    ///
+    /// It is NOT a second capture path (F1 §5.1: there is one). The
+    /// capture is `drag`'s alone: on a press the host delivers
+    /// [`BUTTON_PRESS`] and then asks `drag(`[`DRAG_BEGIN`]`)`, whose
+    /// answer alone decides who owns the gesture; on the button coming
+    /// up it delivers [`BUTTON_RELEASE`] before `click`, so a widget
+    /// tracking its own down/up pair has closed it before the click that
+    /// concludes it arrives. Answering [`ACTION_CAPTURE`] here means
+    /// nothing and does nothing — exactly what it already means from
+    /// `click` and `wheel`.
+    ///
+    /// What it carries that a capture cannot is the half of a press that
+    /// is not a gesture: the PRESS rung of the state ladder (a control
+    /// that darkens while it is held), and a release that arrives even
+    /// when the press was never accepted as a drag.
+    pub button: extern "C" fn(
+        instance: *mut c_void,
+        phase: u32,
+        x: f32,
+        y: f32,
+        r: RectC,
+        win_w: f32,
+        win_h: f32,
+        out: *mut ActionC,
+    ),
 }
 
 /// The prefix of [`PluginApi`] every version-6 plugin must fill —
@@ -582,6 +922,14 @@ pub const PLUGIN_API_HAS_DRAG: usize =
 /// The prefix that includes `pointer`.
 pub const PLUGIN_API_HAS_POINTER: usize =
     std::mem::offset_of!(PluginApi, pointer) + std::mem::size_of::<usize>();
+
+/// The prefix that includes `key`.
+pub const PLUGIN_API_HAS_KEY: usize =
+    std::mem::offset_of!(PluginApi, key) + std::mem::size_of::<usize>();
+
+/// The prefix that includes `button`.
+pub const PLUGIN_API_HAS_BUTTON: usize =
+    std::mem::offset_of!(PluginApi, button) + std::mem::size_of::<usize>();
 
 /// The attach point every plugin must export:
 ///
@@ -860,7 +1208,12 @@ pub struct StateStyleC {
 // needs no bump, because `api_size` says how much of a table its writer
 // actually filled. `PluginApi` grows past `chrome` that way, `HostApi`
 // past `theme_epoch` (`theme_enum_word` and `mask_quad` are the first,
-// gated by `HostApi::has_*` on the plugin side).
+// gated by `HostApi::has_*` on the plugin side). Four holes closed at
+// once — the focused key with its modifiers, the press/release pair, the
+// host-drawn tooltip and the widget-to-widget channel — appended in ONE
+// growth for one reason: every separate growth is a separate migration
+// of eight plugins, and the migration is the expensive part, not the
+// four function pointers.
 pub const ABI_VERSION: u32 = 6;
 
 /// A widget's container declaration, crossing the boundary (u2 §4.3).
@@ -1010,6 +1363,32 @@ pub(crate) fn shared<T>(
     }
 }
 
+/// The same routing decision handed to ONE closure — `None` meaning "you
+/// are the host, do it yourself".
+///
+/// [`shared`] takes the two paths as two closures, which is the nicer
+/// shape until a call needs a `&mut` buffer: both closures would have to
+/// capture it, and two live mutable borrows of one slice is not a thing
+/// that compiles. The channel's `read_into` is exactly that call, so the
+/// router has a second form rather than the caller having a second copy
+/// of the routing rule.
+pub(crate) fn shared_with<T>(
+    what: &str,
+    f: impl FnOnce(Option<&HostApi>) -> T,
+    dropped: T,
+) -> T {
+    if is_host() {
+        return f(None);
+    }
+    match api() {
+        Some(api) => f(Some(api)),
+        None => {
+            warn_detached(what);
+            dropped
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1031,6 +1410,67 @@ mod tests {
         assert!(!unsafe { attach(&wrong) }, "a truncated host table must be refused");
         assert!(api().is_none());
         assert!(is_host());
+    }
+
+    /// The key-name contract, from both ends. It exists because the
+    /// host and the plugins used to guess it independently; a test that
+    /// only checked one direction would let them start guessing again.
+    #[test]
+    fn every_named_key_round_trips_through_its_word() {
+        use crate::focus::Key;
+        let named = [
+            (Key::Enter, keys::ENTER),
+            (Key::Escape, keys::ESC),
+            (Key::Backspace, keys::BACK),
+            (Key::Space, keys::SPACE),
+            (Key::Tab, keys::TAB),
+            (Key::Up, keys::UP),
+            (Key::Down, keys::DOWN),
+            (Key::Left, keys::LEFT),
+            (Key::Right, keys::RIGHT),
+            (Key::Home, keys::HOME),
+            (Key::End, keys::END),
+            (Key::Delete, keys::DELETE),
+            (Key::PageUp, keys::PAGE_UP),
+            (Key::PageDown, keys::PAGE_DOWN),
+        ];
+        assert_eq!(named.len(), keys::ALL.len(), "the table and the list are one table");
+        for (key, word) in named {
+            assert_eq!(keys::name_of(key), Some(word));
+            assert_eq!(keys::from_name(word), Some(key));
+            // A reader that lower-cases, or that never thought about
+            // case at all, must still agree with the host.
+            assert_eq!(keys::from_name(&word.to_ascii_lowercase()), Some(key));
+            assert!(keys::ALL.contains(&word));
+        }
+        // A character rides in `ch`, and the keys the contract does not
+        // name are not delivered by name at all — an application's
+        // shortcuts stay the application's.
+        assert_eq!(keys::name_of(Key::Char('a')), None);
+        assert_eq!(keys::name_of(Key::Insert), None);
+        assert_eq!(keys::name_of(Key::Menu), None);
+        assert_eq!(keys::name_of(Key::F(6)), None);
+        // A word from a newer host reads as "no key I know", never as
+        // the wrong one.
+        assert_eq!(keys::from_name("PAGE_SIDEWAYS"), None);
+        assert_eq!(keys::from_name(""), None);
+    }
+
+    /// The modifier mask is `focus::Mods` carried as a number, and it
+    /// survives the round trip. The bits themselves are asserted at
+    /// COMPILE time beside their constants; this is the other half —
+    /// that a mask built from them means the same set again.
+    #[test]
+    fn the_modifier_mask_is_the_toolkits_own_set() {
+        use crate::focus::Mods;
+        let m = Mods::CTRL | Mods::SHIFT;
+        assert_eq!(m.bits() as u32, MODS_CTRL | MODS_SHIFT);
+        assert_eq!(Mods::from_bits(m.bits()), m);
+        assert_eq!(Mods::from_bits(MODS_NONE as u8), Mods::NONE);
+        // A bit from a newer build is dropped rather than kept: an
+        // unknown modifier must not stop a chord this build understands
+        // from matching.
+        assert_eq!(Mods::from_bits(0b1111_0001), Mods::CTRL);
     }
 
     #[test]

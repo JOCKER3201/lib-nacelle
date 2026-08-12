@@ -15,6 +15,9 @@
 //! * [`clipboard`] — the clipboard seam: the trait the application's
 //!   backend implements, and the process-local fallback that keeps
 //!   copy/paste alive without one.
+//! * [`channel`] — what one widget tells another: named values the host
+//!   holds, so two compiled widgets in two `.so` files can agree on a
+//!   fact without sharing memory.
 //! * [`object`] — reusable on-screen objects: windows and dialogs,
 //!   buttons, sliders, drop-downs, checkboxes, and the frame put
 //!   around windows the application does not own.
@@ -41,6 +44,7 @@
 
 pub mod assets;
 pub mod base;
+pub mod channel;
 pub mod clipboard;
 pub mod deco;
 pub mod draw;
