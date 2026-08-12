@@ -4807,6 +4807,7 @@ hint.role = caption                 # type role of a setting's hint line · - ·
 hint_inset = 1.6x @type.caption.size    # inset of that hint under its control · - · rat of @type.caption.size · -
 note.role = caption                 # type role of a section note · - · role · type.caption
 row_label_role = body               # type role of every settings row label: COLUMNS, PADDING, VOLUME … · - · role · settings.rs:925 and four siblings, all font_px(1.0)
+section_role = label.section        # type role of a section header inside a page: the FONT view's TERMINAL and INTERFACE · - · role · type.label.section, the role settings.rs spelled out for these two headers before a binding existed
 section_gap = @space.6              # the break between the BACK row and the first setting · - · len (u) · @space.6 = 4u = 21.6 px; settings.rs:926's undeclared gap*2.0
 
 # =========================================================================
