@@ -263,6 +263,16 @@ pub fn fit_end_tab(
     track: f32,
     tabular: bool,
 ) -> String {
+    // No room at all is not a width to abbreviate to: the ellipsis this
+    // used to answer with is a glyph as wide as any other, so it went
+    // over whatever squeezed the room shut. `draw::fit_tail` and the
+    // panel band's `fit_lead` have both ruled it that way since they
+    // were written, and `winframe::fit_title` had to re-state it locally
+    // because THIS function did not — a trimming rule stated three times
+    // and contradicted once. Stated here, it is the toolkit's answer.
+    if max_w <= 0.0 {
+        return String::new();
+    }
     if sf.measure_tab(face, px, text, track, tabular) <= max_w {
         return text.to_string();
     }
@@ -320,6 +330,27 @@ pub fn wrap(
     max_w: f32,
     track: f32,
 ) -> Vec<String> {
+    wrap_tab(sf, face, px, text, max_w, track, false)
+}
+
+/// [`wrap`] measured under the role's figure box (§5.16 `tabular`), the
+/// same rung [`fit_end_tab`] is to [`fit_end`].
+///
+/// A break is a MEASUREMENT, and a run that is drawn with a box and
+/// broken without one is broken in the wrong places: every figure of the
+/// candidate line is drawn wider than it was ruled, so the box overflows
+/// on the right exactly as far as the digits it holds. That is the
+/// mismatch `fit_end_tab` was written for, one line-breaking further on.
+#[allow(clippy::too_many_arguments)]
+pub fn wrap_tab(
+    sf: &mut impl Surface,
+    face: u8,
+    px: f32,
+    text: &str,
+    max_w: f32,
+    track: f32,
+    tabular: bool,
+) -> Vec<String> {
     let mut out = Vec::new();
     for para in text.split('\n') {
         if max_w <= 0.0 {
@@ -333,7 +364,7 @@ pub fn wrap(
             } else {
                 format!("{line} {word}")
             };
-            if sf.measure(face, px, &cand, track) <= max_w {
+            if sf.measure_tab(face, px, &cand, track, tabular) <= max_w {
                 line = cand;
                 continue;
             }
@@ -342,7 +373,7 @@ pub fn wrap(
             }
             // The word alone on its line: kept whole when it fits,
             // broken by characters when nothing else can be done.
-            if sf.measure(face, px, word, track) <= max_w {
+            if sf.measure_tab(face, px, word, track, tabular) <= max_w {
                 line = word.to_string();
                 continue;
             }
@@ -350,7 +381,7 @@ pub fn wrap(
             for ch in word.chars() {
                 let mut cand = piece.clone();
                 cand.push(ch);
-                if !piece.is_empty() && sf.measure(face, px, &cand, track) > max_w {
+                if !piece.is_empty() && sf.measure_tab(face, px, &cand, track, tabular) > max_w {
                     out.push(std::mem::take(&mut piece));
                     piece.push(ch);
                 } else {
@@ -691,6 +722,20 @@ pub(crate) mod tests {
         fn measure(&mut self, _face: u8, px: f32, s: &str, _track: f32) -> f32 {
             s.chars().count() as f32 * px * 0.5
         }
+        /// A box that is WIDER than the proportional run it replaces,
+        /// which is the one property a caller can rely on: a real box is
+        /// the widest figure of the face, so a boxed run never measures
+        /// narrower. Doubling makes the difference impossible to miss —
+        /// the default implementation of this method ignores `tabular`
+        /// entirely, and a break that went through it would be silent.
+        fn measure_tab(&mut self, face: u8, px: f32, s: &str, track: f32, tabular: bool) -> f32 {
+            let w = self.measure(face, px, s, track);
+            if tabular {
+                w * 2.0
+            } else {
+                w
+            }
+        }
         fn clip(&mut self, _r: Rect) -> bool {
             false
         }
@@ -762,6 +807,47 @@ pub(crate) mod tests {
         assert_eq!(wrap(&mut Ruler, FONT_UI, 10.0, "one\ntwo", 500.0, 0.0), ["one", "two"]);
         // Zero width would otherwise break every character forever.
         assert_eq!(wrap(&mut Ruler, FONT_UI, 10.0, "one two", 0.0, 0.0), ["one two"]);
+    }
+
+    /// A break is a measurement, so the role's figure box has to reach
+    /// it. The pair is the proof: the same string, the same width, and
+    /// the only difference between the two calls is the box.
+    #[test]
+    fn a_break_is_measured_under_the_box_the_run_will_be_drawn_with() {
+        // 60 px holds "one two" proportionally; under a box every run is
+        // twice as wide, so each word takes a line of its own.
+        assert_eq!(
+            wrap_tab(&mut Ruler, FONT_UI, 10.0, "one two three", 60.0, 0.0, false),
+            ["one two", "three"]
+        );
+        assert_eq!(
+            wrap_tab(&mut Ruler, FONT_UI, 10.0, "one two three", 60.0, 0.0, true),
+            ["one", "two", "three"]
+        );
+        // The character break inside one long word answers the box too:
+        // five characters fit at 25 px, two under the box.
+        assert_eq!(
+            wrap_tab(&mut Ruler, FONT_UI, 10.0, "abcdefghij", 25.0, 0.0, true),
+            ["ab", "cd", "ef", "gh", "ij"]
+        );
+    }
+
+    /// No room is not a width to abbreviate to. Three trimmers in this
+    /// library answered that way and this one answered "…", so the
+    /// objects that wanted the toolkit's answer had to write it out
+    /// themselves; the rule is stated once now.
+    #[test]
+    fn a_trim_with_no_room_at_all_draws_nothing_rather_than_an_ellipsis() {
+        for room in [0.0, -1.0, -400.0] {
+            assert_eq!(
+                fit_end(&mut Ruler, FONT_UI, 10.0, "SESSION", room, 0.0),
+                "",
+                "room {room} produced a glyph to draw"
+            );
+        }
+        // A width that holds something still holds the ellipsis: the
+        // rule above is about NO room, not about tight room.
+        assert_eq!(fit_end(&mut Ruler, FONT_UI, 10.0, "SESSION", 20.0, 0.0), "SES\u{2026}");
     }
 
     #[test]

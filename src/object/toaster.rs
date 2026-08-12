@@ -18,7 +18,6 @@
 //! place it will land. A toast appears and disappears, which is honest
 //! rather than half-animated.
 
-use crate::font::FONT_UI;
 use crate::theme::{self, Color, TokenId};
 use crate::ui::{self, Sev};
 use crate::{Ctx, Rect};
@@ -210,6 +209,23 @@ impl Toaster {
         let title_px = title_role.px(ctx, 1.0);
         let track = body_role.tracking_px(px);
         let title_track = title_role.tracking_px(title_px);
+        // Each role's own FACE and its own figure box, read once for the
+        // whole queue rather than per toast: a box costs a theme read and
+        // — on the first call for a (face, px) — ten glyph lookups.
+        //
+        // The title and the message are two roles, so they are two faces:
+        // `toast.title.role` may be a medium weight over a body in the
+        // interface face, which is precisely what the two bindings are
+        // for, and what naming `FONT_UI` at both call sites made
+        // impossible. The box goes with the face because the width below
+        // is measured with it and the glyphs at the bottom of the loop
+        // are stepped by it — measure in one and draw in the other and
+        // the message stops being centred in the box that was sized for
+        // it, but only under a theme that turns the box on.
+        let title_face = title_role.font();
+        let body_face = body_role.font();
+        let title_fig = title_role.figures(ctx.fonts, title_face, title_px);
+        let body_fig = body_role.figures(ctx.fonts, body_face, px);
         let pad_x = t.px(tok(&PAD_X, "toast.pad_x"));
         let bh = t.px(tok(&TH, "toast.h"));
         let top = t.px(tok(&TOP, "toast.top"));
@@ -227,7 +243,7 @@ impl Toaster {
                 let toast = &self.queue[i];
                 (toast.title.clone(), toast.body.clone(), toast.severity)
             };
-            let text_w = ctx.fonts.measure(FONT_UI, px, &body, track);
+            let text_w = ctx.fonts.measure_fig(body_face, px, &body, track, &body_fig);
             let bw = (text_w + 2.0 * pad_x)
                 .max(ctx.w * t.px(tok(&MIN_W, "toast.min_w_frac")))
                 .min(ctx.w * t.px(tok(&MAX_W, "toast.max_w_frac")));
@@ -243,25 +259,27 @@ impl Toaster {
                 Some(s) => ui::sev_text(s),
                 None => title_ink,
             };
-            ctx.dl.text_center(
+            ctx.dl.text_center_fig(
                 ctx.fonts,
-                FONT_UI,
+                title_face,
                 title_px,
                 bx + bw / 2.0,
                 by + title_gap,
                 &title,
                 ink,
                 title_track,
+                &title_fig,
             );
-            ctx.dl.text_center(
+            ctx.dl.text_center_fig(
                 ctx.fonts,
-                FONT_UI,
+                body_face,
                 px,
                 bx + bw / 2.0,
                 by + msg_gap,
                 &body,
                 body_ink,
                 track,
+                &body_fig,
             );
         }
     }
@@ -272,6 +290,13 @@ impl Toaster {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::draw::DrawCmd;
+    // The face probe of this batch, written once in the field's own
+    // file and used by all three of its objects.
+    use crate::object::text_input::tests::{
+        all_in, drawn_runs, face_follows_the_theme, measure_in_child, report, role_word,
+    };
+    use std::path::PathBuf;
 
     const DWELL: f32 = 8000.0;
 
@@ -366,5 +391,119 @@ mod tests {
         ts.push(t("a"));
         assert!(!ts.click(50.0, 5.0));
         assert_eq!(ts.len(), 1);
+    }
+
+    // ---- the type ladder reaches the toast --------------------------
+    //
+    // A toast is TWO roles — `toast.title.role` for the word and
+    // `toast.body.role` for the message — and until now both were drawn
+    // with `FONT_UI` written at the call site, so a master pointing the
+    // title at a medium weight and the message at the interface face got
+    // one family for both. Each is measured on its own below, because
+    // one binding following its role proves nothing about the other.
+    //
+    // The harness is the field's: one definition of what counts as
+    // proof for the whole batch, and a process of its own per run,
+    // because the resolved theme is process-wide.
+
+    /// A body that is nothing but a number and its punctuation: the
+    /// string a figure box moves and a proportional run does not.
+    const BODY: &str = "192.168.000.101 unreachable";
+
+    /// A theme that inherits the master and turns ONE role's figure box
+    /// on — `mono_theme`'s twin for §5.17's other half. Written here
+    /// rather than beside it because it states a different claim: the
+    /// face harness asks which FAMILY a run is set in, this asks
+    /// whether the run's figures step by the box the role asked for.
+    fn boxed_theme(tag: &str, role: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("nacelle-box-{tag}-{}.theme", std::process::id()));
+        std::fs::write(
+            &path,
+            format!(
+                "[meta]\nschema = 1\nname = \"box {tag}\"\nbase = \"default\"\n\n\
+                 [type]\n{role}.tabular = true\n"
+            ),
+        )
+        .expect("the fixture theme must be writable");
+        path
+    }
+
+    /// The message is set in the face `toast.body.role` names, and
+    /// follows a theme that moves it.
+    #[test]
+    fn the_message_is_set_in_the_face_its_role_names() {
+        face_follows_the_theme("toast-body", "object::toaster::tests::child_body_face");
+    }
+
+    /// The title word is set in the face its OWN binding names — the
+    /// second half of the split, and the half that shows the two are
+    /// read apart.
+    #[test]
+    fn the_title_is_set_in_the_face_its_own_role_names() {
+        face_follows_the_theme("toast-title", "object::toaster::tests::child_title_face");
+    }
+
+    /// The figure box: `type.<role>.tabular` reaches the run the message
+    /// is drawn as. The master ships the message's role proportional, so
+    /// the advance in the register is zero until a theme says otherwise
+    /// — which is the negative control this claim needs.
+    #[test]
+    fn the_message_steps_by_the_box_its_role_asks_for() {
+        const CHILD: &str = "object::toaster::tests::child_body_face";
+        let master = measure_in_child(CHILD, None);
+        let plain: f32 = master.field("ADVANCE=").parse().expect("ADVANCE= is a number");
+        assert_eq!(
+            plain, 0.0,
+            "the master ships `type.{}.tabular = false` and the run was boxed anyway",
+            master.role
+        );
+        let fixture = boxed_theme("toast", &master.role);
+        let boxed = measure_in_child(CHILD, Some(&fixture));
+        let _ = std::fs::remove_file(&fixture);
+        let a: f32 = boxed.field("ADVANCE=").parse().expect("ADVANCE= is a number");
+        assert!(
+            a > 0.0,
+            "a theme put `type.{}.tabular = true` and the message was still drawn \
+             proportionally:\n{}",
+            master.role,
+            boxed.log
+        );
+    }
+
+    /// The two children of the tests above: one toast, drawn for real,
+    /// with one of its two runs reported. `drawn_runs` keeps the whole
+    /// command, so the FIGURE ADVANCE the run was made under is
+    /// measured beside the slot rather than inferred from it.
+    #[test]
+    #[ignore = "measured in a process of its own by the test above"]
+    fn child_body_face() {
+        child_face(1, "toast.body.role");
+    }
+
+    #[test]
+    #[ignore = "measured in a process of its own by the test above"]
+    fn child_title_face() {
+        child_face(0, "toast.title.role");
+    }
+
+    /// One toast; `run` is 0 for the title word and 1 for the message,
+    /// which is the order they are drawn in.
+    fn child_face(run: usize, binding: &'static str) {
+        let cmds = drawn_runs(|ctx| {
+            let mut ts = Toaster::new();
+            ts.push(Toast::warning(BODY.to_string()));
+            ts.draw(ctx);
+        });
+        assert_eq!(cmds.len(), 2, "a toast is its title word and its message");
+        let (font, advance, text) = match &cmds[run] {
+            DrawCmd::Text { font, tabular, text, .. } => (*font, *tabular, text.clone()),
+            _ => unreachable!("drawn_runs answers text commands"),
+        };
+        let drawn = [(font, text)];
+        let role = role_word(binding);
+        all_in(&drawn, crate::ui::role(&role).font());
+        println!("ADVANCE={advance}");
+        report(&role, font, &drawn);
     }
 }

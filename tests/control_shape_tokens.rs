@@ -228,19 +228,21 @@ fn every_shape_token_the_audit_found_unread_now_moves_the_picture() {
         solid.len()
     );
 
-    // ---- menu.item.role, in the drop-down ----------------------------
-    // The same binding menu.rs reads, on the rows menu.rs would draw.
+    // ---- list.label_role, in the drop-down ---------------------------
+    // The binding a LIST row's label takes, on the rows a drop-down
+    // draws — which are list rows (`list.item`), not menu rows. It read
+    // `menu.item.role` until the rows were dressed as what they are.
     let names = vec!["ALPHA".to_string(), "BETA".to_string()];
     let list = |c: &mut Ctx| {
         dropdown::accordion(c, ROW, 30.0, &names, 1.0, &dropdown::AccordionStyle::default());
     };
     let (rows_body, rows_caption) = pair(
         &mut fonts,
-        "[menu]\nitem.role = body\n",
-        "[menu]\nitem.role = caption\n",
+        "[list]\nlabel_role = body\n",
+        "[list]\nlabel_role = caption\n",
         list,
     );
-    assert_ne!(rows_body, rows_caption, "menu.item.role does not reach a drop-down row");
+    assert_ne!(rows_body, rows_caption, "list.label_role does not reach a drop-down row");
 
     // ---- menu.anchor_width -------------------------------------------
     // A narrow anchor under `min_w` gets the declared floor; under

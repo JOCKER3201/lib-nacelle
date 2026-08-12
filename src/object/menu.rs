@@ -23,7 +23,6 @@
 
 use crate::draw::Corner;
 use crate::focus::{Key, KeyEv, Mods};
-use crate::font::FONT_UI;
 use crate::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
 use crate::{ui, Ctx, Rect};
 use std::sync::OnceLock;
@@ -312,10 +311,22 @@ impl MenuState {
         let px = role.px(ctx, 1.0);
         let track = role.tracking_px(px);
         let leading = role.leading();
+        // The label's FACE and figure box, read once here and carried
+        // through the measuring pass and the row loop alike. The rows
+        // used to name `FONT_UI`, so `menu.item.role` could be repointed
+        // at a monospace role and the menu stayed in the interface face.
+        let face = role.font();
+        let fig = role.figures(ctx.fonts, face, px);
         let hint_role = ui::bound_role(&HINT_ROLE, "menu.hint_role");
         let hpx = hint_role.px(ctx, 1.0);
         let htrack = hint_role.tracking_px(hpx);
         let hleading = hint_role.leading();
+        // The hint is a SECOND role and gets its own answers: the
+        // shortcut column is right-aligned, so it is exactly the column
+        // `tabular` exists for — `Ctrl+1` and `Ctrl+8` have to keep one
+        // left edge — and it may well be set in a face the label is not.
+        let hface = hint_role.font();
+        let hfig = hint_role.figures(ctx.fonts, hface, hpx);
 
         // ---- measure ----------------------------------------------------
         let mut label_max: f32 = 0.0;
@@ -323,9 +334,16 @@ impl MenuState {
         let mut any_sub = false;
         for e in &self.entries {
             if let MenuEntry::Item(it) = e {
-                label_max = label_max.max(ctx.fonts.measure(FONT_UI, px, &it.label, track));
+                // The menu sizes itself to its widest label, so this is
+                // the measure that decides the box the rows are drawn
+                // in. It has to be taken in the face and under the box
+                // the row loop below draws with, or a wider face runs
+                // its labels off the end of the menu that measured them.
+                label_max =
+                    label_max.max(ctx.fonts.measure_fig(face, px, &it.label, track, &fig));
                 if let Some(hint) = &it.hint {
-                    hint_max = hint_max.max(ctx.fonts.measure(FONT_UI, hpx, hint, htrack));
+                    hint_max =
+                        hint_max.max(ctx.fonts.measure_fig(hface, hpx, hint, htrack, &hfig));
                 }
                 any_sub |= it.submenu.is_some();
             }
@@ -485,15 +503,16 @@ impl MenuState {
                         ctx.dl.rect(r.x, r.y, r.w, r.h, col(style.fill));
                     }
                     if rh >= text_threshold {
-                        ctx.dl.text(
+                        ctx.dl.text_fig(
                             ctx.fonts,
-                            FONT_UI,
+                            face,
                             px,
                             r.x + inset,
                             r.y + (rh - px * leading) / 2.0,
                             &it.label,
                             col(style.text),
                             track,
+                            &fig,
                         );
                         let mut right = r.x + r.w - inset;
                         if any_sub {
@@ -520,15 +539,16 @@ impl MenuState {
                             // Right-aligned in the hint column, muted
                             // by design — secondary to the label.
                             let ink = if it.disabled { col(style.text) } else { hint_ink };
-                            ctx.dl.text_right(
+                            ctx.dl.text_right_fig(
                                 ctx.fonts,
-                                FONT_UI,
+                                hface,
                                 hpx,
                                 right,
                                 r.y + (rh - hpx * hleading) / 2.0,
                                 hint,
                                 ink,
                                 htrack,
+                                &hfig,
                             );
                         }
                     }
@@ -788,6 +808,12 @@ fn unfold_p(opened_t: f64, now: f64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The face harness lives beside the panel container and is used from
+    // here rather than copied: what counts as proof that a run followed
+    // its role is one rule, and three copies of it drift.
+    use crate::object::panel::tests::{
+        all_in, drawn_text, face_follows_the_theme, measure_in_child, report, role_word,
+    };
 
     fn item(label: &str, cmd: u32) -> MenuEntry {
         MenuEntry::Item(MenuItem::new(label, cmd))
@@ -1061,5 +1087,220 @@ mod tests {
     fn a_rule_takes_its_breathing_plus_stroke() {
         assert_eq!(entry_h(&MenuEntry::Rule, 24.0, 8.4, 1.2), 18.0);
         assert_eq!(entry_h(&item("X", 1), 24.0, 8.4, 1.2), 24.0);
+    }
+
+    // ---- face -----------------------------------------------------------
+    //
+    // A menu row is TWO roles — `menu.item.role` for the label and
+    // `menu.hint_role` for the shortcut column — so the claim is made
+    // twice, once per role, over a run in which both are on screen.
+
+    /// The four rows of the face fixtures: labels that cannot be
+    /// mistaken for hints, and hints that are shortcut strings with
+    /// FIGURES in them, since the hint column is right-aligned and
+    /// therefore the column `tabular` exists for.
+    fn hinted() -> MenuState {
+        MenuState::open_at(
+            vec![
+                MenuEntry::Item(
+                    MenuItem::new("COPY", 1).with_hint(Some("Ctrl+1".to_string())),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new("PASTE", 2).with_hint(Some("Ctrl+8".to_string())),
+                ),
+                MenuEntry::Rule,
+                // The widest label and the widest hint on ONE row, and
+                // both long enough that the menu is sized by its content
+                // rather than resting on `menu.min_w`: on this row the
+                // slack between the two columns is the master's gap
+                // exactly, which is what makes the check below tight.
+                MenuEntry::Item(
+                    MenuItem::new("SELECT EVERYTHING IN THIS BUFFER", 3)
+                        .with_hint(Some("Ctrl+Shift+188".to_string())),
+                ),
+            ],
+            40.0,
+            40.0,
+            0.0,
+        )
+    }
+
+    fn is_hint(s: &str) -> bool {
+        s.starts_with("Ctrl+")
+    }
+
+    /// Row labels are set in the face `menu.item.role` names, and follow
+    /// a theme that moves it.
+    #[test]
+    fn a_row_label_is_set_in_the_face_its_role_names() {
+        face_follows_the_theme("menu-item", "object::menu::tests::child_label_face");
+    }
+
+    /// The shortcut column is set in the face `menu.hint_role` names —
+    /// its OWN role, not the label's — and follows a theme that moves it.
+    #[test]
+    fn a_shortcut_hint_is_set_in_the_face_its_own_role_names() {
+        face_follows_the_theme("menu-hint", "object::menu::tests::child_hint_face");
+    }
+
+    #[test]
+    #[ignore = "measured in a process of its own by the test above"]
+    fn child_label_face() {
+        static PROBE: OnceLock<TokenId> = OnceLock::new();
+        let want = ui::bound_role(&PROBE, "menu.item.role").font();
+        let drawn: Vec<(u8, String)> = drawn_text(|ctx| {
+            hinted().draw(ctx);
+        })
+        .into_iter()
+        .filter(|(_, s)| !is_hint(s))
+        .collect();
+        assert_eq!(drawn.len(), 3, "three labels are on screen: {drawn:?}");
+        all_in(&drawn, want);
+        report(&role_word("menu.item.role"), want, &drawn);
+    }
+
+    #[test]
+    #[ignore = "measured in a process of its own by the test above"]
+    fn child_hint_face() {
+        static PROBE: OnceLock<TokenId> = OnceLock::new();
+        let want = ui::bound_role(&PROBE, "menu.hint_role").font();
+        let drawn: Vec<(u8, String)> = drawn_text(|ctx| {
+            hinted().draw(ctx);
+        })
+        .into_iter()
+        .filter(|(_, s)| is_hint(s))
+        .collect();
+        assert_eq!(drawn.len(), 3, "three hints are on screen: {drawn:?}");
+        all_in(&drawn, want);
+        report(&role_word("menu.hint_role"), want, &drawn);
+    }
+
+    // ---- figures --------------------------------------------------------
+
+    /// `type.<hint role>.tabular` reaches the shortcut column, and the
+    /// column the menu SIZED is the column it DREW.
+    ///
+    /// The second half is the half a slot number cannot witness. The
+    /// menu's width comes from a measuring pass over the same strings;
+    /// if that pass measured proportionally while the row loop drew
+    /// under a figure box — the state this batch found the file in one
+    /// rung down, with the face — every hint would be drawn wider than
+    /// the column it was sized for and would reach back over its own
+    /// label. The child computes both edges from the register and the
+    /// fonts, so the overlap is a number rather than a look.
+    #[test]
+    fn the_shortcut_column_is_drawn_at_the_width_it_was_sized_at() {
+        let child = "object::menu::tests::child_hint_columns";
+        let master = measure_in_child(child, None);
+        assert_eq!(
+            master.field("FIG="),
+            "0",
+            "the master leaves the hint column proportional, so a box here \
+             comes from somewhere the theme cannot see:\n{}",
+            master.log
+        );
+        let role = role_word("menu.hint_role");
+        let path = std::env::temp_dir()
+            .join(format!("nacelle-face-menu-fig-{}.theme", std::process::id()));
+        std::fs::write(
+            &path,
+            format!(
+                "[meta]\nschema = 1\nname = \"figure fixture\"\nbase = \"default\"\n\n\
+                 [type]\n{role}.tabular = true\n"
+            ),
+        )
+        .expect("the fixture theme must be writable");
+        let boxed = measure_in_child(child, Some(&path));
+        let _ = std::fs::remove_file(&path);
+        let adv: f32 = boxed.field("FIG=").parse().expect("FIG= must be a length");
+        assert!(
+            adv > 0.0,
+            "a theme put `type.{role}.tabular = true` and the hints reached the \
+             draw list with no figure box at all:\n{}",
+            boxed.log
+        );
+    }
+
+    /// The child of the test above: draws the hinted menu, then checks
+    /// every hint's left edge against its own row's label, measured with
+    /// the very face, px, tracking and box the register says each run
+    /// was drawn with. Reports the figure advance the hints carried.
+    #[test]
+    #[ignore = "measured in a process of its own by the test above"]
+    fn child_hint_columns() {
+        use crate::draw::{DrawCmd, TextAnchor};
+        use crate::font::FontSystem;
+        static LABEL: OnceLock<TokenId> = OnceLock::new();
+        static HINT: OnceLock<TokenId> = OnceLock::new();
+        let runs = crate::object::panel::tests::drawn_runs(|ctx| {
+            hinted().draw(ctx);
+        });
+        let label_role = ui::bound_role(&LABEL, "menu.item.role");
+        let hint_role = ui::bound_role(&HINT, "menu.hint_role");
+        let mut fonts = FontSystem::new();
+        // Each run measured back in the role it belongs to — the same
+        // face, the same figure box, through the same single resolver
+        // (`ui::figures`) the drawing side used. The px and the tracking
+        // come from the register, so they are what was drawn and not a
+        // second reading of the theme.
+        let mut width = |c: &DrawCmd| match c {
+            DrawCmd::Text { font, px, tracking, text, .. } => {
+                let role = if is_hint(text) { hint_role } else { label_role };
+                let fig = role.figures(&mut fonts, *font, *px);
+                fonts.measure_fig(*font, *px, text, *tracking, &fig)
+            }
+            _ => 0.0,
+        };
+        let is_h = |c: &&DrawCmd| matches!(c, DrawCmd::Text { text, .. } if is_hint(text));
+        let labels: Vec<&DrawCmd> = runs.iter().filter(|c| !is_h(c)).collect();
+        let hints: Vec<&DrawCmd> = runs.iter().filter(is_h).collect();
+        assert_eq!(labels.len(), 3);
+        assert_eq!(hints.len(), 3);
+        // The gap the master keeps between the two columns is the whole
+        // of the box's slack: the menu's width is `inset + widest label +
+        // gap + widest hint + inset`, so on the widest row the distance
+        // between the label's right edge and the hint's left edge is the
+        // gap EXACTLY. Anything less means the width was computed from a
+        // measure the draw did not use, and the shortfall is the
+        // difference between the two.
+        let t = theme::resolved();
+        let px_of = |k: &str| t.px(theme::id(k).expect("the master declares this key"));
+        let gap = px_of("menu.hint_gap");
+        let min_w = px_of("menu.min_w");
+        let mut adv = 0.0f32;
+        let mut tightest = f32::INFINITY;
+        for (l, h) in labels.iter().zip(&hints) {
+            let (DrawCmd::Text { at: la, .. }, DrawCmd::Text { at: ha, anchor, tabular, .. }) =
+                (l, h)
+            else {
+                unreachable!()
+            };
+            assert_eq!(*anchor, TextAnchor::Right, "the hint column is right-aligned");
+            adv = adv.max(*tabular);
+            let label_right = la[0] + width(l);
+            let hint_left = ha[0] - width(h);
+            tightest = tightest.min(hint_left - label_right);
+        }
+        // The fixture's own precondition: a menu resting on `menu.min_w`
+        // would have slack that no measuring mistake could eat, and the
+        // check above would pass without meaning anything.
+        let widest = labels.iter().map(|c| width(c)).fold(0.0f32, f32::max)
+            + hints.iter().map(|c| width(c)).fold(0.0f32, f32::max)
+            + gap
+            + 2.0 * px_of("menu.item_inset");
+        assert!(
+            widest > min_w,
+            "these rows fit inside `menu.min_w` ({min_w} px), so the menu was sized \
+             by its floor and not by its content: the check below proves nothing"
+        );
+        assert!(
+            tightest >= gap - 0.01,
+            "the columns are {tightest} px apart where the master asks for {gap}: the \
+             menu was sized by one measure and drawn by another, and the shortfall \
+             is the difference between them"
+        );
+        println!("ROLE={}", crate::object::panel::tests::role_word("menu.hint_role"));
+        println!("FACE={}", hint_role.font());
+        println!("FIG={adv}");
     }
 }

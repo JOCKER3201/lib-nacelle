@@ -3486,12 +3486,12 @@ button          = @accent.primary   # the ladder's base for the parallelogram bu
 icon_button     = @accent.primary   # window controls, the close and add plates · 1,7 · col · @accent.primary
 chip            = @accent.primary   # the settings colour-depth chips · - · col · @accent.primary
 tab             = @accent.primary   # the shell's session tabs · - · col · @accent.primary
-menu.item       = @accent.primary   # a window-menu or drop-down row · - · col · @accent.primary
+menu.item       = @accent.primary   # a window-menu or context-menu row · - · col · @accent.primary; a DROP-DOWN's row is not one of these — it is a list row and wears list.item below
 field           = @accent.primary   # the search box and the SAVE AS name field · 7 · col · @accent.primary
 checkbox        = @accent.primary   # the SNAP TO GRID box · - · col · @accent.primary
 slider.track    = @accent.primary   # a slider's groove ring · - · col · @accent.primary
 slider.knob     = @accent.primary   # a slider's handle · - · col · @accent.primary
-list.item       = @accent.primary   # a task, notification or process row · 1,7 · col · @accent.primary
+list.item       = @accent.primary   # a task, notification or process row, and the row of an open drop-down · 1,7 · col · @accent.primary
 tile            = @accent.primary   # a launcher tile, a file tile, an ADD WIDGET entry · 1,8 · col · @accent.primary
 launcher.icon   = @accent.primary   # a launcher glyph · 1,8 · col · @accent.primary
 key             = @accent.primary   # an on-screen keyboard cap · 3,5 · col · @accent.primary
@@ -4495,6 +4495,7 @@ label_role = body                   # type role of a row's label · images 1,7 �
 status_role = caption               # type role of the trailing status word · images 1,7 · role · type.caption, a step under the label so the status reads as an aside
 corner = @corner.sm                 # a row's corner radius, for the hover/selection plate behind it · images 1,7 · len (u) · @corner.sm = 0.8u = 4.3 px, the value the plugins borrowed from filetile.corner
 corner_style = @button.corner_style # which shape that plate's corners take · images 1,7 · enum: square | round | chamfer · follows the button: the plate is the row's whole hit target, and a hit target answers in the control language
+unfold_text_threshold = 0.7         # the share of a row's full height below which a row still unfolding draws no label · images 1,7 · frac · 0.7, the ratio [menu].item_text_threshold states against its own row height (0.7x @menu.row_h) — the drop-down list reads it here now that its rows are list rows, and as a FRACTION because an accordion's row height is the one its anchor hands it, never @list.row_h
 wheel_px = 8u                       # scroll distance per wheel notch in a row list · images 1,7 · len (u) · 43.2 px, the value the plugins borrowed from filetile.wheel_px
 scroll_gutter = 0u                  # width kept clear at the scrolling edge of a row so an overlay bar has its own lane · images 1,7 · len (u) · 0u = today's drawing, where scrollbar.mode = overlay lets the bar sit over the row's trailing status; a theme that wants the bar beside the text sets this to scrollbar.w plus twice scrollbar.margin
 
@@ -5335,7 +5336,7 @@ image.render.tint_strength = 1.0    # a wireframe IS a drawing, so it is fully t
 # checkbox              •    •     •     •    •     –    •      ring
 # slider.track          •    •     –     –    –     •    •      ring
 # slider.knob           •    •     •     –    –     •    •      –
-# list.item             •    •     •     •    •     •    •      –
+# list.item             •    •     •     •    •     •    •      ring*
 # tile                  •    •     •     •    •     •    •      –
 # launcher.icon         •    •     •     •    •     •    –      –
 # key                   •    •     •     •    •     –    •      –
@@ -5386,14 +5387,25 @@ image.render.tint_strength = 1.0    # a wireframe IS a drawing, so it is fully t
 # SORTED column. A table that was never told it is interactive never asks
 # for those rungs, which is why the master's own tables look untouched.
 #
-# menu.item's `selected` is the row ALREADY IN FORCE in an open
-# drop-down — the theme now applied, the layout now loaded. The rung was
-# in this table from the start and nothing stood on it, and once the
+# list.item's `selected` is the row ALREADY IN FORCE in an open
+# drop-down — the theme now applied, the layout now loaded. Once the
 # anchor was ruled to wear the list's own name rather than the choice,
-# that silence left the standing choice unstated everywhere in the
-# window. Three channels carry it: the wash, the edge, and edge_width,
-# which is the one that survives a palette whose washes sit close
-# together.
+# an unmarked list left the standing choice unstated everywhere in the
+# window. What carries it is `fill`: the row's PLATE, cut to
+# `list.corner_style`. A drop-down row draws no ring at all, so `edge`
+# and `edge_width` reach nothing on it — that ring was what made an open
+# list read as a column of loose boxes, each with its own hairline and
+# two hairlines in every seam.
+#
+# `menu.item`'s own `selected` is the menu's checked row (menu.rs), and
+# that is now the only thing it is: a drop-down is not a menu.
+#
+# * list.item's focus cell reads `ring` where the class first went in
+#   with `–`. A list row in a panel is not in the focus chain and takes
+#   no ring; a drop-down's rows ARE registered in it (`AccordionStyle::
+#   focus`), and a chain member the ring skips is a keyboard user with
+#   no cursor. Focus is orthogonal to the ladder either way (5.21) — no
+#   rung moves for it.
 #
 # Two gaps the inventory exposed, which this table closes: slider.rs has no
 # hover, no drag and no disabled — a dragging slider looks identical to an

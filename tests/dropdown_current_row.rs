@@ -5,8 +5,14 @@
 //! and until `AccordionStyle::current` there was no rung on it that
 //! could. This binary proves the mark exists, that it travels with the
 //! index it is given, and that every pixel of it comes off the
-//! `menu.item` class's own ladder rather than a colour written into the
+//! `list.item` class's own ladder rather than a colour written into the
 //! object.
+//!
+//! The mark is a PLATE laid under the row, not a ring drawn around it:
+//! a ring is a box, and a column of boxes is what an open list must not
+//! look like. Which shape the plate is cut to, and that a resting row
+//! wears none at all, is [`dropdown_list_dress`]'s subject; this one is
+//! about WHICH row wears it.
 //!
 //! A binary of its own because the resolved theme is process-wide (§7.1
 //! hands every draw path the same `&'static ResolvedTheme`): a test that
@@ -25,14 +31,14 @@ const ROW_H: f32 = 30.0;
 /// move it and clear of the screen edges.
 const ANCHOR: Rect = Rect { x: 200.0, y: 300.0, w: 400.0, h: 36.0 };
 
-/// How one row was dressed: the wash over the opaque menu bed, and the
-/// ring's colour and width. Three numbers is the whole of what a rung
-/// can move on a row that draws no shape of its own.
+/// How one row was dressed: the plate laid over the opaque bed — `None`
+/// for a row the ladder marks in no way — and the ink its label is set
+/// in. Two channels is the whole of what a rung can move on a row that
+/// draws no shape of its own.
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct Dress {
-    fill: [f32; 4],
-    edge: [f32; 4],
-    stroke: f32,
+    plate: Option<[f32; 4]>,
+    text: [f32; 4],
 }
 
 fn rgba(c: nacelle::theme::Color) -> [f32; 4] {
@@ -42,6 +48,9 @@ fn rgba(c: nacelle::theme::Color) -> [f32; 4] {
 /// The list drawn once, read back row by row. The pointer is off-screen,
 /// so nothing here is hovering and the rungs under test are the resting
 /// ones.
+///
+/// A row is bed, then at most one plate, then its label — in that
+/// order — so a new bed opens a new row and the walk needs no index.
 fn dressed(fonts: &mut FontSystem, current: Option<usize>) -> Vec<Dress> {
     let names: Vec<String> = ["ALPHA", "BETA", "GAMMA"].iter().map(|s| s.to_string()).collect();
     let mut dl = DrawList::recording();
@@ -68,17 +77,14 @@ fn dressed(fonts: &mut FontSystem, current: Option<usize>) -> Vec<Dress> {
             &AccordionStyle { current, ..AccordionStyle::default() },
         );
     }
-    // A row is bed, wash, ring — in that order, once each — so the
-    // commands come back in threes and the walk needs no row index.
-    let mut out = Vec::new();
-    let mut fill = None;
+    let mut out: Vec<Dress> = Vec::new();
+    let mut plate: Option<[f32; 4]> = None;
     for c in dl.cmds() {
         match c {
-            DrawCmd::Rect { color, .. } => fill = Some(rgba(*color)),
-            DrawCmd::RectOutline { stroke, color, .. } => {
-                let f = fill.take().expect("a ring before any wash: the row order changed");
-                out.push(Dress { fill: f, edge: rgba(*color), stroke: *stroke });
-            }
+            // A bed: the row before this one is finished.
+            DrawCmd::Rect { .. } => plate = None,
+            DrawCmd::RingFill { color, .. } => plate = Some(rgba(*color)),
+            DrawCmd::Text { color, .. } => out.push(Dress { plate, text: rgba(*color) }),
             _ => {}
         }
     }
@@ -92,11 +98,12 @@ fn the_row_in_force_wears_the_ladders_selected_rung_and_its_neighbours_do_not() 
     let mut fonts = FontSystem::new();
 
     // Nothing in force: a set with no standing member says so by marking
-    // nobody. Three rows, one dress.
+    // nobody. Three rows, one dress, and that dress is bare.
     let none = dressed(&mut fonts, None);
-    assert_eq!(none.len(), 3, "one bed / wash / ring per row, three rows");
+    assert_eq!(none.len(), 3, "one bed / label per row, three rows");
     assert_eq!(none[0], none[1]);
     assert_eq!(none[1], none[2]);
+    assert_eq!(none[0].plate, None, "a row nothing is true of still wears a plate");
 
     // The middle one in force: it and only it changes.
     let mid = dressed(&mut fonts, Some(1));
@@ -116,27 +123,23 @@ fn the_row_in_force_wears_the_ladders_selected_rung_and_its_neighbours_do_not() 
     assert_eq!(last[1], none[1]);
 
     // Every channel of it off the class's own ladder: the object states
-    // no colour and no width of its own, so a theme moving the rung
-    // moves the mark.
+    // no colour of its own, so a theme moving the rung moves the mark.
     let t = theme::resolved();
-    let class = theme::class_id("menu.item").expect("the master declares the menu.item class");
+    let class = theme::class_id("list.item").expect("the master declares the list.item class");
     let rung = t.class_state(class, State::Selected);
-    assert_eq!(mid[1].fill, rgba(rung.fill), "the wash is menu.item's selected fill");
-    assert_eq!(mid[1].edge, rgba(rung.edge), "the ring is menu.item's selected edge");
     assert_eq!(
-        mid[1].stroke,
-        rung.edge_width,
-        "the ring's WIDTH off the same rung as its colour — the channel the \
-         master thickens for a selection, and the one that keeps the mark \
-         legible in a theme whose washes sit close together"
+        mid[1].plate,
+        Some(rgba(rung.fill)),
+        "the plate is not list.item's selected fill"
     );
+    assert_eq!(mid[1].text, rgba(rung.text), "the label is not list.item's selected ink");
     // The resting rows answer the same way, one rung down: proof the
     // whole row and not just the marked one reads from the ladder.
     let idle = t.class_state(class, State::Idle);
-    assert_eq!(none[0].edge, rgba(idle.edge));
-    assert_eq!(none[0].stroke, idle.edge_width);
+    assert_eq!(none[0].text, rgba(idle.text));
     // And the master really does make the two rungs different — a
     // ladder whose selected rung equalled its idle one would pass every
     // assertion above and show the user nothing.
-    assert_ne!(rgba(rung.edge), rgba(idle.edge));
+    assert_ne!(rgba(rung.fill), rgba(idle.fill));
+    assert_ne!(rgba(rung.text), rgba(idle.text));
 }
