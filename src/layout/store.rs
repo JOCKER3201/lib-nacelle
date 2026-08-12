@@ -4,12 +4,23 @@
 //! ever into its write root. Editing a layout that came from a system
 //! directory copies it into the user's on the first save, rather than
 //! failing on a path only root can write.
+//!
+//! This is also where a version 1 file becomes a version 2 one — once,
+//! with a copy of the original left beside it (see [`LayautStore::
+//! migrate`]). A user's saved layouts are the one thing in the program
+//! he cannot make again from memory, so the rewrite keeps the old bytes
+//! rather than trusting itself.
 
 use super::def::{BoardDef, BoardId, LayoutDef, ResOverride, ScreenKey};
+use super::instance::{InstanceId, InstanceList};
 use super::layaut;
 use crate::assets::AssetRoots;
-use crate::base::{LayoutMode, LayoutSpec, Panel, PanelSpec};
-use std::path::Path;
+use crate::base::{LayoutMode, PanelSpec};
+use std::path::{Path, PathBuf};
+
+/// The suffix the pre-migration copy of a layaut keeps. Not a `.layaut`
+/// itself, so the backup never turns up in the list of layouts to pick.
+pub const BACKUP_SUFFIX: &str = ".layaut.v1";
 
 pub struct LayautStore {
     roots: AssetRoots,
@@ -41,7 +52,15 @@ impl LayautStore {
     /// .layaut names its own in its ref/min column — and the generated
     /// one has no numbers of its own, so it hands on what the installed
     /// addons declared, spelled out rather than left empty.
+    ///
+    /// A version 1 file of the user's own is migrated on the way past
+    /// (see [`Self::migrate`]); one that lives in a system directory is
+    /// read as version 1 every time, which gives the same instances
+    /// every time because their ids come from the file's own order.
     pub fn load(&self, name: &str) -> Option<LayoutDef> {
+        // Best effort: a read-only home, a full disk or a file someone
+        // else owns must not stop the layout from loading.
+        let _ = self.migrate(name);
         if let Some(text) = self
             .roots
             .find("layauts", &format!("{name}.layaut"))
@@ -53,148 +72,226 @@ impl LayautStore {
             return Some(LayoutDef {
                 base: LayoutMode::Flex,
                 sizes: crate::flex::builtin_sizes(),
-                overrides: Vec::new(),
-                boards: Vec::new(),
+                instances: crate::flex::default_instances(),
+                ..LayoutDef::default()
             });
         }
         None
     }
 
+    /// The path of the user's own copy of a layaut, whether or not it
+    /// exists yet.
+    fn user_path(&self, name: &str) -> PathBuf {
+        self.roots.write_dir("layauts").join(format!("{name}.layaut"))
+    }
+
+    /// Rewrites the user's own version 1 file as version 2, ONCE.
+    ///
+    /// Returns whether it did anything. The original is copied to
+    /// `<name>[BACKUP_SUFFIX]` first and never overwritten afterwards,
+    /// so a second migration (of a file the user restored by hand, say)
+    /// cannot destroy the first backup. Files in the system directories
+    /// are left alone: they are not ours to rewrite, and the version 1
+    /// reader gives them the same instances on every start anyway.
+    pub fn migrate(&self, name: &str) -> std::io::Result<bool> {
+        let path = self.user_path(name);
+        let Ok(text) = std::fs::read_to_string(&path) else { return Ok(false) };
+        if !layaut::is_legacy(&text) {
+            return Ok(false);
+        }
+        let backup = self.roots.write_dir("layauts").join(format!("{name}{BACKUP_SUFFIX}"));
+        if !backup.exists() {
+            std::fs::write(&backup, &text)?;
+        }
+        // Read with the version 1 grammar, write with the current one:
+        // one instance per placement, in the order the file named them,
+        // so the arrangement that comes out is the arrangement that
+        // went in.
+        let def = layaut::parse(&text, name);
+        std::fs::write(&path, layaut::write_file(&def))?;
+        Ok(true)
+    }
+
     /// The layaut file's current text: the user's copy, or the
     /// installed one it would be copied from on first save.
     fn read_text(&self, name: &str) -> Option<String> {
-        std::fs::read_to_string(self.roots.write_dir("layauts").join(format!("{name}.layaut")))
-            .ok()
-            .or_else(|| {
-                self.roots
-                    .find("layauts", &format!("{name}.layaut"))
-                    .and_then(|p| std::fs::read_to_string(p).ok())
-            })
+        std::fs::read_to_string(self.user_path(name)).ok().or_else(|| {
+            self.roots
+                .find("layauts", &format!("{name}.layaut"))
+                .and_then(|p| std::fs::read_to_string(p).ok())
+        })
+    }
+
+    /// The named layout as a model, empty when there is no file yet.
+    fn read_def(&self, name: &str) -> LayoutDef {
+        layaut::parse(&self.read_text(name).unwrap_or_default(), name)
+    }
+
+    /// Writes a whole edited layout — the general door, for an editor
+    /// that has the model in hand. Comments in the previous file are
+    /// not carried over; the narrower operations below exist for the
+    /// cases where only one section changes.
+    ///
+    /// `def` is taken by value-and-back because writing a layout down
+    /// is what turns its COMPOSED placements into saved ones
+    /// ([`LayoutDef::materialize`]): the caller's copy has to learn the
+    /// new identities, or it would go on holding ids the file does not
+    /// have.
+    pub fn save_layout(&self, name: &str, def: &mut LayoutDef) -> std::io::Result<()> {
+        let dir = self.roots.ensure("layauts")?;
+        def.materialize();
+        std::fs::write(dir.join(format!("{name}.layaut")), layaut::write_file(def))
     }
 
     /// SAVE AS: a new base for the (possibly new) file; the per-screen
     /// sections and the boards it carries survive the rewrite.
-    pub fn save_full(&self, name: &str, spec: &LayoutSpec, key: ScreenKey) -> std::io::Result<()> {
+    pub fn save_full(
+        &self,
+        name: &str,
+        def: &mut LayoutDef,
+        key: ScreenKey,
+    ) -> std::io::Result<()> {
         let dir = self.roots.ensure("layauts")?;
-        let old = self.read_text(name).unwrap_or_default();
-        let (_, sections, boards) = layaut::split_sections(&old);
-        let mut out = layaut::serialize_base(spec, key);
-        layaut::serialize_sections(&mut out, &sections);
-        layaut::serialize_boards(&mut out, &boards);
+        def.materialize();
+        let old = self.read_def(name);
+        let mut out = layaut::serialize_base(&def.instances, key);
+        layaut::serialize_sections(&mut out, &old.overrides, &def.instances);
+        layaut::serialize_boards(&mut out, &old.boards, &def.instances);
         std::fs::write(dir.join(format!("{name}.layaut")), out)
     }
 
     /// SAVE: on the screen the base was created on, the base itself is
     /// rewritten with the full layout; on ANY OTHER screen only the
-    /// changed panels are written into that screen's `[WxH@D]` section.
-    /// The rest of the file always stays untouched.
+    /// changed instances are written into that screen's `[WxH@D]`
+    /// section. The rest of the file always stays untouched.
+    /// `def` is the caller's own model — the one it got from `load` and
+    /// has been editing — and it is written back materialized, so its
+    /// ids and the file's are the same ids afterwards. A caller that
+    /// holds instance ids of its own should call
+    /// [`LayoutDef::materialize`] first and follow the map it returns.
     pub fn save_overrides(
         &self,
         name: &str,
         key: ScreenKey,
-        changes: &[(Panel, PanelSpec)],
-        full: &LayoutSpec,
+        changes: &[(InstanceId, PanelSpec)],
+        def: &mut LayoutDef,
     ) -> std::io::Result<()> {
         let dir = self.roots.ensure("layauts")?;
         let path = dir.join(format!("{name}.layaut"));
         let text = self.read_text(name).unwrap_or_default();
-        let (base, mut sections, boards) = layaut::split_sections(&text);
+        let (base, _, _) = layaut::split_raw(&text);
 
-        if layaut::base_screen_of(&base) == Some(key) {
+        if def.base_screen == Some(key) {
             // Editing on the base's own screen: rewrite the base in full.
-            let mut out = layaut::serialize_base(full, key);
-            layaut::serialize_sections(&mut out, &sections);
-            layaut::serialize_boards(&mut out, &boards);
+            def.materialize();
+            let mut out = layaut::serialize_base(&def.instances, key);
+            layaut::serialize_sections(&mut out, &def.overrides, &def.instances);
+            layaut::serialize_boards(&mut out, &def.boards, &def.instances);
             return std::fs::write(path, out);
         }
 
-        // Another screen: merge the changes into its section.
-        let sec = match sections.iter_mut().find(|o| (o.w, o.h, o.diag) == key) {
+        // Another screen: merge the changes into its section. Merged
+        // BEFORE materialising, so ids the caller passes in are still
+        // the ids it is holding.
+        let sec = match def.overrides.iter_mut().find(|o| (o.w, o.h, o.diag) == key) {
             Some(s) => s,
             None => {
-                sections.push(ResOverride {
+                def.overrides.push(ResOverride {
                     w: key.0,
                     h: key.1,
                     diag: key.2,
-                    panels: Vec::new(),
+                    rects: Vec::new(),
                 });
-                sections.last_mut().unwrap()
+                def.overrides.last_mut().unwrap()
             }
         };
-        for (panel, spec) in changes {
-            sec.panels.retain(|(p, _)| p != panel);
-            sec.panels.push((*panel, *spec));
+        for (id, spec) in changes {
+            sec.rects.retain(|(i, _)| i != id);
+            sec.rects.push((*id, *spec));
         }
+        def.materialize();
 
-        let mut out = String::new();
-        let base_trim = base.trim_end();
-        if !base_trim.is_empty() {
-            out.push_str(base_trim);
-            out.push('\n');
-        } else {
-            out.push_str(
-                "# nacelle layout: per-screen overrides on top of the default layout.\n",
-            );
-        }
-        layaut::serialize_sections(&mut out, &sections);
-        layaut::serialize_boards(&mut out, &boards);
+        let mut out = preserved_base(
+            &base,
+            &def.instances,
+            "# nacelle layout: per-screen overrides on top of the default layout.\n",
+        );
+        layaut::serialize_sections(&mut out, &def.overrides, &def.instances);
+        layaut::serialize_boards(&mut out, &def.boards, &def.instances);
         std::fs::write(path, out)
     }
 
     /// Rewrites the boards of the named layout, leaving everything else
     /// in its file alone. The shared tail of the three board operations.
-    fn write_boards(&self, name: &str, boards: Vec<(BoardId, BoardDef)>) -> std::io::Result<()> {
+    fn write_boards(
+        &self,
+        name: &str,
+        boards: Vec<(BoardId, BoardDef)>,
+        insts: &mut InstanceList,
+    ) -> std::io::Result<()> {
         let dir = self.roots.ensure("layauts")?;
         let text = self.read_text(name).unwrap_or_default();
-        let (base, sections, _) = layaut::split_sections(&text);
-        let mut out = String::new();
-        let base_trim = base.trim_end();
-        if base_trim.is_empty() {
-            // No base yet: the boards hang off the built-in default
-            // layout, and the file says only what it knows.
-            out.push_str("# nacelle layout: boards on top of the default layout.\n");
-        } else {
-            out.push_str(base_trim);
-            out.push('\n');
-        }
-        layaut::serialize_sections(&mut out, &sections);
-        layaut::serialize_boards(&mut out, &layaut::normalize_boards(boards));
+        let (base, _, _) = layaut::split_raw(&text);
+        let def = layaut::parse(&text, name);
+        let boards = layaut::normalize_boards(boards, insts);
+        // No base yet: the boards hang off the built-in default layout,
+        // and the file says only what it knows.
+        let mut out = preserved_base(
+            &base,
+            insts,
+            "# nacelle layout: boards on top of the default layout.\n",
+        );
+        layaut::serialize_sections(&mut out, &def.overrides, insts);
+        layaut::serialize_boards(&mut out, &boards, insts);
         std::fs::write(dir.join(format!("{name}.layaut")), out)
     }
 
-    /// Current boards of the named layout, straight from its file.
-    fn boards_of(&self, name: &str) -> Vec<(BoardId, BoardDef)> {
-        let text = self.read_text(name).unwrap_or_default();
-        layaut::normalize_boards(layaut::split_sections(&text).2)
-    }
-
-    /// SAVE while on a board: that board's panels, into the layout's
-    /// file. The grid editor speaks rectangles, so a board saved from
-    /// it is a fixed board.
-    pub fn set_board(&self, name: &str, k: BoardId, spec: &LayoutSpec) -> std::io::Result<()> {
-        let mut boards = self.boards_of(name);
+    /// SAVE while on a board: that board's instances at the rectangles
+    /// the grid editor gave them. Instances the caller did not name are
+    /// no longer on the board, and go.
+    pub fn set_board(
+        &self,
+        name: &str,
+        k: BoardId,
+        rects: &[(InstanceId, PanelSpec)],
+    ) -> std::io::Result<()> {
+        let mut def = self.read_def(name);
+        for id in board_ids(&def.instances, k) {
+            if !rects.iter().any(|(i, _)| *i == id) {
+                def.instances.remove(id);
+            }
+        }
+        for (id, spec) in rects {
+            def.instances.set_board(*id, k);
+            def.instances.set_rect(*id, Some(*spec));
+        }
+        let mut boards = def.boards.clone();
         boards.retain(|(i, _)| *i != k);
-        boards.push((k, BoardDef { base: LayoutMode::Fixed(spec.clone()), sizes: Vec::new() }));
-        self.write_boards(name, boards)
+        // The grid editor speaks rectangles, so a board saved from it is
+        // a rectangle board.
+        boards.push((k, BoardDef { base: LayoutMode::Rects, sizes: Vec::new() }));
+        self.write_boards(name, boards, &mut def.instances)
     }
 
     /// A new, empty board at the given end of the horizontal row:
     /// negative is left, positive right. Only the row grows — the top
     /// and bottom boards are fixtures, one each, like home.
     pub fn add_board(&self, name: &str, side: i8) -> std::io::Result<()> {
-        let mut boards = self.boards_of(name);
+        let mut def = self.read_def(name);
         let s: i32 = if side < 0 { -1 } else { 1 };
-        let next = boards
+        let next = def
+            .boards
             .iter()
             .filter_map(|(id, _)| (id.1 == 0 && id.0 * s > 0).then_some(id.0 * s))
             .max()
             .unwrap_or(0)
             + 1;
+        let mut boards = def.boards.clone();
         boards.push((
             (next * s, 0),
-            BoardDef { base: LayoutMode::Fixed(LayoutSpec::default()), sizes: Vec::new() },
+            BoardDef { base: LayoutMode::Rects, sizes: Vec::new() },
         ));
-        self.write_boards(name, boards)
+        self.write_boards(name, boards, &mut def.instances)
     }
 
     /// Removes a horizontal board; the ones beyond it close ranks,
@@ -204,9 +301,13 @@ impl LayautStore {
         if k.1 != 0 {
             return Ok(());
         }
-        let mut boards = self.boards_of(name);
+        let mut def = self.read_def(name);
+        let mut boards = def.boards.clone();
         boards.retain(|(i, _)| *i != k);
-        self.write_boards(name, boards)
+        // The widgets that stood there go with it; their ids are
+        // retired and never handed out again.
+        def.instances.remove_board(k);
+        self.write_boards(name, boards, &mut def.instances)
     }
 
     /// Deletes just the `[WxH@D]` section of one layaut, leaving its
@@ -215,27 +316,41 @@ impl LayautStore {
     pub fn clear_screen_section(&self, name: &str, key: ScreenKey) -> std::io::Result<()> {
         let dir = self.roots.ensure("layauts")?;
         let text = self.read_text(name).unwrap_or_default();
-        let (base, mut sections, boards) = layaut::split_sections(&text);
-        let before = sections.len();
-        sections.retain(|o| (o.w, o.h, o.diag) != key);
-        if sections.len() == before {
+        let (base, _, _) = layaut::split_raw(&text);
+        let mut def = layaut::parse(&text, name);
+        let before = def.overrides.len();
+        def.overrides.retain(|o| (o.w, o.h, o.diag) != key);
+        if def.overrides.len() == before {
             // Nothing pinned for this screen: the file is left alone.
             return Ok(());
         }
-        let mut out = String::new();
-        let base_trim = base.trim_end();
-        if base_trim.is_empty() {
-            out.push_str(
-                "# nacelle layout: per-screen overrides on top of the default layout.\n",
-            );
-        } else {
-            out.push_str(base_trim);
-            out.push('\n');
-        }
-        layaut::serialize_sections(&mut out, &sections);
-        layaut::serialize_boards(&mut out, &boards);
+        let mut out = preserved_base(
+            &base,
+            &def.instances,
+            "# nacelle layout: per-screen overrides on top of the default layout.\n",
+        );
+        layaut::serialize_sections(&mut out, &def.overrides, &def.instances);
+        layaut::serialize_boards(&mut out, &def.boards, &def.instances);
         std::fs::write(dir.join(format!("{name}.layaut")), out)
     }
+}
+
+/// The base of a file as it will be written back: the user's own text
+/// (comments and all) with the bookkeeping lines brought up to date, or
+/// the given banner when there is no base yet.
+fn preserved_base(base: &str, insts: &InstanceList, banner: &str) -> String {
+    let trimmed = base.trim_end();
+    let text = if trimmed.is_empty() {
+        banner.to_string()
+    } else {
+        format!("{trimmed}\n")
+    };
+    layaut::with_header(&text, insts)
+}
+
+/// The ids standing on one board.
+fn board_ids(insts: &InstanceList, k: BoardId) -> Vec<InstanceId> {
+    insts.on_board(k).into_iter().map(|i| i.id).collect()
 }
 
 /// Stems of `<stem>.<ext>` files in a directory, dotfiles excluded.

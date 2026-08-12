@@ -1,0 +1,13 @@
+# nacelle-desktop layout saved from the grid editor.
+# Format: <panel> = x y w h (percent of the window).
+screen = 1920x1080@27
+clock = 1.50 2.00 16.00 7.00
+cpu = 1.50 10.00 16.00 22.00
+memory = 1.50 34.00 16.00 18.00
+shell = 20.00 2.00 60.00 90.00
+
+[2560x1440@32]
+shell = 22.00 3.00 56.00 88.00
+
+[board 1]
+memory = 5.00 5.00 40.00 40.00

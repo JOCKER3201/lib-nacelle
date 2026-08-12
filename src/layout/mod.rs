@@ -6,8 +6,10 @@
 
 pub mod def;
 pub mod flex;
+pub mod instance;
 pub mod layaut;
 pub mod store;
 
 pub use def::{board_key, stale_screen_section, BoardDef, BoardId, LayoutDef, ResOverride, ScreenKey};
+pub use instance::{Instance, InstanceId, InstanceList};
 pub use store::LayautStore;

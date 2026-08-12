@@ -3,21 +3,27 @@
 //! (0, 0), the horizontal row it sits on, and the two fixtures above
 //! and below — SEARCH AND AI at (0, -1) and APPGRID at (0, 1) — which
 //! exist whether or not the layout's file has anything on them.
+//!
+//! Each position holds its own instances, so a board is a full desktop
+//! of its own rather than a copy of home: its own widgets, its own
+//! second terminal, its own arrangement.
 
-use crate::base::{LayoutMode, LayoutSpec, SizeTable};
-use crate::layout::{board_key, BoardId, LayoutDef, ScreenKey};
+use crate::base::{Layout, LayoutMode, SizeTable};
+use crate::layout::{board_key, BoardId, InstanceId, LayoutDef, ScreenKey};
 use std::collections::HashMap;
 
 pub struct BoardWorld {
-    /// The selected layaut itself — what position (0, 0) shows.
+    /// The selected layaut itself — what position (0, 0) shows. Held
+    /// whole, instances of every board included, because it is also
+    /// what the caller hands back to be saved.
     home: LayoutDef,
     /// The extra boards, keyed by their FOLDED position.
     boards: HashMap<BoardId, LayoutDef>,
     /// How far the horizontal row reaches: (left, right).
     ext: (u32, u32),
     current: BoardId,
-    /// What a position without a board shows: fixed, every panel
-    /// hidden. Owned so `def` can always answer a reference.
+    /// What a position without a board shows: rectangles, and none of
+    /// them. Owned so `def` can always answer a reference.
     empty: LayoutDef,
 }
 
@@ -50,20 +56,21 @@ impl BoardWorld {
             } else if y == 0 {
                 r = r.max(x as u32);
             }
-            // A board is whatever its section holds — fixed rects or
-            // flexbox columns; a board that names its own sizes uses
-            // them, the rest share the layout's.
+            // A board is whatever its section holds — rectangles or
+            // flexbox columns — over the instances that stand on it; a
+            // board that names its own sizes uses them, the rest share
+            // the layout's.
             self.boards.insert(
                 *k,
                 LayoutDef {
                     base: bd.base.clone(),
-                    overrides: Vec::new(),
                     sizes: if bd.sizes.is_empty() {
                         home.sizes.clone()
                     } else {
                         bd.sizes.clone()
                     },
-                    boards: Vec::new(),
+                    instances: home.instances.clone(),
+                    ..LayoutDef::default()
                 },
             );
         }
@@ -73,10 +80,10 @@ impl BoardWorld {
         // ordinary boards that ride over home when opened.
         for k in [(0, -1), (0, 1)] {
             self.boards.entry(k).or_insert_with(|| LayoutDef {
-                base: LayoutMode::Fixed(LayoutSpec::default()),
-                overrides: Vec::new(),
+                base: LayoutMode::Rects,
                 sizes: home.sizes.clone(),
-                boards: Vec::new(),
+                instances: home.instances.clone(),
+                ..LayoutDef::default()
             });
         }
         self.ext = (l, r);
@@ -124,6 +131,28 @@ impl BoardWorld {
         self.def(self.current)
     }
 
+    /// The whole selected layout, instances of every board included —
+    /// what an editor hands to the store to be saved.
+    pub fn layout(&self) -> &LayoutDef {
+        &self.home
+    }
+
+    /// The rectangles ONE board shows at this window size. Every def
+    /// carries the whole layout's instances, so which of them belong
+    /// here is decided by the position, not by the def.
+    pub fn solve(
+        &self,
+        k: BoardId,
+        w: f32,
+        h: f32,
+        pad: f32,
+        screen: ScreenKey,
+        t: &SizeTable,
+    ) -> Layout {
+        let key = board_key(k);
+        self.def(key).solve_on(key, w, h, pad, screen, t)
+    }
+
     /// How far the horizontal row reaches: (left, right).
     pub fn arms(&self) -> (u32, u32) {
         self.ext
@@ -140,12 +169,16 @@ impl BoardWorld {
         ids
     }
 
-    /// Which panels are visible on ANY board at this window size — the
-    /// presence scan widget lifetime hangs on (u3 §5 trap 1): a panel
-    /// whose rectangle starts inside the window on some board is
-    /// present; one hidden everywhere is not, and its widget must not
-    /// run. The x < w rule is the OFF_SPEC convention: hidden panels
-    /// park far outside.
+    /// Which INSTANCES are visible on ANY board at this window size —
+    /// the presence scan widget lifetime hangs on (u3 §5 trap 1). An
+    /// instance whose rectangle starts inside the window on some board
+    /// is present; one hidden everywhere is not, and its widget must
+    /// not run. The x < w rule is the OFF_SPEC convention: hidden
+    /// panels park far outside.
+    ///
+    /// Per INSTANCE and not per widget, because two terminals are two
+    /// shells: closing one of them may not take the other's process
+    /// with it.
     pub fn present(
         &self,
         w: f32,
@@ -153,34 +186,31 @@ impl BoardWorld {
         pad: f32,
         screen: ScreenKey,
         t: &SizeTable,
-    ) -> Vec<bool> {
-        let mut present = vec![false; crate::base::panel_count()];
+    ) -> Vec<InstanceId> {
+        let mut out: Vec<InstanceId> = Vec::new();
         for k in self.ids() {
-            let def = self.def(k);
-            let lay = def.solve(w, h, pad, screen, t);
-            for p in crate::base::Panel::all() {
-                if lay.p(p).x < w {
-                    present[p.idx()] = true;
+            for p in self.solve(k, w, h, pad, screen, t).iter() {
+                if p.rect.x < w && !out.contains(&p.id) {
+                    out.push(p.id);
                 }
             }
         }
-        present
+        out
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::BoardDef;
+    use crate::base::{Panel, PanelSpec};
+    use crate::layout::{BoardDef, InstanceList};
 
     fn world_with(boards: &[BoardId]) -> BoardWorld {
         crate::flex::install_test_registry();
         let mut home = LayoutDef::from_base(LayoutMode::Flex);
         home.boards = boards
             .iter()
-            .map(|k| {
-                (*k, BoardDef { base: LayoutMode::Fixed(LayoutSpec::default()), sizes: Vec::new() })
-            })
+            .map(|k| (*k, BoardDef { base: LayoutMode::Rects, sizes: Vec::new() }))
             .collect();
         BoardWorld::new(home)
     }
@@ -208,10 +238,12 @@ mod tests {
     #[test]
     fn a_position_that_exists_but_holds_nothing_is_the_empty_board() {
         let w = world_with(&[(1, 0)]);
-        // The fixture positions exist with no content: the empty def
-        // hides every panel (OFF_SPEC parks at x >= 100 percent).
+        // The fixture positions exist with no content: no instance
+        // stands on them, so the board solves to nothing at all.
         let d = w.def((0, -1));
-        assert!(matches!(d.base, LayoutMode::Fixed(_)));
+        assert!(matches!(d.base, LayoutMode::Rects));
+        assert!(w.solve((0, -1), 1920.0, 1080.0, 8.0, (0, 0, 0), &crate::base::size_table())
+            .is_empty());
     }
 
     #[test]
@@ -220,10 +252,8 @@ mod tests {
         w.set_current((2, 0));
         assert_eq!(w.current(), (2, 0));
         let mut smaller = LayoutDef::from_base(LayoutMode::Flex);
-        smaller.boards = vec![(
-            (1, 0),
-            BoardDef { base: LayoutMode::Fixed(LayoutSpec::default()), sizes: Vec::new() },
-        )];
+        smaller.boards =
+            vec![((1, 0), BoardDef { base: LayoutMode::Rects, sizes: Vec::new() })];
         w.rebuild(smaller);
         assert_eq!(w.current(), (0, 0), "home is the one place that always exists");
         assert_eq!(w.arms(), (0, 1));
@@ -244,19 +274,48 @@ mod tests {
         // `flex::install_test_registry`.
         crate::flex::install_test_registry();
         let mut home = LayoutDef::from_base(LayoutMode::Flex);
-        home.sizes = vec![(crate::base::Panel::all()[0], 9.0, 5.0)];
+        home.sizes = vec![(Panel::all()[0], 9.0, 5.0)];
         home.boards = vec![
-            ((1, 0), BoardDef { base: LayoutMode::Fixed(LayoutSpec::default()), sizes: Vec::new() }),
+            ((1, 0), BoardDef { base: LayoutMode::Rects, sizes: Vec::new() }),
             (
                 (2, 0),
                 BoardDef {
-                    base: LayoutMode::Fixed(LayoutSpec::default()),
-                    sizes: vec![(crate::base::Panel::all()[0], 20.0, 10.0)],
+                    base: LayoutMode::Rects,
+                    sizes: vec![(Panel::all()[0], 20.0, 10.0)],
                 },
             ),
         ];
         let w = BoardWorld::new(home);
         assert_eq!(w.def((1, 0)).sizes[0].1, 9.0, "no own sizes: the layout's table");
         assert_eq!(w.def((2, 0)).sizes[0].1, 20.0, "own sizes win");
+    }
+
+    /// Goal A: a second board is a desktop of its own, with its OWN
+    /// widgets. A board's instances are its own — solving home must
+    /// never place them, and solving the board must never place home's.
+    #[test]
+    fn every_board_places_only_its_own_instances() {
+        crate::flex::install_test_registry();
+        let w01 = Panel::from_name("w01").unwrap();
+        let w07 = Panel::from_name("w07").unwrap();
+        let mut insts = InstanceList::new();
+        let at_home = insts.add(w01, (0, 0), None);
+        let away = insts.add(w07, (1, 0), Some(PanelSpec { x: 5.0, y: 5.0, w: 50.0, h: 50.0 }));
+        let mut home = LayoutDef::from_base(LayoutMode::Flex);
+        home.boards = vec![((1, 0), BoardDef { base: LayoutMode::Rects, sizes: Vec::new() })];
+        home.instances = insts;
+        let world = BoardWorld::new(home);
+        let t = crate::base::size_table();
+        let (w, h) = (1920.0, 1080.0);
+        let at0 = world.solve((0, 0), w, h, 8.0, (0, 0, 0), &t);
+        let at1 = world.solve((1, 0), w, h, 8.0, (0, 0, 0), &t);
+        assert_eq!(at0.len(), 1);
+        assert_eq!(at1.len(), 1);
+        assert!(at0.of(at_home).x < w && at0.of(away).x >= w);
+        assert!(at1.of(away).x < w && at1.of(at_home).x >= w);
+        // Both are present somewhere, which is what keeps both widgets
+        // alive.
+        let present = world.present(w, h, 8.0, (0, 0, 0), &t);
+        assert!(present.contains(&at_home) && present.contains(&away));
     }
 }

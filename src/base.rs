@@ -41,7 +41,7 @@ impl Rect {
 pub const UI_FONT_BASE: f32 = 1.3;
 
 /// Panel position and size in vw/vh units (percent of the window).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct PanelSpec {
     pub x: f32,
     pub y: f32,
@@ -49,12 +49,17 @@ pub struct PanelSpec {
     pub h: f32,
 }
 
-/// An individually placeable widget (panel) of the interface.
+/// A KIND of widget — one entry of the widget registry.
 ///
-/// This is only an index into the widget registry, which is built at
-/// startup by scanning the widgets directory. Everything a widget is —
-/// its name, label, default sizes and how it draws — comes from that
-/// registry, so adding a widget never means touching this type.
+/// This is only an index into the registry, which is built at startup
+/// by scanning the addons directory. Everything a widget is — its name,
+/// label, default sizes and how it draws — comes from that registry, so
+/// adding a widget never means touching this type.
+///
+/// It is deliberately NOT a placement. Where a widget stands, and how
+/// many times it stands there, is one [`crate::layout::Instance`] per
+/// appearance ([`crate::layout::InstanceList`]); a `Panel` only says
+/// which of them is running.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Panel(pub u16);
 
@@ -63,7 +68,9 @@ impl Panel {
         self.0 as usize
     }
 
-    /// Every registered widget, in registry order.
+    /// Every registered widget KIND, in registry order. Says nothing
+    /// about what a layout places: a kind may be placed twice, or not
+    /// at all — ask the layout's instance list for that.
     pub fn all() -> Vec<Panel> {
         (0..panel_count() as u16).map(Panel).collect()
     }
@@ -295,6 +302,15 @@ pub struct SizeTable {
     sizes: Vec<(f32, f32)>,
     intrinsic: Vec<Option<f32>>,
     chrome: Vec<f32>,
+    /// What individual INSTANCES measured themselves at, when the host
+    /// measures them one by one: (id, intrinsic, chrome).
+    ///
+    /// Two terminals hold two different amounts of text, so the honest
+    /// measurement is per instance. The three vectors above are the
+    /// per-KIND answer a host that still runs one widget of each kind
+    /// publishes, and they stay the fallback — a host adopts this seam
+    /// instance by instance rather than all at once.
+    by_instance: Vec<(crate::layout::InstanceId, Option<f32>, f32)>,
 }
 
 impl SizeTable {
@@ -303,7 +319,39 @@ impl SizeTable {
         intrinsic: Vec<Option<f32>>,
         chrome: Vec<f32>,
     ) -> Self {
-        Self { sizes, intrinsic, chrome }
+        Self { sizes, intrinsic, chrome, by_instance: Vec::new() }
+    }
+
+    /// Records what ONE instance measured itself at this frame,
+    /// replacing an earlier measurement for the same identity.
+    pub fn set_instance(
+        &mut self,
+        id: crate::layout::InstanceId,
+        intrinsic: Option<f32>,
+        chrome: f32,
+    ) {
+        match self.by_instance.iter_mut().find(|(i, _, _)| *i == id) {
+            Some(slot) => *slot = (id, intrinsic, chrome),
+            None => self.by_instance.push((id, intrinsic, chrome)),
+        }
+    }
+
+    /// What THIS instance measured itself at; the widget kind's
+    /// measurement while nobody has measured this instance itself.
+    pub fn intrinsic_of(&self, id: crate::layout::InstanceId, p: Panel) -> Option<f32> {
+        match self.by_instance.iter().find(|(i, _, _)| *i == id) {
+            Some((_, ih, _)) => *ih,
+            None => self.intrinsic_h(p),
+        }
+    }
+
+    /// What the container draws around THIS instance; the kind's
+    /// chrome while nobody has measured this instance itself.
+    pub fn chrome_of(&self, id: crate::layout::InstanceId, p: Panel) -> f32 {
+        match self.by_instance.iter().find(|(i, _, _)| *i == id) {
+            Some((_, _, c)) => *c,
+            None => self.chrome_h(p),
+        }
     }
 
     /// Reference height (vh); 10.0 for a panel the table does not name.
@@ -334,6 +382,7 @@ pub fn size_table() -> SizeTable {
         sizes: sizes().read().map(|s| s.clone()).unwrap_or_default(),
         intrinsic: intrinsic().read().map(|i| i.clone()).unwrap_or_default(),
         chrome: chrome().read().map(|c| c.clone()).unwrap_or_default(),
+        by_instance: Vec::new(),
     }
 }
 
@@ -400,9 +449,13 @@ pub fn panel_count() -> usize {
 /// A panel placed far outside the window = hidden.
 pub const OFF_SPEC: PanelSpec = PanelSpec { x: 200.0, y: 0.0, w: 20.0, h: 25.0 };
 
-/// Panel layout — positions of all panels loaded from a legacy .layaut
-/// file (percent of the window at the 16:9 reference). Panels missing
-/// from the file stay hidden.
+/// Panel layout — positions of all panels as a VERSION 1 `.layaut` file
+/// held them: one rectangle per widget, indexed by registry position.
+///
+/// This is the shape the format has grown out of ([`crate::layout::
+/// InstanceList`] replaced it, so that a widget can be placed twice).
+/// It survives as what the version 1 reader produces, and lives only
+/// long enough for the migration to turn it into instances.
 #[derive(Clone)]
 pub struct LayoutSpec {
     pub panels: Vec<PanelSpec>,
@@ -426,8 +479,25 @@ impl Default for LayoutSpec {
     }
 }
 
-/// One flexbox column: CSS-like width constraints plus panels stacked
-/// top to bottom with height weights.
+/// One entry of a flex column: WHICH instance stands there, and how
+/// much of the column it asked for.
+///
+/// The instance, not the widget: two terminals may share one column,
+/// and only their identities tell the solver's two rectangles apart.
+/// `widget` rides along because everything the solver asks — the
+/// anchor, the minimum height, the intrinsic measurement — is a
+/// property of the KIND, and looking it up through the layout's list on
+/// every access would buy nothing.
+#[derive(Clone, Copy, Debug)]
+pub struct ColumnItem {
+    pub id: crate::layout::InstanceId,
+    pub widget: Panel,
+    /// Share of the column the instance asked for (its height weight).
+    pub weight: f32,
+}
+
+/// One flexbox column: CSS-like width constraints plus instances
+/// stacked top to bottom with height weights.
 #[derive(Clone)]
 pub struct FlexColumn {
     /// Preferred width as a percentage of the row (flex-basis).
@@ -443,8 +513,8 @@ pub struct FlexColumn {
     pub collapse: u32,
     /// Vertical gap between the panels, in height weight units.
     pub gap: f32,
-    /// Panels top to bottom with their height weights.
-    pub panels: Vec<(Panel, f32)>,
+    /// Instances top to bottom with their height weights.
+    pub panels: Vec<ColumnItem>,
 }
 
 /// A flexbox layout: columns laid out left to right.
@@ -462,17 +532,23 @@ pub struct FlexLayaut {
     pub pad_x: Option<f32>,
 }
 
-/// How the panel layout is produced (see src/flex.rs).
+/// How a board's instances are placed (see src/layout/flex.rs).
 #[derive(Clone)]
 pub enum LayoutMode {
-    /// Built-in responsive default: a flexbox tree computed from the
-    /// actual window size every frame.
+    /// Built-in responsive default: a flexbox tree composed from what
+    /// the board's instances declare, computed from the actual window
+    /// size every frame.
     Flex,
     /// A custom flexbox .layaut file — same engine as the default.
     Custom(FlexLayaut),
-    /// A legacy .layaut file: a fixed 16:9 base, re-adapted to the
-    /// window every frame.
-    Fixed(LayoutSpec),
+    /// Explicit rectangles: every instance the board holds sits at its
+    /// own `rect`, re-adapted to the window every frame.
+    ///
+    /// The rectangles are NOT here. They are on the instances
+    /// ([`crate::layout::Instance::rect`]), which is what lets the same
+    /// widget hold two of them; this variant only says that the board
+    /// reads them.
+    Rects,
 }
 
 impl Default for LayoutMode {
@@ -481,33 +557,97 @@ impl Default for LayoutMode {
     }
 }
 
-/// Computed panel rectangles (in physical pixels).
+/// One solved instance: who it is, what it runs, and the OUTER
+/// rectangle the engine gave it, in physical pixels.
+#[derive(Clone, Copy, Debug)]
+pub struct Placed {
+    pub id: crate::layout::InstanceId,
+    pub widget: Panel,
+    pub rect: Rect,
+}
+
+/// Computed rectangles of one solved board — one entry per placed
+/// INSTANCE, in the order the board places them.
+///
+/// Keyed by instance and not by widget: a board with two terminals has
+/// two entries whose `widget` is the same, and the host tells its two
+/// shells apart by `id`.
 pub struct Layout {
-    pub panels: Vec<Rect>,
+    placed: Vec<Placed>,
+    /// Where an instance this layout does not hold is reported to be:
+    /// far to the RIGHT of the window. Every presence scan in the
+    /// program asks `rect.x < w`, so the absent must answer from
+    /// outside — a negative sentinel would read as "on screen".
+    off: Rect,
 }
 
 impl Layout {
-    /// All panels off-screen (starting point for layout engines).
+    /// A board with nothing placed yet — the starting point of every
+    /// layout engine.
     pub fn empty(w: f32, h: f32) -> Layout {
-        Layout { panels: vec![Rect::new(w * 2.0, 0.0, w * 0.16, h * 0.6); panel_count()] }
+        Layout { placed: Vec::new(), off: Rect::new(w * 2.0, 0.0, w * 0.16, h * 0.6) }
     }
 
-    /// The rectangle of a panel.
-    pub fn p(&self, p: Panel) -> Rect {
-        self.panels
-            .get(p.idx())
-            .copied()
-            .unwrap_or(Rect::new(-1.0e6, 0.0, 1.0, 1.0))
-    }
-
-    pub fn set(&mut self, p: Panel, r: Rect) {
-        if self.panels.len() <= p.idx() {
-            self.panels.resize(p.idx() + 1, Rect::new(-1.0e6, 0.0, 1.0, 1.0));
+    /// Places one instance, replacing an earlier rectangle for the same
+    /// identity.
+    pub fn place(&mut self, id: crate::layout::InstanceId, widget: Panel, rect: Rect) {
+        match self.placed.iter_mut().find(|p| p.id == id) {
+            Some(slot) => slot.rect = rect,
+            None => self.placed.push(Placed { id, widget, rect }),
         }
-        self.panels[p.idx()] = r;
     }
 
-    /// Derives the INNER content containers from the OUTER panel
+    /// The rectangle of one instance; off-screen when this board does
+    /// not hold it.
+    pub fn of(&self, id: crate::layout::InstanceId) -> Rect {
+        self.placed.iter().find(|p| p.id == id).map(|p| p.rect).unwrap_or(self.off)
+    }
+
+    /// The rectangle of the FIRST instance of a widget kind.
+    ///
+    /// For the questions that really are about the kind — "is this
+    /// widget on any board at all", the presence scan widget lifetime
+    /// hangs on. A caller that draws, or that answers a click, wants
+    /// [`Layout::of`]: with two terminals on the board, "the first one"
+    /// is an arbitrary one.
+    pub fn p(&self, p: Panel) -> Rect {
+        self.placed
+            .iter()
+            .find(|x| x.widget == p)
+            .map(|x| x.rect)
+            .unwrap_or(self.off)
+    }
+
+    /// Every placed instance, in placement order.
+    pub fn iter(&self) -> std::slice::Iter<'_, Placed> {
+        self.placed.iter()
+    }
+
+    pub fn all(&self) -> &[Placed] {
+        &self.placed
+    }
+
+    /// Every placed instance running the given widget kind — one entry
+    /// per terminal on the board, not "the terminal".
+    pub fn instances_of(&self, p: Panel) -> Vec<Placed> {
+        self.placed.iter().filter(|x| x.widget == p).copied().collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.placed.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.placed.is_empty()
+    }
+
+    /// The instance under a point, last placed first — the reading a
+    /// click wants, since later placements draw over earlier ones.
+    pub fn hit(&self, x: f32, y: f32) -> Option<Placed> {
+        self.placed.iter().rev().find(|p| p.rect.contains(x, y)).copied()
+    }
+
+    /// Derives the INNER content containers from the OUTER instance
     /// rectangles: the inner container is exactly the widget's content
     /// area, and the outer rectangle (the resize edge) is ALWAYS `pad`
     /// larger than it on every side. Drawing and hit-testing use the
@@ -516,7 +656,7 @@ impl Layout {
     /// enough for the padding plus some content).
     pub fn padded(&self, pad: f32) -> Layout {
         let pad = pad.max(0.0);
-        let ins = |r: &Rect| {
+        let ins = |r: Rect| {
             Rect::new(
                 r.x + pad,
                 r.y + pad,
@@ -524,19 +664,13 @@ impl Layout {
                 (r.h - 2.0 * pad).max(2.0),
             )
         };
-        Layout { panels: self.panels.iter().map(ins).collect() }
-    }
-
-    pub fn compute(w: f32, h: f32, spec: &LayoutSpec) -> Self {
-        let vw = w / 100.0;
-        let vh = h / 100.0;
         Layout {
-            panels: (0..panel_count())
-                .map(|i| {
-                    let p = spec.panels.get(i).unwrap_or(&OFF_SPEC);
-                    Rect::new(p.x * vw, p.y * vh, p.w * vw, p.h * vh)
-                })
+            placed: self
+                .placed
+                .iter()
+                .map(|p| Placed { rect: ins(p.rect), ..*p })
                 .collect(),
+            off: self.off,
         }
     }
 }
