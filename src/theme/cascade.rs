@@ -33,6 +33,7 @@
 //! manually overridden as well".
 
 use super::expr::{Expr, Kind, Value};
+use super::mood::{self, MoodRule};
 use super::parse::{Diagnostic, Document, KeyVal, LangTag, Level, Section, SectionKind, Sources, Span, self as parse};
 use std::collections::HashMap;
 
@@ -877,6 +878,35 @@ pub fn sibling_names(doc: &Document, out: &mut Vec<Diagnostic>) -> Vec<(SectionK
         all.truncate(MAX_SIBLINGS);
     }
     all
+}
+
+/// Every mood a document declares, with its `when` predicate parsed (§5.24),
+/// in declaration order.
+///
+/// A mood's trigger is its **own**. `inherit` chains the token overlay, not
+/// the rule — exactly as [`apply_overlay`] does not chain `wash` — because
+/// `[mood.lockdown]` inherits every colour `alert` sets and still says
+/// `when = ""`, and a trigger that came down the chain would make that
+/// sentence impossible to write.
+pub fn mood_rules(doc: &Document, out: &mut Vec<Diagnostic>) -> Vec<MoodRule> {
+    doc.overlays(SectionKind::Mood)
+        .into_iter()
+        .map(|name| {
+            let declared = doc.keys.iter().find(|kv| {
+                let s = doc.sections.get(kv.section as usize);
+                kv.key == "when"
+                    && s.is_some_and(|s| s.kind == SectionKind::Mood && s.path == name)
+            });
+            // The caret belongs under the VALUE where there is one, and under
+            // the section header where the mood simply never wrote a `when`.
+            let (text, span) = match declared {
+                Some(kv) => (text_of(&kv.value).unwrap_or_default(), kv.value_span),
+                None => (String::new(), overlay_span(doc, SectionKind::Mood, &name)),
+            };
+            let when = mood::parse_when(&name, &text, span, out);
+            MoodRule { name, when }
+        })
+        .collect()
 }
 
 #[cfg(test)]

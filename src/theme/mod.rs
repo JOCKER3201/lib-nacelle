@@ -54,11 +54,13 @@ pub mod bake;
 pub mod cascade;
 pub mod color;
 pub mod expr;
+pub mod mood;
 pub mod parse;
 pub mod plate;
 pub mod resolve;
 
 pub use bake::{BakeInput, ResolvedTheme, Viewport};
+pub use mood::{MoodInput, MoodRule, MoodWhen};
 pub use plate::Plate;
 pub use cascade::{Schema, ThemeSpec, TokenId};
 pub use color::Color;
@@ -137,6 +139,10 @@ struct Engine {
     schema: Schema,
     sources: Sources,
     siblings: Vec<Sibling>,
+    /// The declarative triggers of §5.24, parsed once at load, in the order
+    /// the theme declares its moods. Cold: a host reads them when the theme
+    /// changes and evaluates its own copy against its own telemetry.
+    moods: Vec<MoodRule>,
     active: usize,
     viewport: Viewport,
     /// One leaked `ResolvedTheme` per (sibling, quantised `u`). Bounded by the
@@ -380,18 +386,54 @@ pub fn load_with(req: LoadRequest) -> Arc<ThemeDiagnostics> {
         explicit_density: explicit,
     });
 
-    if let Some(doc) = &theme_doc {
-        let declared = cascade::sibling_names(doc, &mut out);
+    // WHOSE moods and variants these are, PER KIND. The combos below were
+    // built from the SELECTED theme alone, and not one theme in the
+    // catalogue declares a `[mood.*]` or a `[variant.*]` — they live in the
+    // master. So every session resolved exactly one sibling and every
+    // `set_mood` answered false: the alarm skin was written, documented,
+    // baked and unreachable.
+    //
+    // The master's moods are the right moods for a theme that declares none,
+    // because a mood is a sparse RE-MAP of roles the active theme resolves:
+    // `[mood.alert]`'s `alpha(@severity.critical.text, 0.18)` is whichever
+    // red the running theme chose, which is the same mechanism that gives
+    // one layout four hues. Per kind, because a theme that ships a mood of
+    // its own must not thereby lose the high-contrast variant it never
+    // mentioned — that would make an accessibility setting disappear as a
+    // side effect of an alarm colour. Within a kind there is no merge: a
+    // theme that declares moods declares all of them.
+    let declares = |d: &Document, k: SectionKind| !d.overlays(k).is_empty();
+    let mood_doc: &Document = match &theme_doc {
+        Some(d) if declares(d, SectionKind::Mood) => d,
+        _ => &default_doc,
+    };
+    let variant_doc: &Document = match &theme_doc {
+        Some(d) if declares(d, SectionKind::Variant) => d,
+        _ => &default_doc,
+    };
+    let mood_rules = cascade::mood_rules(mood_doc, &mut out);
+    {
+        let declared = cascade::sibling_names(mood_doc, &mut out);
         let moods: Vec<String> = declared
             .iter()
             .filter(|(k, _)| *k == SectionKind::Mood)
             .map(|(_, n)| n.clone())
             .collect();
-        let variants: Vec<String> = declared
-            .iter()
-            .filter(|(k, _)| *k == SectionKind::Variant)
-            .map(|(_, n)| n.clone())
-            .collect();
+        // One call where one document declares both, so the "more than
+        // eight" report is not printed twice for the same file.
+        let variants: Vec<String> = if std::ptr::eq(mood_doc, variant_doc) {
+            declared
+                .iter()
+                .filter(|(k, _)| *k == SectionKind::Variant)
+                .map(|(_, n)| n.clone())
+                .collect()
+        } else {
+            cascade::sibling_names(variant_doc, &mut out)
+                .into_iter()
+                .filter(|(k, _)| *k == SectionKind::Variant)
+                .map(|(_, n)| n)
+                .collect()
+        };
         // §4.1: `[mood.<m>]` applies BEFORE `[variant.hc]`, so high contrast
         // always wins over an alarm's decoration.
         let mut combos: Vec<(Option<String>, Option<String>)> = Vec::new();
@@ -421,17 +463,22 @@ pub fn load_with(req: LoadRequest) -> Arc<ThemeDiagnostics> {
             for c in &chain {
                 st.push(cascade::Stage::Document(c));
             }
-            st.push(cascade::Stage::Document(doc));
+            // The master is never a stage of its own: its plain values ARE
+            // the base spec. Only a SELECTED theme is a document here, and
+            // it is pushed whether or not it is the one declaring the mood.
+            if let Some(d) = &theme_doc {
+                st.push(cascade::Stage::Document(d));
+            }
             if let Some(n) = &m {
                 st.push(cascade::Stage::Overlay {
-                    doc,
+                    doc: mood_doc,
                     kind: SectionKind::Mood,
                     name: n.clone(),
                 });
             }
             if let Some(n) = &v {
                 st.push(cascade::Stage::Overlay {
-                    doc,
+                    doc: variant_doc,
                     kind: SectionKind::Variant,
                     name: n.clone(),
                 });
@@ -478,6 +525,7 @@ pub fn load_with(req: LoadRequest) -> Arc<ThemeDiagnostics> {
         schema,
         sources: src,
         siblings,
+        moods: mood_rules,
         active: 0,
         viewport,
         cache: HashMap::new(),
@@ -611,6 +659,26 @@ pub fn set_sibling(i: usize) -> bool {
     let t = g.bake_active(&mut out);
     publish(t);
     true
+}
+
+/// The declarative triggers of §5.24, parsed at load, in the order the theme
+/// declares its moods.
+///
+/// **Read on a theme change, not per tick** — it allocates, and the answer
+/// only changes when a theme is loaded ([`epoch`] moves with it).
+///
+/// The list is deliberately not pre-sorted by precedence. §5.24 fixes one
+/// ordering, `lockdown > alert > normal`, and that is the master's own
+/// declaration order read backwards; a host that must choose between two
+/// rules holding at once takes the LAST that holds, which gives the
+/// specification's answer for the shipped moods and gives a theme with moods
+/// of its own an ordering it can see in its own file.
+pub fn mood_rules() -> Vec<MoodRule> {
+    ENGINE
+        .get()
+        .and_then(|s| s.lock().ok())
+        .map(|g| g.moods.clone())
+        .unwrap_or_default()
 }
 
 /// §5.24's explicit API. `None` clears the mood, keeping the current variant.
@@ -1189,6 +1257,28 @@ mod tests {
         let mut out = Vec::new();
         assert!(fs.open("../../etc/passwd", &mut src, &mut out).is_none());
         assert!(out[0].message.contains("is not a theme name"));
+    }
+
+    /// A session that picked no theme runs the master, and the master
+    /// declares three moods and a contrast variant. They used to be dropped
+    /// on the floor: siblings were built from the SELECTED theme only, so
+    /// the shipped alarm skin resolved to nothing and every `set_mood` on a
+    /// default install answered false. Read-only on purpose — it must not
+    /// move the mood out from under a test running beside it.
+    #[test]
+    fn the_masters_own_moods_are_siblings_a_host_can_select() {
+        let _ = resolved();
+        let labels = siblings();
+        assert_eq!(labels.first().map(String::as_str), Some("plain"));
+        for want in ["normal", "alert", "lockdown", "hc", "alert+hc"] {
+            assert!(labels.iter().any(|l| l == want), "no sibling {want:?} in {labels:?}");
+        }
+        let rules = mood_rules();
+        let alert = rules.iter().find(|r| r.name == "alert").expect("no alert rule");
+        assert_eq!(alert.when, MoodWhen::SeverityAtLeast(3));
+        // Image 5's mood answers to the host and to nothing else.
+        let lockdown = rules.iter().find(|r| r.name == "lockdown").expect("no lockdown rule");
+        assert_eq!(lockdown.when, MoodWhen::Never);
     }
 
     #[test]

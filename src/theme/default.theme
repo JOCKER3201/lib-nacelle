@@ -3883,7 +3883,25 @@ a11y.contrast_floor   = true               # the lint now CORRECTS; -; bool; ove
 # predicate forms, is parsed at load into an enum, is evaluated once per
 # second against the 1 Hz telemetry snapshot, and is edge-triggered with a
 # 5-second hysteresis on the falling edge. Among moods: lockdown > alert >
-# normal.
+# normal - the master's declaration order, read backwards, which is how a
+# host settles two rules holding at once.
+#
+# THE FOUR FORMS, AND NOTHING ELSE (theme/mood.rs parses exactly these):
+#
+#   severity >= <role>                 any panel reporting at least this rung
+#   count(severity == <role>) >= <n>   how many are saying the same thing
+#   battery < <n>                      charge, in percent
+#   temp > <n>                         package temperature, in Celsius
+#
+# The comparator belongs to the FORM, not to a grammar: `battery > 10` is not
+# a predicate, it is a typo, and it warns like one and leaves the mood
+# host-selected. `<role>` is one of 5.10's seven, and `>=` is defined over
+# the four that RISE - ok, info, warning, critical. The other three are
+# states: `offline` is not worse than `critical`, and `unknown` is what a
+# misspelled severity word resolves to, so ranking it above critical would
+# let one typo in one widget strobe the whole interface. Whitespace carries
+# nothing. There is no scripting here on purpose - a theme that could
+# evaluate expressions could decide the machine is on fire.
 # =========================================================================
 
 # ---- normal · the resting mood. Image 6's calm azure console -------------
