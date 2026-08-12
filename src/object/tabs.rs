@@ -322,7 +322,11 @@ pub fn strip<S: Surface>(
     // the shear takes out of the cell's middle.
     let natural: Vec<f32> = labels
         .iter()
-        .map(|l| sf.measure(look.label.px, l, look.label.track) + 2.0 * look.pad + look.skew)
+        .map(|l| {
+            sf.measure(look.label.face, look.label.px, l, look.label.track)
+                + 2.0 * look.pad
+                + look.skew
+        })
         .collect();
     let avail = r.w - look.gap * n.saturating_sub(1) as f32;
     let widths = fit_widths(&natural, avail, look.min_w);
@@ -365,7 +369,8 @@ pub fn strip<S: Surface>(
             sf.line(cell.x, y, cell.right() - look.skew, y, look.underline, ink.edge);
         }
         let inner = (cell.w - 2.0 * look.pad - look.skew).max(0.0);
-        let text = paint::fit_end(sf, look.label.px, labels[i], inner, look.label.track);
+        let text =
+            paint::fit_end(sf, look.label.face, look.label.px, labels[i], inner, look.label.track);
         // A plate too narrow for its page's name gives the name in full
         // when the pointer rests on it (F2 §8.1). A strip trims to fit,
         // so a trimmed tab is precisely the case where the label has
@@ -379,6 +384,7 @@ pub fn strip<S: Surface>(
             ty,
             cell.w,
             Align::Center,
+            look.label.face,
             look.label.px,
             &text,
             ink.text,

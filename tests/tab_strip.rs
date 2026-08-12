@@ -54,10 +54,10 @@ impl Surface for Probe {
     fn quad(&mut self, pts: [[f32; 2]; 4], c: Color) {
         self.quads.push((pts, c));
     }
-    fn text(&mut self, _px: f32, x: f32, y: f32, s: &str, _c: Color, _t: f32, a: Align) {
+    fn text(&mut self, _face: u8, _px: f32, x: f32, y: f32, s: &str, _c: Color, _t: f32, a: Align) {
         self.texts.push((x, y, s.to_string(), a));
     }
-    fn measure(&mut self, px: f32, s: &str, _track: f32) -> f32 {
+    fn measure(&mut self, _face: u8, px: f32, s: &str, _track: f32) -> f32 {
         s.chars().count() as f32 * px * 0.5
     }
     fn clip(&mut self, _r: Rect) -> bool {

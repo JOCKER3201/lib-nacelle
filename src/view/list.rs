@@ -411,9 +411,10 @@ pub fn list<S: Surface, M: RowModel>(
         // what is left.
         let mut right = r.right() - gutter_r - look.pad_x;
         if !buf.status.is_empty() {
-            let sw = sf.measure(look.status.px, &buf.status, look.status.track);
+            let sw = sf.measure(look.status.face, look.status.px, &buf.status, look.status.track);
             let sy = paint::center_line_y(sf, y, look.row_h, look.status.px, look.status.leading);
             sf.text(
+                look.status.face,
                 look.status.px,
                 right,
                 sy,
@@ -432,8 +433,11 @@ pub fn list<S: Surface, M: RowModel>(
             None => look.row_h,
         };
         let ly = paint::center_line_y(sf, y, text_h, look.label.px, look.label.leading);
-        let shown = paint::fit_end(sf, look.label.px, &buf.label, label_w, look.label.track);
+        let shown = paint::fit_end(
+            sf, look.label.face, look.label.px, &buf.label, label_w, look.label.track,
+        );
         sf.text(
+            look.label.face,
             look.label.px,
             x,
             ly,

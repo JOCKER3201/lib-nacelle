@@ -72,6 +72,19 @@ pub struct RoleLook {
     pub track: f32,
     /// Line height as a multiple of `px`.
     pub leading: f32,
+    /// Whether this role sets its figures on a fixed advance (§5.16's
+    /// `tabular`). Carried as the ROLE's bool and handed to
+    /// [`Surface::text_tab`], which measures the box from the face —
+    /// this side of the library owns tokens, not faces.
+    pub tabular: bool,
+    /// The slot `type.<role>.face` names — the family AND the weight this
+    /// role is set in, since the master declares both on the face block.
+    ///
+    /// This field is why the struct exists in the shape it does: a look
+    /// read once per draw is only worth having if it carries everything
+    /// the row loop needs, and the row loop was writing `FONT_UI` because
+    /// the face was the one thing it could not get from here.
+    pub face: u8,
     /// The role's own ink: `fg` at its constant alpha.
     pub color: Color,
 }
@@ -86,8 +99,17 @@ pub struct RoleLook {
 /// [`crate::ui::role`] makes for the objects that draw against `Ctx`,
 /// made once more here because this is the resolver every view, every
 /// script table and the whole ABI side goes through.
-pub const NO_ROLE: RoleLook =
-    RoleLook { px: 0.0, track: 0.0, leading: 0.0, color: Color::TRANSPARENT };
+pub const NO_ROLE: RoleLook = RoleLook {
+    px: 0.0,
+    track: 0.0,
+    leading: 0.0,
+    tabular: false,
+    // The interface slot, which is where an undesigned run has always
+    // landed. Nothing is drawn in this look anyway — px is zero — so the
+    // face is the one field here that cannot decide anything.
+    face: crate::font::FONT_UI,
+    color: Color::TRANSPARENT,
+};
 
 /// Resolves a type role by name. A name no `type.*` block declares warns
 /// once and answers [`NO_ROLE`]: naming a role the theme does not have is
@@ -125,10 +147,17 @@ pub fn role_look(sf: &mut impl Surface, name: &str, shrink: f32) -> RoleLook {
     // line height is a broken role, and the height of a broken role is
     // not this file's to invent.
     let leading = sf.px(&format!("type.{name}.leading"));
+    // §5.16's `tabular`, read here so that every view, every script table
+    // and the whole ABI side gets it from ONE resolver.
+    let tabular = sf.flag(&format!("type.{name}.tabular"));
+    // §5.16's `face`, read through the same one resolver and by the same
+    // word→slot rule `ui::Role::font` uses. Reading it here is what stops
+    // a view and an object disagreeing about which family one role is in.
+    let face = crate::font::face_slot(&sf.word(&format!("type.{name}.face")));
     let mut color = sf.color(&format!("type.{name}.fg"));
     let alpha = sf.px(&format!("type.{name}.alpha"));
     color.a *= if alpha > 0.0 { alpha.min(1.0) } else { 1.0 };
-    RoleLook { px, track, leading, color }
+    RoleLook { px, track, leading, tabular, face, color }
 }
 
 /// The role a `*_role` binding token names — `script.table_head_role`,
@@ -210,15 +239,38 @@ pub fn corner_radius(sf: &mut impl Surface, name: &str, r: Rect, shrink: f32) ->
 ///
 /// Measuring at a different tracking is how a content-measured table
 /// column came to ellipsise the very cell it was sized from.
-pub fn fit_end(sf: &mut impl Surface, px: f32, text: &str, max_w: f32, track: f32) -> String {
-    if sf.measure(px, text, track) <= max_w {
+pub fn fit_end(
+    sf: &mut impl Surface,
+    face: u8,
+    px: f32,
+    text: &str,
+    max_w: f32,
+    track: f32,
+) -> String {
+    fit_end_tab(sf, face, px, text, max_w, track, false)
+}
+
+/// [`fit_end`] measured under the role's figure box. The same rule one
+/// rung further: a tabular column trimmed against proportional widths
+/// ellipsises a cell that fits, because every figure it holds is drawn
+/// wider than it was measured.
+pub fn fit_end_tab(
+    sf: &mut impl Surface,
+    face: u8,
+    px: f32,
+    text: &str,
+    max_w: f32,
+    track: f32,
+    tabular: bool,
+) -> String {
+    if sf.measure_tab(face, px, text, track, tabular) <= max_w {
         return text.to_string();
     }
     let chars: Vec<char> = text.chars().collect();
     let mut n = chars.len().saturating_sub(1);
     while n > 1 {
         let cand: String = chars[..n].iter().collect::<String>() + "\u{2026}";
-        if sf.measure(px, &cand, track) <= max_w {
+        if sf.measure_tab(face, px, &cand, track, tabular) <= max_w {
             return cand;
         }
         n -= 1;
@@ -260,7 +312,14 @@ pub fn explain_trim(sf: &mut impl Surface, id: u64, anchor: Rect, shown: &str, f
 /// text are kept; an empty `max_w` (or one narrower than a character)
 /// answers one line per source line, unbroken, so a nonsense width
 /// degrades to "no wrapping" instead of to an endless loop.
-pub fn wrap(sf: &mut impl Surface, px: f32, text: &str, max_w: f32, track: f32) -> Vec<String> {
+pub fn wrap(
+    sf: &mut impl Surface,
+    face: u8,
+    px: f32,
+    text: &str,
+    max_w: f32,
+    track: f32,
+) -> Vec<String> {
     let mut out = Vec::new();
     for para in text.split('\n') {
         if max_w <= 0.0 {
@@ -274,7 +333,7 @@ pub fn wrap(sf: &mut impl Surface, px: f32, text: &str, max_w: f32, track: f32) 
             } else {
                 format!("{line} {word}")
             };
-            if sf.measure(px, &cand, track) <= max_w {
+            if sf.measure(face, px, &cand, track) <= max_w {
                 line = cand;
                 continue;
             }
@@ -283,7 +342,7 @@ pub fn wrap(sf: &mut impl Surface, px: f32, text: &str, max_w: f32, track: f32) 
             }
             // The word alone on its line: kept whole when it fits,
             // broken by characters when nothing else can be done.
-            if sf.measure(px, word, track) <= max_w {
+            if sf.measure(face, px, word, track) <= max_w {
                 line = word.to_string();
                 continue;
             }
@@ -291,7 +350,7 @@ pub fn wrap(sf: &mut impl Surface, px: f32, text: &str, max_w: f32, track: f32) 
             for ch in word.chars() {
                 let mut cand = piece.clone();
                 cand.push(ch);
-                if !piece.is_empty() && sf.measure(px, &cand, track) > max_w {
+                if !piece.is_empty() && sf.measure(face, px, &cand, track) > max_w {
                     out.push(std::mem::take(&mut piece));
                     piece.push(ch);
                 } else {
@@ -323,17 +382,39 @@ pub fn cell_text(
     y: f32,
     w: f32,
     align: Align,
+    face: u8,
     px: f32,
     text: &str,
     color: Color,
     track: f32,
+) {
+    cell_text_tab(sf, x, y, w, align, face, px, text, color, track, false);
+}
+
+/// [`cell_text`] under the role's figure box — the form a numeric column
+/// takes. `PID 1471` and `PID 1888` then occupy the same width, which is
+/// the difference between a column that stands still and one that moves
+/// a pixel or two every time a process is replaced.
+#[allow(clippy::too_many_arguments)]
+pub fn cell_text_tab(
+    sf: &mut impl Surface,
+    x: f32,
+    y: f32,
+    w: f32,
+    align: Align,
+    face: u8,
+    px: f32,
+    text: &str,
+    color: Color,
+    track: f32,
+    tabular: bool,
 ) {
     let tx = match align {
         Align::Left => x,
         Align::Center => x + w / 2.0,
         Align::Right => x + w,
     };
-    sf.text(px, tx, y, text, color, track, align);
+    sf.text_tab(face, px, tx, y, text, color, track, align, tabular);
 }
 
 /// The number at the front of a formatted cell (`"41.2%"` → 41.2), for a
@@ -397,7 +478,7 @@ pub fn badge(
     shrink: f32,
 ) -> f32 {
     let role = bound_role(sf, "script.badge_role", shrink);
-    let tw = sf.measure(role.px, text, role.track);
+    let tw = sf.measure_tab(role.face, role.px, text, role.track, role.tabular);
     let pad = sf.px("badge.pad_x") * shrink;
     // No floor under either: a `.max(1.0)` here is a one-pixel badge
     // nobody's theme asked for. `badge.h = 0` means the master wants no
@@ -449,7 +530,10 @@ pub fn badge(
         sf.ring(pill, cut, radius, bw, edge);
     }
     let ty = center_line_y(sf, y, h, role.px, role.leading);
-    sf.text(role.px, x + w / 2.0, ty, text, ink, role.track, Align::Center);
+    sf.text_tab(
+        role.face, role.px, x + w / 2.0, ty, text, ink, role.track, Align::Center,
+        role.tabular,
+    );
     w
 }
 
@@ -591,6 +675,7 @@ pub fn scrollbar(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::font::FONT_UI;
 
     /// A surface that only measures: half an em a character, which is
     /// wrong about fonts and right about monotonicity — all the breaking
@@ -602,8 +687,8 @@ pub(crate) mod tests {
         fn rect_outline(&mut self, _r: Rect, _w: f32, _c: Color) {}
         fn line(&mut self, _x0: f32, _y0: f32, _x1: f32, _y1: f32, _w: f32, _c: Color) {}
         fn polyline(&mut self, _p: &[[f32; 2]], _w: f32, _c: Color, _closed: bool) {}
-        fn text(&mut self, _px: f32, _x: f32, _y: f32, _s: &str, _c: Color, _t: f32, _a: Align) {}
-        fn measure(&mut self, px: f32, s: &str, _track: f32) -> f32 {
+        fn text(&mut self, _face: u8, _px: f32, _x: f32, _y: f32, _s: &str, _c: Color, _t: f32, _a: Align) {}
+        fn measure(&mut self, _face: u8, px: f32, s: &str, _track: f32) -> f32 {
             s.chars().count() as f32 * px * 0.5
         }
         fn clip(&mut self, _r: Rect) -> bool {
@@ -650,33 +735,33 @@ pub(crate) mod tests {
     #[test]
     fn text_that_fits_is_one_line_and_keeps_its_spacing_rules() {
         // 10 characters at 10 px = 50 px wide.
-        assert_eq!(wrap(&mut Ruler, 10.0, "abcdefghij", 50.0, 0.0), ["abcdefghij"]);
-        assert_eq!(wrap(&mut Ruler, 10.0, "", 50.0, 0.0), [""]);
+        assert_eq!(wrap(&mut Ruler, FONT_UI, 10.0, "abcdefghij", 50.0, 0.0), ["abcdefghij"]);
+        assert_eq!(wrap(&mut Ruler, FONT_UI, 10.0, "", 50.0, 0.0), [""]);
     }
 
     #[test]
     fn a_line_breaks_at_the_last_word_that_fits() {
         // At 10 px a character is 5 px wide: 35 px holds "one two".
-        assert_eq!(wrap(&mut Ruler, 10.0, "one two three", 35.0, 0.0), ["one two", "three"]);
+        assert_eq!(wrap(&mut Ruler, FONT_UI, 10.0, "one two three", 35.0, 0.0), ["one two", "three"]);
         // 30 px does not, so every word gets its own line.
         assert_eq!(
-            wrap(&mut Ruler, 10.0, "one two three", 30.0, 0.0),
+            wrap(&mut Ruler, FONT_UI, 10.0, "one two three", 30.0, 0.0),
             ["one", "two", "three"]
         );
     }
 
     #[test]
     fn a_word_wider_than_the_box_is_broken_rather_than_left_hanging() {
-        assert_eq!(wrap(&mut Ruler, 10.0, "abcdefghij", 25.0, 0.0), ["abcde", "fghij"]);
+        assert_eq!(wrap(&mut Ruler, FONT_UI, 10.0, "abcdefghij", 25.0, 0.0), ["abcde", "fghij"]);
         // A short word before it still gets its own line first.
-        assert_eq!(wrap(&mut Ruler, 10.0, "x abcdef", 25.0, 0.0), ["x", "abcde", "f"]);
+        assert_eq!(wrap(&mut Ruler, FONT_UI, 10.0, "x abcdef", 25.0, 0.0), ["x", "abcde", "f"]);
     }
 
     #[test]
     fn explicit_newlines_are_kept_and_a_nonsense_width_stops_wrapping() {
-        assert_eq!(wrap(&mut Ruler, 10.0, "one\ntwo", 500.0, 0.0), ["one", "two"]);
+        assert_eq!(wrap(&mut Ruler, FONT_UI, 10.0, "one\ntwo", 500.0, 0.0), ["one", "two"]);
         // Zero width would otherwise break every character forever.
-        assert_eq!(wrap(&mut Ruler, 10.0, "one two", 0.0, 0.0), ["one two"]);
+        assert_eq!(wrap(&mut Ruler, FONT_UI, 10.0, "one two", 0.0, 0.0), ["one two"]);
     }
 
     #[test]
