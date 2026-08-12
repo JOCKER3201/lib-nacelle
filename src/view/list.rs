@@ -379,6 +379,8 @@ pub fn list<S: Surface, M: RowModel>(
                     y,
                     look.disclosure,
                     look.row_h,
+                    // A tree row, so the tree's grammar: `▷` closed.
+                    paint::Disclosure::Tree,
                     buf.expanded,
                     look.label.color,
                 );

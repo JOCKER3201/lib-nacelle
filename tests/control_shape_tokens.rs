@@ -232,7 +232,7 @@ fn every_shape_token_the_audit_found_unread_now_moves_the_picture() {
     // The same binding menu.rs reads, on the rows menu.rs would draw.
     let names = vec!["ALPHA".to_string(), "BETA".to_string()];
     let list = |c: &mut Ctx| {
-        dropdown::accordion(c, ROW, 30.0, &names, 1.0);
+        dropdown::accordion(c, ROW, 30.0, &names, 1.0, &dropdown::AccordionStyle::default());
     };
     let (rows_body, rows_caption) = pair(
         &mut fonts,
@@ -249,7 +249,7 @@ fn every_shape_token_the_audit_found_unread_now_moves_the_picture() {
     let rects = |fonts: &mut FontSystem| {
         let mut dl = DrawList::new();
         let mut c = ctx(&mut dl, fonts);
-        dropdown::accordion(&mut c, narrow, 30.0, &names, 1.0)
+        dropdown::accordion(&mut c, narrow, 30.0, &names, 1.0, &dropdown::AccordionStyle::default())
     };
     skin("[menu]\nanchor_width = anchor\n");
     let skew = theme::resolved().px(theme::id("button.skew").expect("[button] declares skew"));

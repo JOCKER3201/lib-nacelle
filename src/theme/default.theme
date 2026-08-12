@@ -115,9 +115,13 @@ unit_min_px   = 4px
 unit_max_px   = 10px
                     # the 4K defence: unclamped 4K is the 1080p interface at 2x · - · device px, 4 .. 64 · companion ceiling of unit_pct_h (3.2)
 ui_scale      = 1.0
+                    # the user's UIFontSize= / 100, applied after the clamp · - · f, 0.5 .. 3.0 · no derivation — a user setting, not a theme one
+                    # The host overwrites it per frame (theme::set_viewport), so 1.0 here is the value for a host that never says:
+                    # the interface at the size the file was authored at. Because u is the root of every length, this one number is
+                    # how the setting reaches type, gaps, row heights and control sizes alike — there is no second route, and a
+                    # consumer that multiplies a token by the setting as well applies it twice.
 ramp_span     = 0.62
                     # how far the top rung of a `ramp()` ladder stands from the bottom, in OKLCh lightness · 2, 3, 8, 9 · f, 0.0 .. 1.0 · the spacing every data series and every chart ladder is built on; an author states the number of rungs and which rung a series sits on, and this is the third number that decides what they look like
-                    # the user's UIFontSize= / 100, applied after the clamp · - · f, 0.5 .. 3.0 · no derivation — a user setting, not a theme one
 density       = compact
                     # spacing/type multiplier level · 1 (compact), 6 (airy), 7 (comfortable), 8 (dense), 9 (instrument) ·
                     # one of airy | comfortable | compact | dense | instrument · GENERATES both floats below:
@@ -4299,7 +4303,7 @@ pad = 0.35x @menu.row_h             # padding inside the menu box · - · rat of
 min_w = 7.0x @titlebar.h            # minimum menu width · - · rat of @titlebar.h · 196.6 px
 corner = 0.5x @winframe.corner      # menu corner radius · - · rat of @winframe.corner · 5.9 px
 corner_mode = @winframe.corner_mode # how that radius is cut · - · enum: round | chamfer · @winframe.corner_mode; the window menu and the context menu are ONE object drawn twice, so the cut is decided once, where the radius already is
-border = @stroke.hair               # the menu's ring · - · str · @stroke.hair
+border = @stroke.hair               # the ring around the menu BOX · - · str · @stroke.hair; a ROW's ring is not this: a row is an instance of the menu.item class, whose ladder states an edge_width per rung (5.27), and the drop-down used to borrow this key for it — which pinned every row to one width and left the selected rung's thicker ring unreachable
 # TODO(default): 5.25 spells this `menu`, but `menu` is not one of 5.16's
 # 20 named type roles and 5.25 itself glosses it "(→ body)". Written as the
 # role that exists; if a `menu` role is added to 5.16, change this line.
@@ -5356,6 +5360,15 @@ image.render.tint_strength = 1.0    # a wireframe IS a drawing, so it is fully t
 # sort (F2 §2.1): the heading is a control now, and `selected` is the
 # SORTED column. A table that was never told it is interactive never asks
 # for those rungs, which is why the master's own tables look untouched.
+#
+# menu.item's `selected` is the row ALREADY IN FORCE in an open
+# drop-down — the theme now applied, the layout now loaded. The rung was
+# in this table from the start and nothing stood on it, and once the
+# anchor was ruled to wear the list's own name rather than the choice,
+# that silence left the standing choice unstated everywhere in the
+# window. Three channels carry it: the wash, the edge, and edge_width,
+# which is the one that survives a palette whose washes sit close
+# together.
 #
 # Two gaps the inventory exposed, which this table closes: slider.rs has no
 # hover, no drag and no disabled — a dragging slider looks identical to an

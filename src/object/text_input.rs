@@ -904,10 +904,12 @@ pub fn draw(
     // ---- type metrics -----------------------------------------------
     // The bound role (`field.role`, an open word set). Role::px carries
     // the theme's size and the panel's container query; the user's
-    // UIFontSize= multiplies through the shrink slot, exactly the
-    // object-layer arithmetic (button.rs).
+    // UIFontSize= does NOT go through the shrink slot — it is
+    // `metric.ui_scale`, the bake already applied it, and a second
+    // multiply squares it. The same arithmetic as every other object
+    // (button.rs).
     let role = ui::bound_role(&ROLE, "field.role");
-    let px = role.px(ctx, ctx.ui_font_scale);
+    let px = role.px(ctx, 1.0);
     let track = role.tracking_px(px);
     let leading = role.leading();
     let line_h = px * leading;
@@ -1114,7 +1116,8 @@ pub fn hit(ctx: &mut Ctx, r: Rect, model: &InputModel, x: f32) -> usize {
     static ROLE: OnceLock<TokenId> = OnceLock::new();
     let t = theme::resolved();
     let role = ui::bound_role(&ROLE, "field.role");
-    let px = role.px(ctx, ctx.ui_font_scale);
+    // The measuring twin of the draw above, so the same 1.0.
+    let px = role.px(ctx, 1.0);
     let track = role.tracking_px(px);
     let pad = t.px(tok(&PAD_X, "field.pad_x")).max(0.0);
     let pos = x - (r.x + pad) + model.scroll_px;

@@ -204,8 +204,10 @@ impl Toaster {
         // ---- metrics ----------------------------------------------------
         let title_role = ui::bound_role(&TITLE_ROLE, "toast.title.role");
         let body_role = ui::bound_role(&BODY_ROLE, "toast.body.role");
-        let px = body_role.px(ctx, ctx.ui_font_scale);
-        let title_px = title_role.px(ctx, ctx.ui_font_scale);
+        // No `ui_font_scale`: the viewport carries the user's scale into u,
+        // and the role's size is written in u — applying it here too squares it.
+        let px = body_role.px(ctx, 1.0);
+        let title_px = title_role.px(ctx, 1.0);
         let track = body_role.tracking_px(px);
         let title_track = title_role.tracking_px(title_px);
         let pad_x = t.px(tok(&PAD_X, "toast.pad_x"));

@@ -685,7 +685,9 @@ impl Frame {
         // one object drawn twice, so a theme that repoints the role must
         // move both or the same list is two lists.
         let role = ui::bound_role(&ITEM_ROLE, "menu.item.role");
-        let ipx = role.px(ctx, ctx.ui_font_scale);
+        // No `ui_font_scale`: the viewport carries the user's scale into u,
+        // and the role's size is written in u — applying it here too squares it.
+        let ipx = role.px(ctx, 1.0);
         let spacing = role.tracking_px(ipx);
         let leading = role.leading();
         let inset = t.px(tok(&ITEM_INSET, "menu.item_inset")).max(0.0);

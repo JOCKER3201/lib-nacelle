@@ -98,11 +98,14 @@ impl StripState {
 /// from the theme inside it.
 #[derive(Clone, Copy, Debug)]
 pub struct StripStyle {
-    /// The interface font-size setting (`Ctx::ui_font_scale`). It
-    /// multiplies the LABEL and nothing else, exactly as it does in
-    /// `object::button`: a strip's own metrics belong to the theme, and
-    /// a text setting may not move them. A label that no longer fits is
+    /// A shrink on the LABEL and nothing else, exactly as in
+    /// `object::button`: a strip's own metrics belong to the theme, and a
+    /// text factor may not move them. A label that no longer fits is
     /// trimmed, which is what the fit floor is for.
+    ///
+    /// NOT the interface font-size setting. That one is `metric.ui_scale`
+    /// and is already inside every baked size; a caller that passed
+    /// `Ctx::ui_font_scale` here would apply it twice.
     pub text_scale: f32,
 }
 
@@ -401,7 +404,10 @@ pub fn strip<S: Surface>(
 /// is the short form for the common case, where the returned cells are
 /// all the caller needs.
 pub fn draw(ctx: &mut Ctx, r: Rect, labels: &[&str], st: &StripState) -> Vec<Rect> {
-    let style = StripStyle { text_scale: ctx.ui_font_scale };
+    // `text_scale` is the strip's own shrink, not the user's interface
+    // scale: that one rides in `metric.ui_scale` and is already in every
+    // baked size. Feeding it here as well drew 125 % at 156 %.
+    let style = StripStyle::default();
     strip(&mut CtxSurface::new(ctx), r, labels, st, &style, None)
 }
 

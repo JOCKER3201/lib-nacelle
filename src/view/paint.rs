@@ -481,8 +481,34 @@ pub fn sort_marker(
     sf.polyline(&pts, hair, color, true);
 }
 
-/// The expander beside a tree row: a triangle pointing right when the
-/// node is closed and down when it is open.
+/// Which GRAMMAR a [`disclosure`] triangle is drawn in.
+///
+/// The two consumers draw the same three points and mean opposite things
+/// by them, and that is the whole of the difference — so this is one
+/// primitive with a parameter and not two triangles. Two copies would
+/// let a theme's hairline, its centring rule and its winding drift apart
+/// for no reason, and the caller would still have to choose between
+/// them: the choice does not go away, it only stops being named.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Disclosure {
+    /// A node in a TREE. Closed points along the row — "there is more
+    /// inside this" — and open points down at the children it just
+    /// revealed. Every file tree ever drawn reads this way and nothing
+    /// here changes it.
+    Tree,
+    /// The caret on a DROP-DOWN's anchor. Closed points DOWN, at the
+    /// direction the list will unfold, because a caret announces where
+    /// the list goes and not the fact that it is currently shut — GTK,
+    /// Qt and HTML's `select` all agree, and a `▷` here reads as "go
+    /// into this row", which is the tree's sentence and not this one's.
+    /// Open points back up, at the edge the list folds into.
+    Drop,
+}
+
+/// The triangle that says a thing opens: the expander beside a tree row,
+/// the caret on a drop-down's anchor. `kind` picks which of the two
+/// sentences the shape is speaking ([`Disclosure`]); `expanded` is the
+/// thing's own state.
 ///
 /// The state turns the GLYPH, not its colour: rotation is geometry, and
 /// geometry is the one thing a theme does not have to say twice.
@@ -492,6 +518,7 @@ pub fn disclosure(
     y: f32,
     size: f32,
     line_px: f32,
+    kind: Disclosure,
     expanded: bool,
     color: Color,
 ) {
@@ -500,10 +527,16 @@ pub fn disclosure(
     }
     let top = y + (line_px - size).max(0.0) / 2.0;
     let half = size / 2.0;
-    let pts = if expanded {
-        [[x, top], [x + size, top], [x + half, top + size]]
-    } else {
-        [[x, top], [x + size, top + half], [x, top + size]]
+    // Named once and used by both grammars, so "down" is one shape in
+    // this file and cannot end up two slightly different ones.
+    let down = [[x, top], [x + size, top], [x + half, top + size]];
+    let pts = match (kind, expanded) {
+        // Along the row, toward what opening would reveal.
+        (Disclosure::Tree, false) => [[x, top], [x + size, top + half], [x, top + size]],
+        (Disclosure::Tree, true) => down,
+        (Disclosure::Drop, false) => down,
+        // Back at the anchor the open list folds into.
+        (Disclosure::Drop, true) => [[x + half, top], [x + size, top + size], [x, top + size]],
     };
     let hair = sf.px("stroke.hair");
     sf.polyline(&pts, hair, color, true);
@@ -949,6 +982,72 @@ pub(crate) mod tests {
             !crate::ui::theme_word(id("progress.corner_style")).is_empty(),
             "a radius with no cut is the same silence one step along"
         );
+    }
+
+    // ---- the triangle that says a thing opens ----
+
+    /// The one triangle `disclosure` drew, as its three points.
+    fn triangle(kind: Disclosure, expanded: bool) -> Vec<[f32; 2]> {
+        let mut sf = FakeSurface::new();
+        // A 10 px glyph in a 10 px line box: the box drops out of the
+        // arithmetic, so what is left is the shape and only the shape.
+        disclosure(&mut sf, 0.0, 0.0, 10.0, 10.0, kind, expanded, Color::TRANSPARENT);
+        assert_eq!(sf.polylines.len(), 1, "a disclosure is one closed outline");
+        sf.polylines.remove(0)
+    }
+
+    /// Where a three-point triangle points, read off its own geometry:
+    /// the apex is the corner that shares no coordinate with the other
+    /// two, and the direction is where it sits relative to them.
+    fn points(pts: &[[f32; 2]]) -> &'static str {
+        assert_eq!(pts.len(), 3);
+        let same = |a: f32, b: f32| (a - b).abs() < 0.01;
+        // The apex stands alone on both axes; the other two hold the
+        // edge it points away from.
+        let apex = *pts
+            .iter()
+            .find(|p| {
+                pts.iter().filter(|q| same(q[0], p[0])).count() == 1
+                    && pts.iter().filter(|q| same(q[1], p[1])).count() == 1
+            })
+            .expect("a triangle with no apex is not one of ours");
+        let base: Vec<[f32; 2]> = pts.iter().copied().filter(|p| *p != apex).collect();
+        if same(base[0][0], base[1][0]) {
+            "right"
+        } else if apex[1] > base[0][1] {
+            "down"
+        } else {
+            "up"
+        }
+    }
+
+    /// The two grammars, which are the whole reason the parameter
+    /// exists. A tree says "there is more inside this row" and points
+    /// ALONG it when shut; a drop-down's caret says "the list comes out
+    /// downwards" and points DOWN when shut — the convention GTK, Qt and
+    /// `select` share. Drawing a tree's `▷` on a list anchor tells the
+    /// user to walk into the row, which is a different offer entirely.
+    #[test]
+    fn a_caret_points_where_its_own_convention_says_and_not_where_a_trees_does() {
+        assert_eq!(points(&triangle(Disclosure::Tree, false)), "right");
+        assert_eq!(points(&triangle(Disclosure::Tree, true)), "down");
+        assert_eq!(points(&triangle(Disclosure::Drop, false)), "down");
+        assert_eq!(points(&triangle(Disclosure::Drop, true)), "up");
+        // Open and shut are different SHAPES in both grammars — the
+        // state turns the glyph, and a caret that never turned would
+        // leave the open list unannounced.
+        assert_ne!(triangle(Disclosure::Tree, false), triangle(Disclosure::Tree, true));
+        assert_ne!(triangle(Disclosure::Drop, false), triangle(Disclosure::Drop, true));
+        // The shut drop and the open tree are the same "down" arrow, and
+        // that is the point of one primitive: there is exactly one of it.
+        assert_eq!(triangle(Disclosure::Drop, false), triangle(Disclosure::Tree, true));
+    }
+
+    #[test]
+    fn a_disclosure_with_no_box_to_draw_in_draws_nothing() {
+        let mut sf = FakeSurface::new();
+        disclosure(&mut sf, 0.0, 0.0, 0.0, 10.0, Disclosure::Drop, false, Color::TRANSPARENT);
+        assert!(sf.polylines.is_empty(), "a glyph the theme sized to nothing is not drawn");
     }
 
     // ---- the rule every trimmed label follows ----

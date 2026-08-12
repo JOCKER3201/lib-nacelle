@@ -35,9 +35,16 @@ fn col(c: theme::ThemeColor) -> Color {
 
 // ------------------------------------------------------- the legacy draw
 
-/// `popup.rs`'s own type-role helper, kept exactly as it was: the theme's
-/// px times the user's font preference times the panel's, floored by the
-/// ROLE's own `min_px`.
+/// `popup.rs`'s own type-role helper: the theme's px times the panel's
+/// container query, floored by the ROLE's own `min_px`.
+///
+/// It used to multiply by `Ctx::ui_font_scale` as well, because popup.rs
+/// did. That was the double-apply — the user's setting is already inside
+/// every baked size as `metric.ui_scale` — and the toaster no longer
+/// does it. The mirror follows, so the two state ONE rule: at the 1.0
+/// this binary runs at the numbers agree either way, which is exactly
+/// why a stale mirror would sit here silently until someone set the
+/// scale and got a failure that blamed the wrong side.
 struct Role {
     name: &'static str,
     size: OnceLock<TokenId>,
@@ -57,7 +64,7 @@ impl Role {
         let m = *self.min.get_or_init(|| {
             theme::id(&format!("type.{}.min_px", self.name)).unwrap_or(TokenId::MISSING)
         });
-        (t.px(s) * ctx.ui_font_scale * ctx.panel_scale).max(t.px(m))
+        (t.px(s) * ctx.panel_scale).max(t.px(m))
     }
     fn tracking(&self, px: f32) -> f32 {
         let t = theme::resolved();
