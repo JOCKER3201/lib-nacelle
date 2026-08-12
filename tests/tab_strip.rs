@@ -158,7 +158,7 @@ fn tabs_are_measured_from_their_labels_and_laid_from_the_left() {
 }
 
 #[test]
-fn every_tab_is_a_sheared_plate_and_the_rule_runs_under_the_whole_strip() {
+fn every_tab_is_a_plate_and_the_rule_runs_under_the_whole_strip() {
     let mut sf = Probe::default();
     let cells = tabs::strip(
         &mut sf,
@@ -168,12 +168,20 @@ fn every_tab_is_a_sheared_plate_and_the_rule_runs_under_the_whole_strip() {
         &tabs::StripStyle::default(),
         None,
     );
+    // The master shears nothing: a tab wears the FRAMES' corners, so its
+    // plate is the ring every other control is drawn with and the strip
+    // asks for no quad at all. A theme that gives `tab.skew` a width
+    // again takes the other branch, which is why the shape is read from
+    // the token rather than assumed.
     let skew = px("tab.skew");
-    assert!(skew > 0.0);
-    assert_eq!(sf.quads.len(), 2, "one plate a tab");
-    let (q, _) = sf.quads[0];
-    assert_eq!(q[0], [cells[0].x + skew, cells[0].y], "the top edge leans right");
-    assert_eq!(q[3], [cells[0].x, cells[0].bottom()]);
+    assert_eq!(skew, 0.0, "the master's strip is not sheared");
+    assert!(sf.quads.is_empty(), "no shear, no quad");
+    // The plate lands on the tab's own rectangle. `Probe` has no ring,
+    // so the ring degrades to the rect it bounds — which is the shape
+    // itself once the corners are taken away.
+    let plate = sf.rects.iter().find(|(r, _)| r.x == cells[0].x && r.y == cells[0].y);
+    let (r, _) = plate.expect("the showing tab is filled");
+    assert!((r.w - cells[0].w).abs() < 0.01 && (r.h - cells[0].h).abs() < 0.01);
     // The rule spans the tabs that were drawn, at `tab.rule_gap` under
     // them — exactly where the shell's own strip puts it.
     let rule = sf
@@ -199,11 +207,21 @@ fn the_showing_tab_wears_the_selected_rung_and_its_underline() {
         None,
     );
     // Every plate's fill is the rung the state says, straight from the
-    // `tab` ladder: hover, selected, idle.
+    // `tab` ladder: hover, selected, idle. A rung whose fill is
+    // transparent draws nothing at all — the strip does not paint the
+    // absence of a colour — so the ladder decides what to look for.
     for (i, want) in [State::Hover, State::Selected, State::Idle].iter().enumerate() {
-        let got = sf.quads[i].1;
         let ink = ladder("tab", *want).fill;
-        assert_eq!((got.r, got.g, got.b, got.a), (ink.r, ink.g, ink.b, ink.a), "tab {i}");
+        let plate = sf.rects.iter().find(|(r, _)| (r.x - cells[i].x).abs() < 0.01);
+        match (ink.a > 0.0, plate) {
+            (true, Some((_, got))) => assert_eq!(
+                (got.r, got.g, got.b, got.a),
+                (ink.r, ink.g, ink.b, ink.a),
+                "tab {i}"
+            ),
+            (true, None) => panic!("tab {i} stands on {want:?} and was not filled"),
+            (false, p) => assert!(p.is_none(), "tab {i} painted a transparent rung"),
+        }
     }
     // Exactly one underline, on the showing tab, inside its own plate.
     let uw = px("tab.underline_active");

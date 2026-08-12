@@ -128,6 +128,29 @@ pub fn fit_end(sf: &mut impl Surface, px: f32, text: &str, max_w: f32, track: f3
     "\u{2026}".to_string()
 }
 
+/// The tooltip a TRIMMED label files (F2 §8.1): `shown` is what reached
+/// the screen, `full` is what there was, and the difference between them
+/// is the whole reason to say anything.
+///
+/// Nothing happens when the two are equal — a tooltip repeating what is
+/// already legible is noise — and nothing happens when the pointer is
+/// somewhere else, which is checked HERE so the string comparison is the
+/// only work a row the pointer is nowhere near ever does.
+///
+/// One sentence, one place. A tab, a segment, a table heading and a
+/// table cell each wrote it out, and the list was about to be the fifth;
+/// the rule they were all writing is this function.
+pub fn explain_trim(sf: &mut impl Surface, id: u64, anchor: Rect, shown: &str, full: &str) {
+    if shown == full {
+        return;
+    }
+    let (mx, my) = sf.mouse();
+    if !anchor.contains(mx, my) {
+        return;
+    }
+    sf.tooltip(id, anchor, full);
+}
+
 /// Breaks text into lines no wider than `max_w`, measured at the SAME
 /// letter tracking the caller draws with.
 ///
@@ -520,5 +543,58 @@ mod tests {
         assert_eq!(leading_number("firefox"), None);
         assert_eq!(leading_number(""), None);
         assert_eq!(leading_number("..."), None);
+    }
+
+    // ---- the rule every trimmed label follows ----
+
+    use crate::view::surface::tests::FakeSurface;
+
+    const FULL: &str = "org.freedesktop.NetworkManager";
+    const CUT: &str = "org.freedesk\u{2026}";
+
+    fn anchor() -> Rect {
+        Rect::new(10.0, 10.0, 100.0, 20.0)
+    }
+
+    #[test]
+    fn a_label_the_ellipsis_cut_short_asks_for_the_whole_of_itself() {
+        let mut sf = FakeSurface::new().at(20.0, 15.0);
+        explain_trim(&mut sf, 7, anchor(), CUT, FULL);
+        assert_eq!(sf.tips.len(), 1);
+        let (id, r, text) = &sf.tips[0];
+        assert_eq!(*id, 7, "the caller's identity, untouched");
+        assert_eq!(text, FULL, "the whole of it — the stump is already on screen");
+        // The anchor comes back as it went in: the box is placed against
+        // what was pointed at, not against the pointer alone.
+        assert_eq!((r.x, r.y, r.w, r.h), (10.0, 10.0, 100.0, 20.0));
+    }
+
+    #[test]
+    fn a_label_that_arrived_whole_says_nothing() {
+        // The pointer is resting on it, and there is still nothing to
+        // add: a tooltip repeating what is already legible is noise.
+        let mut sf = FakeSurface::new().at(20.0, 15.0);
+        explain_trim(&mut sf, 7, anchor(), FULL, FULL);
+        assert!(sf.tips.is_empty());
+        // The empty label is the same case and not a special one.
+        explain_trim(&mut sf, 7, anchor(), "", "");
+        assert!(sf.tips.is_empty());
+    }
+
+    #[test]
+    fn a_trimmed_label_the_pointer_left_asks_for_nothing() {
+        // Off the anchor entirely: this is how a tooltip goes away —
+        // the frame files no request, and the manager disarms.
+        let mut sf = FakeSurface::new().at(200.0, 15.0);
+        explain_trim(&mut sf, 7, anchor(), CUT, FULL);
+        assert!(sf.tips.is_empty());
+        // The far edges are the containment rule's, not a second one:
+        // the top-left corner is inside, the bottom-right is not.
+        let mut on = FakeSurface::new().at(10.0, 10.0);
+        explain_trim(&mut on, 7, anchor(), CUT, FULL);
+        assert_eq!(on.tips.len(), 1);
+        let mut off = FakeSurface::new().at(110.0, 30.0);
+        explain_trim(&mut off, 7, anchor(), CUT, FULL);
+        assert!(off.tips.is_empty());
     }
 }

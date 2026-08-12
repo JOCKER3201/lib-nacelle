@@ -87,6 +87,35 @@ impl Panel {
         self.def().map(|d| d.category).unwrap_or_default()
     }
 
+    /// Which column of a generated composition the widget asked for.
+    pub fn slot(self) -> PanelSlot {
+        self.def().map(|d| d.slot).unwrap_or_default()
+    }
+
+    /// Where in its column the widget asked to sit; lower comes first.
+    pub fn order(self) -> f32 {
+        self.def().map(|d| d.order).unwrap_or(0.0)
+    }
+
+    /// How much of a shared column the widget asked for. A widget that
+    /// named no weight wants as much of the column as it is tall — the
+    /// only answer that needs nothing beyond what it already declared.
+    pub fn weight(self) -> f32 {
+        self.def()
+            .map(|d| d.weight.unwrap_or(d.ref_h_vh))
+            .unwrap_or(0.0)
+    }
+
+    /// Where the layout engine pins the widget, if anywhere.
+    pub fn anchor(self) -> PanelAnchor {
+        self.def().map(|d| d.anchor).unwrap_or_default()
+    }
+
+    /// Whether the widget declared itself impossible to switch off.
+    pub fn essential(self) -> bool {
+        self.def().map(|d| d.essential).unwrap_or(false)
+    }
+
     pub fn from_name(name: &str) -> Option<Panel> {
         registry()
             .iter()
@@ -130,10 +159,12 @@ impl Panel {
 
 }
 
-/// Which kind of board a widget can be placed on. The directory a
-/// widget is installed under decides: `widgets/board` for the ordinary
-/// boards, `widgets/appgrid` for APPGRID (the bottom fixture board),
-/// `widgets/search_and_ai` for SEARCH AND AI (the top one).
+/// Which kind of board a widget can be placed on. The widget itself
+/// declares it — a `category` line in its own metadata — because a
+/// launcher belongs on the APPGRID board wherever its file happens to
+/// live: `Board` for the ordinary boards, `Appgrid` for the bottom
+/// fixture board, `SearchAi` for the top one. Naming none, or naming
+/// one this version has never heard of, is a board widget.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum WidgetCategory {
     /// Home and the horizontal arms.
@@ -145,10 +176,52 @@ pub enum WidgetCategory {
     SearchAi,
 }
 
+/// Which column of a GENERATED composition a widget asks for.
+///
+/// A machine's board is whatever it has installed, so the arrangement
+/// the program falls back to has to be composed rather than written
+/// down. The three columns are the shape of that composition — two
+/// instrument sides and a wide work surface — and a widget names the
+/// one it belongs in exactly as it names its board. Naming none is the
+/// honest answer for most widgets: the composition drops them into the
+/// emptier side, so nothing an installation holds is left off the
+/// board.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PanelSlot {
+    #[default]
+    Auto,
+    Left,
+    Center,
+    Right,
+}
+
+/// Where the layout engine pins a panel, whatever column it was put in.
+///
+/// The engine has three pinned positions because the composition has
+/// three edges that mean something — the top and the bottom of the work
+/// surface, and the bar under everything — and a widget asks for one
+/// the same way it asks for a column. Nothing here is a widget's name:
+/// an installation with no terminal simply pins nothing to the top.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PanelAnchor {
+    /// Flows with the column it was put in.
+    #[default]
+    Flow,
+    /// Pinned to the top of the work column.
+    Top,
+    /// Pinned to the bottom of the work column.
+    Bottom,
+    /// Pinned to the bottom of the first column, and brought back as a
+    /// full-width bar at the bottom of the window when that column
+    /// collapses. Portrait gives it a band of its own.
+    Bar,
+}
+
 /// Everything the program knows about one widget. The widget itself is
-/// its file — `<name>.rhai` or `<name>.so` in its directory; what is
-/// kept here is only what the layout engine and the editor need to
-/// know about it before it draws.
+/// its file — `addons/scripts/<name>.rhai` or `addons/plugins/<name>.so`
+/// — and every field here is declared by that addon (see
+/// `widget::registry`); what is kept is only what the layout engine and
+/// the editor need to know about it before it draws.
 #[derive(Clone, Debug)]
 pub struct WidgetDef {
     /// Name used in .layaut files and as the directory name.
@@ -159,6 +232,19 @@ pub struct WidgetDef {
     pub min_h_vh: f32,
     /// Which kind of board this widget may be placed on.
     pub category: WidgetCategory,
+    /// Which column of a generated composition it asks for.
+    pub slot: PanelSlot,
+    /// Where in that column it asks to sit; lower comes first, and
+    /// widgets that ask for the same place keep registry order.
+    pub order: f32,
+    /// How much of a shared column it asks for. None = as much as it is
+    /// tall (`ref_h_vh`).
+    pub weight: Option<f32>,
+    /// Where the layout engine pins it, if anywhere.
+    pub anchor: PanelAnchor,
+    /// The widget declares that switching it off would leave the user
+    /// with no way back — the editor never offers to remove it.
+    pub essential: bool,
 }
 
 static REGISTRY: OnceLock<Vec<WidgetDef>> = OnceLock::new();
@@ -297,65 +383,18 @@ pub fn set_registry(defs: Vec<WidgetDef>) {
     let _ = REGISTRY.set(defs);
 }
 
-/// The widget registry. Falls back to the built-in set, so a missing or
-/// unreadable widgets directory can never leave the program with no
-/// widgets at all.
+/// The widget registry — whatever the embedder installed, and nothing
+/// else. There is no fallback set and no table of known names: a widget
+/// is an addon on disk (or a plugin crate linked into the program), so
+/// a machine with none installed has none, exactly as a machine with no
+/// theme installed draws like a page with no stylesheet. The embedder
+/// says so out loud; the toolkit does not invent widgets to hide it.
 pub fn registry() -> &'static [WidgetDef] {
-    REGISTRY.get_or_init(builtin_widgets)
+    REGISTRY.get_or_init(Vec::new)
 }
 
 pub fn panel_count() -> usize {
     registry().len()
-}
-
-/// The widget names the program knows: the last-resort registry when
-/// the widgets directory yields nothing, and the label/default-size
-/// table the directory scan uses for the shipped names. It is not a set
-/// of widgets — the widgets themselves are files on disk, installed
-/// from the widgets repository.
-pub fn builtin_widgets() -> Vec<WidgetDef> {
-    // (name, label, ref height vh, min height vh)
-    //
-    // hardware's reference was 5.5 and uptime's minimum 6.0; both sat on
-    // the 0.62 font-scale clamp (u2 §6.3 sanctions the raise). uptime's
-    // 7.0 minimum is what keeps the KERNEL row on machines that report
-    // one; the other ten are untouched — a layout that wants different
-    // boxes names its own sizes (flex.rs::builtin_sizes for the default).
-    const DEFS: [(&str, &str, f32, f32); 14] = [
-        ("clock", "CLOCK", 7.0, 5.0),
-        ("sysinfo", "SYSTEM INFO", 4.5, 4.5),
-        ("uptime", "UPTIME", 8.0, 7.0),
-        ("hardware", "HARDWARE", 6.5, 6.5),
-        ("cpu", "CPU", 15.5, 8.0),
-        ("memory", "MEMORY", 10.5, 8.0),
-        ("processes", "PROCESSES", 11.5, 6.0),
-        ("shell", "SHELL", 60.0, 10.0),
-        ("network", "NETWORK", 12.4, 8.0),
-        ("filesystem", "FILESYSTEM", 57.0, 8.0),
-        ("keyboard", "KEYBOARD", 32.5, 10.0),
-        ("control", "CONTROL", 22.0, 13.0),
-        // The two launcher widgets. Their home is the APPGRID fixture
-        // by name and by nature, and the category below sends them
-        // there: they are offered when that board is edited and
-        // nowhere else.
-        ("appgrid", "APPLICATIONS", 40.0, 10.0),
-        ("appcats", "CATEGORIES", 40.0, 12.0),
-    ];
-    DEFS.into_iter()
-        .map(|(name, label, ref_h, min_h)| WidgetDef {
-            name: name.to_string(),
-            label: label.to_string(),
-            ref_h_vh: ref_h,
-            min_h_vh: min_h,
-            // The category is the widget's own nature, not the
-            // directory it came from: a launcher belongs on the
-            // APPGRID board wherever its file happens to live.
-            category: match name {
-                "appgrid" | "appcats" => WidgetCategory::Appgrid,
-                _ => WidgetCategory::Board,
-            },
-        })
-        .collect()
 }
 
 /// A panel placed far outside the window = hidden.

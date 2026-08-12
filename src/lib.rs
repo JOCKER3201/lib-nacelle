@@ -7,8 +7,6 @@
 //!   atlas and colours.
 //! * [`base`] — geometry, the drawing context, the panel model and the
 //!   widget registry. Re-exported at the root, so `nacelle::Rect` works.
-//! * [`geometry`] — the control rectangles an application and the
-//!   widget that owns them must agree on before either has drawn.
 //! * [`flex`] — the responsive layout engine (the algorithm web pages
 //!   use), recomputed from the actual window size every frame.
 //! * [`focus`] — keyboard focus: the per-world chain controls register
@@ -50,7 +48,6 @@ pub mod layout;
 pub use layout::flex;
 pub mod focus;
 pub mod font;
-pub mod geometry;
 pub mod object;
 pub mod plugin;
 pub mod runtime;

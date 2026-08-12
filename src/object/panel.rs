@@ -244,7 +244,7 @@ pub fn draw(ctx: &mut Ctx, r: Rect, chrome: &Chrome, panel_idx: usize) -> Rect {
     let placed = place(r, titled);
     report_step(panel_idx, placed.step);
     if let Some((band, collapsed)) = placed.band {
-        draw_band(ctx, band, collapsed, r, chrome);
+        draw_band(ctx, band, collapsed, r, chrome, panel_idx);
     }
     placed.content
 }
@@ -252,7 +252,14 @@ pub fn draw(ctx: &mut Ctx, r: Rect, chrome: &Chrome, panel_idx: usize) -> Rect {
 /// The title band: left text, right text trimmed from the LEFT to the
 /// room the title leaves (a path keeps its tail), and the hairline rule
 /// on the band's floor.
-fn draw_band(ctx: &mut Ctx, band: Rect, collapsed: bool, panel: Rect, chrome: &Chrome) {
+fn draw_band(
+    ctx: &mut Ctx,
+    band: Rect,
+    collapsed: bool,
+    panel: Rect,
+    chrome: &Chrome,
+    panel_idx: usize,
+) {
     static SIZE: OnceLock<TokenId> = OnceLock::new();
     static SIZE_MIN: OnceLock<TokenId> = OnceLock::new();
     static TRACKING: OnceLock<TokenId> = OnceLock::new();
@@ -320,6 +327,21 @@ fn draw_band(ctx: &mut Ctx, band: Rect, collapsed: bool, panel: Rect, chrome: &C
         let room = (band.w - 2.0 * inset - used).max(0.0);
         let shown = fit_lead(ctx, px, &right, spacing, room);
         if !shown.is_empty() {
+            // The one text in the chrome that is routinely cut: a cwd
+            // keeps its tail and loses its root, and the root is exactly
+            // what the user cannot reconstruct (F2 §8.1). The anchor is
+            // the trimmed text's own box, so resting on the TITLE — a
+            // different word, drawn whole — says nothing. The identity
+            // is the panel's place plus the path, so two browsers open
+            // on one directory are still two things to explain.
+            let tw = ctx.fonts.measure(FONT_UI, px, &shown, spacing);
+            crate::view::paint::explain_trim(
+                &mut crate::view::surface::CtxSurface::new(ctx),
+                crate::object::tooltip::cell_key(0, panel_idx, &right),
+                Rect::new(band.right() - inset - tw, band.y, tw, band.h),
+                &shown,
+                &right,
+            );
             let right_c = col(t.color(tok(&RIGHT_C, "panel.title_right_color")));
             let right_c = right_c.alpha(right_c.a * alpha);
             ctx.dl.text_right(

@@ -19,7 +19,8 @@ use crate::runtime::{
     ACTION_OPEN_SETTINGS, ACTION_PASTE_PRIMARY, ACTION_SCROLL_TERMINAL, ACTION_SELECT_TAB,
     ACTION_TERM_SELECT, CHROME_BUTTONS_CLOSE, CHROME_BUTTONS_MIN_CLOSE,
     CHROME_BUTTONS_MIN_MAX_CLOSE, DRAG_BEGIN, DRAG_END, DRAG_MOVE, MASK_QUAD_ADD,
-    PLUGIN_API_HAS_CHROME, PLUGIN_API_HAS_DRAG, PLUGIN_API_SIZE_MIN, SELECT_KIND_LINES,
+    PLUGIN_API_HAS_CHROME, PLUGIN_API_HAS_DRAG, PLUGIN_API_HAS_POINTER, PLUGIN_API_SIZE_MIN,
+    SELECT_KIND_LINES,
     SELECT_KIND_WORDS, SELECT_OP_BEGIN, SELECT_OP_END, SELECT_OP_EXTEND, StateStyleC,
 };
 use crate::font::{FontSystem, FONT_COUNT};
@@ -799,6 +800,20 @@ extern "C" fn drag_absent(
 ) {
 }
 
+/// The stand-in for a table that ends before `pointer`: nothing of the
+/// widget is ever under the pointer, so its panel keeps the ordinary
+/// cursor — a pre-pointer widget is still fully clickable.
+extern "C" fn pointer_absent(
+    _: *mut c_void,
+    _: f32,
+    _: f32,
+    _: RectC,
+    _: f32,
+    _: f32,
+) -> u32 {
+    0
+}
+
 impl PluginWidget {
     /// Wraps a plugin's interface. None when the plugin reports an
     /// interface this build does not speak, or cannot make an instance.
@@ -844,6 +859,9 @@ impl PluginWidget {
             if size < PLUGIN_API_HAS_DRAG {
                 std::ptr::addr_of_mut!((*slot.as_mut_ptr()).drag).write(drag_absent);
             }
+            if size < PLUGIN_API_HAS_POINTER {
+                std::ptr::addr_of_mut!((*slot.as_mut_ptr()).pointer).write(pointer_absent);
+            }
             slot.assume_init()
         };
         let instance = (table.create)();
@@ -862,6 +880,11 @@ impl PluginWidget {
     /// Whether the plugin's table reaches the `drag` entry.
     fn has_drag(&self) -> bool {
         self.api.api_size as usize >= PLUGIN_API_HAS_DRAG
+    }
+
+    /// Whether the plugin's table reaches the `pointer` entry.
+    fn has_pointer(&self) -> bool {
+        self.api.api_size as usize >= PLUGIN_API_HAS_POINTER
     }
 }
 
@@ -979,6 +1002,15 @@ impl Widget for PluginWidget {
             &mut out,
         );
         action_in(&out)
+    }
+
+    fn pointer(&mut self, x: f32, y: f32, r: Rect, window: (f32, f32)) -> bool {
+        // A table from before the entry existed has nothing under the
+        // pointer — the same degradation `has_drag` applies.
+        if !self.has_pointer() {
+            return false;
+        }
+        (self.api.pointer)(self.instance, x, y, rect_out(r), window.0, window.1) != 0
     }
 
     fn grid(&self) -> Option<(usize, usize)> {
@@ -1247,6 +1279,19 @@ mod tests {
         out.data_len = std::mem::size_of::<TermSelectC>() as u32;
     }
 
+    /// Answers the hover question from the widget's own geometry: the
+    /// left half of the rect is a control, the right half is not.
+    extern "C" fn t_pointer(
+        _: *mut c_void,
+        x: f32,
+        _: f32,
+        r: RectC,
+        _: f32,
+        _: f32,
+    ) -> u32 {
+        u32::from(x < r.x + r.w / 2.0)
+    }
+
     fn t_api() -> PluginApi {
         PluginApi {
             abi_version: ABI_VERSION,
@@ -1261,6 +1306,7 @@ mod tests {
             sizing: t_sizing,
             chrome: t_chrome,
             drag: t_drag,
+            pointer: t_pointer,
         }
     }
 
@@ -1306,10 +1352,8 @@ mod tests {
     #[test]
     fn a_table_without_drag_declines_the_capture() {
         use crate::runtime::{PLUGIN_API_HAS_CHROME, PLUGIN_API_HAS_DRAG};
-        // The appended entries sit past the mandatory prefix, in order,
-        // with `drag` the current end of the table.
+        // The appended entries sit past the mandatory prefix, in order.
         assert!(PLUGIN_API_HAS_CHROME < PLUGIN_API_HAS_DRAG);
-        assert_eq!(PLUGIN_API_HAS_DRAG, std::mem::size_of::<PluginApi>());
 
         let host = Host {
             snap: &crate::telemetry::Snapshot::default(),
@@ -1345,6 +1389,28 @@ mod tests {
             w.drag(DragPhase::End, 4.0, 2.0, r, &host),
             Action::TermSelect { op: SelectOp::End, col: 4, row: 2, base: (1u64 << 32) | 7 }
         );
+    }
+
+    /// `api_size` gates `pointer` exactly like `drag`: a table from
+    /// before the entry loads, is never asked, and its panel keeps the
+    /// ordinary cursor; a full one answers from its own rectangles.
+    #[test]
+    fn a_table_without_pointer_never_claims_the_cursor() {
+        use crate::runtime::{PLUGIN_API_HAS_DRAG, PLUGIN_API_HAS_POINTER};
+        // `pointer` is the current end of the table.
+        assert!(PLUGIN_API_HAS_DRAG < PLUGIN_API_HAS_POINTER);
+        assert_eq!(PLUGIN_API_HAS_POINTER, std::mem::size_of::<PluginApi>());
+
+        let r = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let short = PluginApi { api_size: PLUGIN_API_HAS_DRAG as u32, ..t_api() };
+        let mut w = unsafe { PluginWidget::new(&short) }.expect("a pre-pointer table loads");
+        assert!(!w.has_pointer());
+        assert!(!w.pointer(5.0, 5.0, r, (800.0, 600.0)));
+
+        let mut w = unsafe { PluginWidget::new(&t_api()) }.expect("full table loads");
+        assert!(w.has_pointer());
+        assert!(w.pointer(5.0, 5.0, r, (800.0, 600.0)), "over the control");
+        assert!(!w.pointer(95.0, 5.0, r, (800.0, 600.0)), "past it");
     }
 
     /// The TermSelect payload is read defensively: null data, a payload

@@ -168,6 +168,7 @@ fn a_scrolled_list_draws_only_its_window_and_clips_the_partial_rows() {
             select: true,
             scroll: true,
             tree: false,
+            tooltip: false,
         }),
     );
     // Two hundred rows, a handful drawn.
@@ -218,6 +219,7 @@ fn a_selected_row_is_washed_and_a_hovered_one_too() {
             select: true,
             scroll: false,
             tree: false,
+            tooltip: false,
         }),
     );
     // Two washes: the selected row and the hovered one, each the full
@@ -306,6 +308,7 @@ fn a_tree_indents_by_depth_and_only_a_parent_gets_an_expander() {
             select: true,
             scroll: false,
             tree: true,
+            tooltip: false,
         }),
     );
     assert_eq!(sf.texts.len(), 4, "usr, share, lib, etc");
@@ -365,6 +368,7 @@ fn collapsing_redraws_without_the_descendants_and_keeps_the_selection() {
                 select: true,
                 scroll: false,
                 tree: true,
+                tooltip: false,
             }),
         );
         sf
@@ -489,6 +493,7 @@ fn a_surface_that_cannot_clip_scrolls_by_whole_rows_instead() {
             select: false,
             scroll: true,
             tree: false,
+            tooltip: false,
         }),
     );
     // The half row was rounded away: the offset landed on a whole row,
@@ -514,6 +519,7 @@ fn a_surface_that_cannot_clip_scrolls_by_whole_rows_instead() {
             select: false,
             scroll: true,
             tree: false,
+            tooltip: false,
         }),
     );
     assert_eq!(clipping.label_at(0), "row 5");

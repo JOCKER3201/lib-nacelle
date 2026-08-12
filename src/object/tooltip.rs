@@ -424,6 +424,43 @@ mod tests {
         assert_eq!(out.1, "OVER");
     }
 
+    // ---- who the target IS ----
+
+    #[test]
+    fn a_cells_identity_is_its_place_and_not_the_words_in_it() {
+        // Two rows of one column are two targets, and the pointer moving
+        // between them pays the delay again (or the grace window, which
+        // is the same decision made on the id).
+        assert_ne!(cell_key(1, 0, "1471"), cell_key(1, 0, "1472"));
+        // The same row after a sort moved it: one target, still. The
+        // identity is the ROW's key, which is what survives the reorder.
+        assert_eq!(cell_key(1, 0, "1471"), cell_key(1, 0, "1471"));
+        // A heading (no row) is not the cell under it, one column is not
+        // its neighbour, and two views drawing the same cell are two
+        // things to explain.
+        assert_ne!(cell_key(1, 0, ""), cell_key(1, 0, "1471"));
+        assert_ne!(cell_key(1, 0, "1471"), cell_key(1, 1, "1471"));
+        assert_ne!(cell_key(1, 0, "1471"), cell_key(2, 0, "1471"));
+    }
+
+    #[test]
+    fn a_target_that_keeps_its_identity_says_its_new_words_without_waiting_again() {
+        // The model is rewritten under a resting pointer — a table
+        // refreshes every frame, and a trimmed cell files its request
+        // again with whatever it now holds. The place did not move, so
+        // the delay is not paid twice and the box says the NEW text.
+        let mut tips = Tooltips::new();
+        let cell = cell_key(1, 2, "1471");
+        assert!(frame(&mut tips, 0.0, Some((cell, "12.4 MB"))).is_none());
+        let out = frame(&mut tips, 0.6, Some((cell, "12.9 MB"))).expect("due at the delay");
+        assert_eq!(out.1, "12.9 MB");
+        // And the row under it, reached at once, is a different target
+        // with its own words.
+        let next = cell_key(1, 2, "1472");
+        let out = frame(&mut tips, 0.65, Some((next, "907 kB"))).expect("within linger");
+        assert_eq!(out.1, "907 kB");
+    }
+
     #[test]
     fn hover_files_only_when_the_pointer_is_inside() {
         // The pointer test is `Rect::contains`; the ids are the caller's.

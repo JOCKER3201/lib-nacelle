@@ -297,7 +297,8 @@ fn engine() -> Engine {
             m
         },
     );
-    // list(items) / list(items, #{ id, select, scroll }) — F2 §3. The
+    // list(items) / list(items, #{ id, select, scroll, tooltip }) — F2
+    // §3. The
     // `[list]` section of the master has described this row since the
     // theme engine landed and nothing has ever drawn it.
     //
@@ -307,8 +308,10 @@ fn engine() -> Engine {
     // `key` defaults to the label: selection is by STRING, so two rows
     // that read the same must be told apart by the script.
     // `select: "row"` lets one be picked, `scroll: true` gives the list
-    // an offset instead of a bottom edge; without either it is a fixed
-    // block of rows and draws through the same path it would anyway.
+    // an offset instead of a bottom edge, `tooltip: true` lets a name
+    // the ellipsis cut short give itself in full when the pointer rests
+    // on it (F2 §8.1); without any of them it is a fixed block of rows
+    // and draws through the same path it would anyway.
     engine.register_fn("list", move |items: Array| {
         let mut m = Map::new();
         m.insert("kind".into(), "list".into());
@@ -322,9 +325,11 @@ fn engine() -> Engine {
         merge_opts(&mut m, opts);
         m
     });
-    // tree(nodes) / tree(nodes, #{ id, select }) — F2 §4. A tree is not
-    // a second view: the renderer FLATTENS it against the widget's
-    // expand set and draws the rows `list` draws.
+    // tree(nodes) / tree(nodes, #{ id, select, tooltip }) — F2 §4. A
+    // tree is not a second view: the renderer FLATTENS it against the
+    // widget's expand set and draws the rows `list` draws — including
+    // the tooltip a trimmed name files, which the indent brings on
+    // sooner here than anywhere else.
     //
     //   node: #{ label, children: [ … ], status, severity, bar, key }
     //
@@ -2022,6 +2027,12 @@ fn draw_stack(
                     .unwrap_or_default();
                 let select = str_of(m, "select") == "row";
                 let scroll = bool_of(m, "scroll", false);
+                // The table's option, on the element that trims the most
+                // text of any: a row's name is what the ellipsis reaches
+                // first (F2 §8.1). It needs the view path for the same
+                // reason the table's does — the plain call has nowhere to
+                // file a request from.
+                let tooltip = bool_of(m, "tooltip", false);
                 // A list that does not scroll took a FIXED height in the
                 // measure and takes the same one here; one that does is a
                 // flexible element and takes the share.
@@ -2033,7 +2044,7 @@ fn draw_stack(
                 let model = view::Rows::new(items).with_generation(v.generation);
                 let st = view::list::ListStyle { shrink: scale };
                 let rect = Rect::new(r.x, y, r.w, h);
-                if select || scroll {
+                if select || scroll || tooltip {
                     let (id, ordinal) = v.claim(&str_of(m, "id"));
                     let ViewState { lists, hits, .. } = &mut *v.state;
                     let state = lists.entry(id).or_default();
@@ -2049,6 +2060,7 @@ fn draw_stack(
                             select,
                             scroll,
                             tree: false,
+                            tooltip,
                         }),
                     );
                 } else {
@@ -2064,6 +2076,10 @@ fn draw_stack(
                     .unwrap_or_default();
                 let select = str_of(m, "select") == "row";
                 let scroll = bool_of(m, "scroll", false);
+                // A tree indents, so its names are trimmed sooner than a
+                // flat list's — the deeper the row, the narrower its
+                // label (F2 §8.1).
+                let tooltip = bool_of(m, "tooltip", false);
                 let rect = Rect::new(r.x, y, r.w, share);
                 let (id, ordinal) = v.claim(&str_of(m, "id"));
                 let generation = v.generation;
@@ -2088,6 +2104,7 @@ fn draw_stack(
                         select,
                         scroll,
                         tree: true,
+                        tooltip,
                     }),
                 );
                 y += share;
@@ -2460,6 +2477,32 @@ mod tests {
         assert!(!bool_of(&plain, "scroll", false));
         assert_eq!(str_of(&plain, "select"), "");
         assert!(!bool_of(&plain, "tooltip", false));
+    }
+
+    /// The table's tooltip option reaches the two elements that trim the
+    /// most text of anything the renderer draws: a list row's name, and
+    /// a tree row's name, narrowed further by every level of its indent
+    /// (F2 §8.1).
+    #[test]
+    fn a_list_and_a_tree_can_be_asked_to_explain_their_trimmed_names() {
+        let out = run(r#"
+            fn draw() {
+                [
+                    list(["org.freedesktop.NetworkManager"],
+                         #{ id: "svc", tooltip: true }),
+                    tree([#{ label: "usr", children: [#{ label: "share" }] }],
+                         #{ tooltip: true }),
+                    list(["short"]),
+                ]
+            }
+        "#)
+        .unwrap();
+        assert!(bool_of(&out[0].read_lock::<Map>().unwrap(), "tooltip", false));
+        assert_eq!(str_of(&out[0].read_lock::<Map>().unwrap(), "id"), "svc");
+        assert!(bool_of(&out[1].read_lock::<Map>().unwrap(), "tooltip", false));
+        // Off unless it is named, like every other view option: a list
+        // written before this phase is a fixed block of rows still.
+        assert!(!bool_of(&out[2].read_lock::<Map>().unwrap(), "tooltip", false));
     }
 
     /// The `view` constant is the other half of the conversation: the

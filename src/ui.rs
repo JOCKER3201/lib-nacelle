@@ -312,6 +312,18 @@ fn fit_end_tracked(ctx: &mut Ctx, px: f32, text: &str, max_w: f32, track: f32) -
     paint::fit_end(&mut CtxSurface::new(ctx), px, text, max_w, track)
 }
 
+/// [`paint::explain_trim`] for the primitives that still draw against
+/// `Ctx`: whatever [`fit_end_tracked`] shortened says the whole of
+/// itself when the pointer rests on it (F2 §8.1).
+///
+/// The pair belongs together — a call to the first without a call to the
+/// second is a value the user can neither read nor ask about — and both
+/// go through the same host surface, so the rule is the one the views
+/// obey and not a second copy of it.
+fn explain_trim(ctx: &mut Ctx, id: u64, anchor: Rect, shown: &str, full: &str) {
+    paint::explain_trim(&mut CtxSurface::new(ctx), id, anchor, shown, full);
+}
+
 /// Breaks text into lines no wider than `max_w`, greedily by words —
 /// the host's way into [`paint::wrap`], where the arithmetic lives so
 /// that a view on the far side of the plugin boundary shares it.
@@ -412,6 +424,15 @@ pub fn rows_label_value(ctx: &mut Ctx, r: Rect, rows: &[RowItem], st: &RowsStyle
                 let room = (cx + cell_w - vx).max(pad);
                 let shown = fit_end_tracked(ctx, vpx, &row.value, room, vtrack);
                 ctx.dl.text(ctx.fonts, FONT_UI, vpx, vx, vty, &shown, vc, vtrack);
+                // The label is drawn whole and the value is what the
+                // room runs out on, so the value's own box is what the
+                // pointer has to rest on to be answered. The identity is
+                // the table's, with no view to belong to: the PLACE in
+                // the block, named by the label — the one half of the
+                // pair that does not change when the reading does, and
+                // the place tells two rows with no label apart.
+                let id = crate::object::tooltip::cell_key(0, i, &row.label);
+                explain_trim(ctx, id, Rect::new(vx, y, room, row_h), &shown, &row.value);
             }
             LabelWidth::Auto => {
                 let lw = ctx.fonts.measure(FONT_UI, lpx, &row.label, ltrack);
@@ -419,6 +440,11 @@ pub fn rows_label_value(ctx: &mut Ctx, r: Rect, rows: &[RowItem], st: &RowsStyle
                 let shown = fit_end_tracked(ctx, vpx, &row.value, room, vtrack);
                 ctx.dl
                     .text_right(ctx.fonts, FONT_UI, vpx, cx + cell_w, vty, &shown, vc, vtrack);
+                // Right-aligned, so the value's box ends at the cell's
+                // right edge and starts `room` before it.
+                let id = crate::object::tooltip::cell_key(0, i, &row.label);
+                let box_r = Rect::new(cx + cell_w - room, y, room, row_h);
+                explain_trim(ctx, id, box_r, &shown, &row.value);
             }
         }
     }
@@ -1094,10 +1120,18 @@ pub fn table_surface<S: Surface>(
             let cell_w = (span(*w) - marker).max(1.0);
             let text = paint::fit_end(sf, head_px, &c.title, budget, head_track);
             // A heading the ellipsis cut short finishes its sentence when
-            // the pointer rests on it (F2 §8.1). Only a TRIMMED one asks:
-            // a tooltip that repeats what is already legible is noise.
-            if explain && band.contains(mouse.0, mouse.1) && text != c.title {
-                sf.tooltip(crate::object::tooltip::cell_key(view_id, i, ""), band, &c.title);
+            // the pointer rests on it (F2 §8.1). The sort marker is part
+            // of the budget, so a heading that fits until it is sorted
+            // starts explaining itself the moment it is — which is the
+            // frame in which the ellipsis actually reached it.
+            if explain {
+                paint::explain_trim(
+                    sf,
+                    crate::object::tooltip::cell_key(view_id, i, ""),
+                    band,
+                    &text,
+                    &c.title,
+                );
             }
             paint::cell_text(sf, x, r.y, cell_w, c.align, head_px, &text, text_c, head_track);
             if marker > 0.0 {
@@ -1189,21 +1223,18 @@ pub fn table_surface<S: Surface>(
                     // reaches, but any column can be cut short by a
                     // dragged width, so the test is what HAPPENED rather
                     // than which column it was.
-                    // The pointer test comes first: only one cell in the
-                    // table can be under it, and comparing the drawn
-                    // text with the whole of it for every cell of every
-                    // visible row to answer a question about one of them
-                    // is work the body loop does not need.
-                    if explain {
-                        let cell = Rect::new(x, row_y, *w, row_h);
-                        if cell.contains(mouse.0, mouse.1)
-                            && mouse.1 >= body_y
-                            && mouse.1 < body_y + body_h
-                            && shown != *text
-                        {
-                            let id = crate::object::tooltip::cell_key(view_id, i, &key);
-                            sf.tooltip(id, cell, text);
-                        }
+                    // The vertical test first: a row half outside a
+                    // scrolled window is half not there, and answering
+                    // for the half that is clipped away would explain
+                    // something nobody can see.
+                    if explain && mouse.1 >= body_y && mouse.1 < body_y + body_h {
+                        paint::explain_trim(
+                            sf,
+                            crate::object::tooltip::cell_key(view_id, i, &key),
+                            Rect::new(x, row_y, *w, row_h),
+                            &shown,
+                            text,
+                        );
                     }
                     paint::cell_text(
                         sf, x, row_y, span(*w), c.align, cell_px, &shown, color, cell_track,
@@ -1352,7 +1383,7 @@ pub fn columns(ctx: &mut Ctx, r: Rect, cells: &[ColumnCell], st: &ColumnsStyle) 
     };
     let y = block_top(&r, natural);
     let mut x0 = r.x;
-    for (cell, cw) in cells.iter().zip(widths.iter().copied()) {
+    for (i, (cell, cw)) in cells.iter().zip(widths.iter().copied()).enumerate() {
         let vc = cell.sev.map(sev_text).unwrap_or(value_c);
         let shown = fit_end_tracked(ctx, vp, &cell.value, cw - 2.0 * gutter, vtrack);
         match align {
@@ -1376,6 +1407,13 @@ pub fn columns(ctx: &mut Ctx, r: Rect, cells: &[ColumnCell], st: &ColumnsStyle) 
                     .text_right(ctx.fonts, FONT_UI, vp, cx, y + vgap, &shown, vc, vtrack);
             }
         }
+        // The strip is sized from its CONTENT, so a cell is trimmed only
+        // when the whole strip is overfull — and then the reading, which
+        // is the entire point of the cell, is the part that was cut. The
+        // anchor is the cell's whole column, label included: label and
+        // value are one readout, and the user points at the readout.
+        let id = crate::object::tooltip::cell_key(0, i, &cell.label);
+        explain_trim(ctx, id, Rect::new(x0, r.y, cw, r.h), &shown, &cell.value);
         x0 += cw;
     }
     if st.dividers {

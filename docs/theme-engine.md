@@ -3566,7 +3566,7 @@ hover, no drag and no disabled — a dragging slider looks identical to an idle 
 | `FRAME = 1/60` | `main.rs:622` | engine constant |
 | board-ride epsilon 0.05 / 0.001 | `main.rs:1675` | engine constant |
 | initial window size 1600×900 | `main.rs:179` | application setting |
-| `TAB_COUNT = 5` | `geometry.rs:42` | the session array is sized from it; the theme may style the strip, not resize it |
+| `SESSIONS = 5` | `main.rs` | the application's session array is sized from it; the theme may style a strip drawn for them, not resize it |
 | per-widget `ref_h_vh` / `min_h_vh` | `base.rs:241-254` | **LAYOUT file** |
 | the default board's basis/grow/collapse/gap | `flex.rs:62-79` | **LAYOUT file** |
 | keyboard per-key width units | `keyboard:119-188` | **LAYOUT file** |

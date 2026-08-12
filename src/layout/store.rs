@@ -36,10 +36,11 @@ impl LayautStore {
     }
 
     /// None when the name is not installed. "default" with no file is
-    /// the built-in responsive layout, carrying its OWN size table:
-    /// the ref/min heights belong to the layout, not to the widgets,
-    /// and an empty table would silently fall back to the registry's
-    /// per-widget numbers.
+    /// the generated responsive arrangement, carrying the size table it
+    /// was composed from: the ref/min heights belong to the LAYOUT — a
+    /// .layaut names its own in its ref/min column — and the generated
+    /// one has no numbers of its own, so it hands on what the installed
+    /// addons declared, spelled out rather than left empty.
     pub fn load(&self, name: &str) -> Option<LayoutDef> {
         if let Some(text) = self
             .roots

@@ -3,10 +3,11 @@
 //!
 //! `tests/tooltip_view.rs` proves the box is placed, sized and delayed
 //! correctly when something asks for it. This one proves something asks:
-//! that an interactive table's trimmed heading and trimmed cell, and a
-//! tab strip's trimmed label, file the request themselves while they
-//! draw — so that resting the pointer on text the ellipsis cut short
-//! really does put the whole of it on screen.
+//! that an interactive table's trimmed heading and trimmed cell, a list
+//! or tree row's trimmed name, a tab strip's trimmed label and a panel
+//! band's trimmed path file the request themselves while they draw — so
+//! that resting the pointer on text the ellipsis cut short really does
+//! put the whole of it on screen.
 //!
 //! Everything runs through the real master theme and the real fonts,
 //! because "was this trimmed?" is a question only a real measure can
@@ -15,10 +16,13 @@
 use nacelle::draw::DrawList;
 use nacelle::font::FontSystem;
 use nacelle::object::tooltip::Tooltips;
-use nacelle::object::{segmented, tabs};
+use nacelle::object::{panel, segmented, tabs};
 use nacelle::theme;
 use nacelle::ui::{self, Align, CellKind, ColWidth, Column, TableStyle, TableView};
-use nacelle::view::{Hit, Hits, TableState};
+use nacelle::view::list::{ListState, ListStyle, ListView};
+use nacelle::view::tree::{MemNode, MemTree};
+use nacelle::view::{CtxSurface, FlatTree, Hit, Hits, RowBuf, Rows, TableState};
+use nacelle::widget::Chrome;
 use nacelle::{Ctx, Rect};
 
 const W: f32 = 1920.0;
@@ -236,6 +240,311 @@ fn a_heading_squeezed_by_a_dragged_width_says_what_it_is() {
         table(ctx, r, &mut state, &mut hits, true);
     });
     assert_eq!(now.as_deref(), Some("PROCESS IDENTIFIER"));
+}
+
+// ---- the list and the tree -------------------------------------------
+
+/// Draws a one-row list into `r` and records where the row landed.
+fn list(
+    ctx: &mut Ctx,
+    r: Rect,
+    state: &mut ListState,
+    hits: &mut Hits,
+    explain: bool,
+) {
+    hits.clear();
+    let mut row = RowBuf::new();
+    row.key = "nm".into();
+    row.label = LONG.into();
+    let model = Rows::new(vec![row]);
+    nacelle::view::list::list(
+        &mut CtxSurface::new(ctx),
+        r,
+        &model,
+        &ListStyle::default(),
+        Some(ListView {
+            state,
+            hits,
+            id: 0,
+            select: true,
+            scroll: false,
+            tree: false,
+            tooltip: explain,
+        }),
+    );
+}
+
+#[test]
+fn a_row_name_the_ellipsis_cut_short_says_the_whole_of_itself() {
+    theme::set_viewport(H, 1.0);
+    let mut fonts = FontSystem::new();
+    let mut tips = Tooltips::new();
+    let mut state = ListState::new();
+    let mut hits = Hits::new();
+    let r = Rect::new(40.0, 60.0, 240.0, 400.0);
+
+    frame(&mut tips, &mut fonts, (0.0, 0.0), 0.0, |ctx| {
+        list(ctx, r, &mut state, &mut hits, true);
+    });
+    let row = hits
+        .rect_of(&Hit::Row { id: 0, key: "nm".into() })
+        .expect("the list records a rectangle for every row it drew");
+    // Inside the label's own run, which starts after `list.pad_x`.
+    let at = (row.x + row.w / 2.0, row.y + row.h / 2.0);
+
+    let (_, now) = frame(&mut tips, &mut fonts, at, 0.0, |ctx| {
+        list(ctx, r, &mut state, &mut hits, true);
+    });
+    assert_eq!(now, None, "a tooltip before the delay is a tooltip in the way");
+    let (_, now) = frame(&mut tips, &mut fonts, at, 1.0, |ctx| {
+        list(ctx, r, &mut state, &mut hits, true);
+    });
+    assert_eq!(now.as_deref(), Some(LONG));
+}
+
+#[test]
+fn a_list_that_was_not_asked_to_explain_itself_stays_quiet() {
+    theme::set_viewport(H, 1.0);
+    let mut fonts = FontSystem::new();
+    let mut tips = Tooltips::new();
+    let mut state = ListState::new();
+    let mut hits = Hits::new();
+    let r = Rect::new(40.0, 60.0, 240.0, 400.0);
+
+    frame(&mut tips, &mut fonts, (0.0, 0.0), 0.0, |ctx| {
+        list(ctx, r, &mut state, &mut hits, false);
+    });
+    let row = hits
+        .rect_of(&Hit::Row { id: 0, key: "nm".into() })
+        .expect("the list records a rectangle for every row it drew");
+    let at = (row.x + row.w / 2.0, row.y + row.h / 2.0);
+
+    for t in [0.0, 1.0, 2.0] {
+        let (_, now) = frame(&mut tips, &mut fonts, at, t, |ctx| {
+            list(ctx, r, &mut state, &mut hits, false);
+        });
+        assert_eq!(now, None, "`tooltip` is opt-in, like every other view option");
+    }
+}
+
+#[test]
+fn a_tree_row_narrowed_by_its_indent_says_the_whole_of_itself() {
+    theme::set_viewport(H, 1.0);
+    let mut fonts = FontSystem::new();
+    let mut tips = Tooltips::new();
+    let mut state = ListState::new();
+    let mut hits = Hits::new();
+    let r = Rect::new(40.0, 60.0, 240.0, 400.0);
+
+    // A child of an open root: its label starts one indent and one
+    // expander in, which is exactly what a tree trims that a list does
+    // not.
+    let mut flat = FlatTree::new(MemTree::new(vec![MemNode::leaf("usr")
+        .with_children(vec![MemNode::leaf(LONG)])]));
+    flat.sync();
+    flat.expand("usr");
+    flat.sync();
+
+    let draw = |ctx: &mut Ctx, hits: &mut Hits, state: &mut ListState| {
+        hits.clear();
+        nacelle::view::list::list(
+            &mut CtxSurface::new(ctx),
+            r,
+            &flat,
+            &ListStyle::default(),
+            Some(ListView {
+                state,
+                hits,
+                id: 0,
+                select: true,
+                scroll: false,
+                tree: true,
+                tooltip: true,
+            }),
+        );
+    };
+
+    frame(&mut tips, &mut fonts, (0.0, 0.0), 0.0, |ctx| {
+        draw(ctx, &mut hits, &mut state)
+    });
+    let row = hits
+        .rect_of(&Hit::Row { id: 0, key: format!("usr/{LONG}") })
+        .or_else(|| hits.rect_of(&Hit::Row { id: 0, key: LONG.into() }))
+        .expect("the flattened tree records a rectangle for the child row");
+    let at = (row.right() - 20.0, row.y + row.h / 2.0);
+
+    let (_, now) = frame(&mut tips, &mut fonts, at, 0.0, |ctx| {
+        draw(ctx, &mut hits, &mut state)
+    });
+    assert_eq!(now, None);
+    let (_, now) = frame(&mut tips, &mut fonts, at, 1.0, |ctx| {
+        draw(ctx, &mut hits, &mut state)
+    });
+    assert_eq!(now.as_deref(), Some(LONG));
+}
+
+// ---- the `rows` block and the `columns` strip ------------------------
+
+/// A reading far too long for the room a label leaves beside it.
+const READING: &str = "1471 of 4096 kilobytes, sampled every four seconds";
+
+#[test]
+fn a_reading_the_ellipsis_cut_short_says_the_whole_of_itself() {
+    theme::set_viewport(H, 1.0);
+    let mut fonts = FontSystem::new();
+    let mut tips = Tooltips::new();
+    // Narrow: the label is drawn whole and the value is what runs out of
+    // room, which is the only case a `rows` block has to explain.
+    let r = Rect::new(40.0, 60.0, 200.0, 120.0);
+    let rows = vec![ui::RowItem { label: "MEMORY".into(), value: READING.into(), sev: None }];
+    let st = || ui::RowsStyle {
+        label_role: ui::role("label"),
+        value_role: ui::role("value"),
+        columns: 1,
+        label_width: ui::LabelWidth::Max,
+        row_h: 24.0,
+        shrink: 1.0,
+    };
+    // The block is centred vertically in its box and one line tall.
+    let at = (r.right() - 10.0, r.y + r.h / 2.0);
+
+    let (_, now) = frame(&mut tips, &mut fonts, at, 0.0, |ctx| {
+        ui::rows_label_value(ctx, r, &rows, &st());
+    });
+    assert_eq!(now, None);
+    let (_, now) = frame(&mut tips, &mut fonts, at, 1.0, |ctx| {
+        ui::rows_label_value(ctx, r, &rows, &st());
+    });
+    assert_eq!(now.as_deref(), Some(READING));
+}
+
+#[test]
+fn a_reading_with_room_beside_its_label_stays_quiet() {
+    theme::set_viewport(H, 1.0);
+    let mut fonts = FontSystem::new();
+    let mut tips = Tooltips::new();
+    let r = Rect::new(40.0, 60.0, 1400.0, 120.0);
+    let rows = vec![ui::RowItem { label: "MEMORY".into(), value: "41%".into(), sev: None }];
+    let st = || ui::RowsStyle {
+        label_role: ui::role("label"),
+        value_role: ui::role("value"),
+        columns: 1,
+        label_width: ui::LabelWidth::Max,
+        row_h: 24.0,
+        shrink: 1.0,
+    };
+    let at = (r.x + 300.0, r.y + r.h / 2.0);
+
+    for t in [0.0, 1.0, 2.0] {
+        let (_, now) = frame(&mut tips, &mut fonts, at, t, |ctx| {
+            ui::rows_label_value(ctx, r, &rows, &st());
+        });
+        assert_eq!(now, None, "a reading that fits is already saying everything");
+    }
+}
+
+#[test]
+fn a_strip_cell_squeezed_by_its_neighbours_says_the_whole_reading() {
+    theme::set_viewport(H, 1.0);
+    let mut fonts = FontSystem::new();
+    let mut tips = Tooltips::new();
+    // Three cells sharing a box far too narrow for the first one's
+    // value: the strip is content-measured, so this is the case where
+    // `fit_end` actually reaches a cell.
+    let r = Rect::new(40.0, 60.0, 180.0, 80.0);
+    let cells = vec![
+        ui::ColumnCell { label: "UPTIME".into(), value: READING.into(), sev: None },
+        ui::ColumnCell { label: "LOAD".into(), value: "0.42".into(), sev: None },
+        ui::ColumnCell { label: "TASKS".into(), value: "311".into(), sev: None },
+    ];
+    let st = || ui::ColumnsStyle {
+        label_role: ui::role("label"),
+        value_role: ui::role("value"),
+        align: Some(Align::Center),
+        dividers: false,
+        shrink: 1.0,
+    };
+    // Inside the first cell, which is the one that was cut.
+    let at = (r.x + 10.0, r.y + r.h / 2.0);
+
+    let (_, now) = frame(&mut tips, &mut fonts, at, 0.0, |ctx| {
+        ui::columns(ctx, r, &cells, &st());
+    });
+    assert_eq!(now, None);
+    let (_, now) = frame(&mut tips, &mut fonts, at, 1.0, |ctx| {
+        ui::columns(ctx, r, &cells, &st());
+    });
+    assert_eq!(now.as_deref(), Some(READING));
+}
+
+// ---- the panel band --------------------------------------------------
+
+/// A path no narrow band can show whole. The tail is what survives the
+/// trim, so the root is precisely what the pointer has to ask for.
+const PATH: &str = "/home/michael/Documents/Archive/2024/invoices/quarter-four";
+
+fn px(name: &str) -> f32 {
+    theme::resolved().px(theme::id(name).unwrap())
+}
+
+/// The right end of a titled panel's band — where the trimmed text is,
+/// and nowhere near the title. The band sits `panel.title.block_h` above
+/// the content box and spans the same width, which is the whole of what
+/// the placement guarantees a caller.
+fn band_right(r: Rect) -> (f32, f32) {
+    let content = panel::content_box(r, true);
+    let block = px("panel.title.block_h");
+    let band_h = px("panel.title.band_h").min(block);
+    (
+        content.right() - px("panel.title.inset_x") - 2.0,
+        content.y - block + band_h / 2.0,
+    )
+}
+
+#[test]
+fn a_band_whose_path_lost_its_root_gives_the_path_back() {
+    theme::set_viewport(H, 1.0);
+    let mut fonts = FontSystem::new();
+    let mut tips = Tooltips::new();
+    let r = Rect::new(40.0, 60.0, 320.0, 400.0);
+    let chrome = Chrome {
+        title: Some("FILESYSTEM".into()),
+        right: Some(PATH.into()),
+        ..Chrome::default()
+    };
+
+    let at = band_right(r);
+    let (_, now) = frame(&mut tips, &mut fonts, at, 0.0, |ctx| {
+        panel::draw(ctx, r, &chrome, 0);
+    });
+    assert_eq!(now, None);
+    let (_, now) = frame(&mut tips, &mut fonts, at, 1.0, |ctx| {
+        panel::draw(ctx, r, &chrome, 0);
+    });
+    // The band upper-cases through `type.title.panel.case`, so what is
+    // offered is what would have been DRAWN, not the raw string.
+    assert_eq!(now.as_deref(), Some(PATH.to_uppercase().as_str()));
+}
+
+#[test]
+fn a_band_with_room_for_its_path_stays_quiet() {
+    theme::set_viewport(H, 1.0);
+    let mut fonts = FontSystem::new();
+    let mut tips = Tooltips::new();
+    let r = Rect::new(40.0, 60.0, 1600.0, 400.0);
+    let chrome = Chrome {
+        title: Some("FILESYSTEM".into()),
+        right: Some("/tmp".into()),
+        ..Chrome::default()
+    };
+
+    let at = band_right(r);
+    for t in [0.0, 1.0, 2.0] {
+        let (_, now) = frame(&mut tips, &mut fonts, at, t, |ctx| {
+            panel::draw(ctx, r, &chrome, 0);
+        });
+        assert_eq!(now, None, "a path that fits is already saying everything");
+    }
 }
 
 // ---- the tab strip ---------------------------------------------------

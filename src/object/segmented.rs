@@ -119,7 +119,6 @@ pub fn control<S: Surface>(
         Some(v) => (Some(v.hits), v.id),
         None => (None, 0),
     };
-    let mouse = sf.mouse();
     for (i, cell) in cells.iter().enumerate() {
         // `button` — the class the matrix lends this control. The whole
         // ladder, including the Selected rung the chosen cell always
@@ -137,9 +136,7 @@ pub fn control<S: Surface>(
         let text = paint::fit_end(sf, look.label.px, labels[i], inner, look.label.track);
         // The tab strip's rule, for the same reason (F2 §8.1): a choice
         // whose word did not fit is a choice the user cannot read.
-        if text != labels[i] && cell.contains(mouse.0, mouse.1) {
-            sf.tooltip(super::tooltip::key(labels[i]), *cell, labels[i]);
-        }
+        paint::explain_trim(sf, super::tooltip::key(labels[i]), *cell, &text, labels[i]);
         let ty = paint::center_line_y(sf, cell.y, cell.h, look.label.px, look.label.leading);
         paint::cell_text(
             sf,

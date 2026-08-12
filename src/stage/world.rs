@@ -174,6 +174,7 @@ mod tests {
     use crate::layout::BoardDef;
 
     fn world_with(boards: &[BoardId]) -> BoardWorld {
+        crate::flex::install_test_registry();
         let mut home = LayoutDef::from_base(LayoutMode::Flex);
         home.boards = boards
             .iter()
@@ -239,6 +240,9 @@ mod tests {
 
     #[test]
     fn boards_share_the_layouts_sizes_unless_they_name_their_own() {
+        // The registry has to exist before a Panel does — see
+        // `flex::install_test_registry`.
+        crate::flex::install_test_registry();
         let mut home = LayoutDef::from_base(LayoutMode::Flex);
         home.sizes = vec![(crate::base::Panel::all()[0], 9.0, 5.0)];
         home.boards = vec![

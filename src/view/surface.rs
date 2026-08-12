@@ -725,32 +725,58 @@ impl Surface for AbiSurface<'_> {
 
 // ---------------------------------------------------------------------
 
+/// The crate's one fake surface, shared by every test module that needs
+/// to hold a view still without a window, a font atlas or a loaded
+/// master. It lives here because this is where [`Surface`] lives, and it
+/// is `pub(crate)` for the same reason the trait is one trait: a second
+/// copy of it in another test module would be a second answer to "what
+/// does a view see".
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A surface that records what it was told to draw and answers the
-    /// theme from a fixed table. Enough to hold the view code still
-    /// without a window, a font atlas or a loaded master.
+    /// theme from a fixed table.
     pub struct FakeSurface {
         pub rects: Vec<(Rect, Color)>,
         pub texts: Vec<(f32, f32, String, Align)>,
         pub clips: Vec<Rect>,
+        /// The tooltip requests the view filed, in the order it filed
+        /// them — the last of a frame is the one the manager answers.
+        pub tips: Vec<(u64, Rect, String)>,
         pub depth: i32,
         pub can_clip: bool,
         pub tokens: HashMap<String, f32>,
+        /// Where the pointer is. Off-screen by default, so a test that
+        /// does not care about hovering gets none of it.
+        pub mouse: (f32, f32),
     }
 
     impl FakeSurface {
-        fn new() -> FakeSurface {
+        pub fn new() -> FakeSurface {
             FakeSurface {
                 rects: Vec::new(),
                 texts: Vec::new(),
                 clips: Vec::new(),
+                tips: Vec::new(),
                 depth: 0,
                 can_clip: true,
                 tokens: HashMap::new(),
+                mouse: (-1.0, -1.0),
             }
+        }
+
+        /// Declares a token at a value — the builder every test that
+        /// draws needs, since a token this table does not hold reads as
+        /// zero and a zero-height row cannot be pointed at.
+        pub fn token(mut self, name: &str, v: f32) -> FakeSurface {
+            self.tokens.insert(name.to_string(), v);
+            self
+        }
+
+        pub fn at(mut self, x: f32, y: f32) -> FakeSurface {
+            self.mouse = (x, y);
+            self
         }
     }
 
@@ -809,10 +835,16 @@ mod tests {
             0.0
         }
         fn mouse(&self) -> (f32, f32) {
-            (-1.0, -1.0)
+            self.mouse
         }
         fn scale(&self) -> f32 {
             1.0
+        }
+        /// Recorded rather than dropped: the default is nothing, and a
+        /// test of a CONSUMER has to be able to tell "nothing was asked"
+        /// from "the surface throws requests away".
+        fn tooltip(&mut self, id: u64, anchor: Rect, text: &str) {
+            self.tips.push((id, anchor, text.to_string()));
         }
     }
 

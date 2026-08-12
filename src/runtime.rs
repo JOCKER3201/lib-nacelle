@@ -530,8 +530,6 @@ pub struct PluginApi {
     /// panel's scroll thumb is the first.
     /// Appended past `chrome`, `api_size`-gated: a plugin whose table
     /// ends before it simply never receives drags.
-    ///
-    /// next append: `press`, `release` (F2 §6, per the ledger).
     pub drag: extern "C" fn(
         instance: *mut c_void,
         phase: u32,
@@ -542,6 +540,26 @@ pub struct PluginApi {
         win_h: f32,
         out: *mut ActionC,
     ),
+    /// Is one of my controls under this point? — `Widget::pointer`
+    /// across the boundary. The host asks before it asks anything else,
+    /// so the cursor can become a hand the same frame the pointer
+    /// arrives; nonzero = yes. No drawing context and no host data are
+    /// passed, because this is a question about pixels: the widget
+    /// answers from the rectangles IT draws, which is what keeps the
+    /// application from computing somebody else's geometry.
+    /// Appended past `drag`, `api_size`-gated: a plugin whose table
+    /// ends before it is never asked, and its panel keeps the ordinary
+    /// cursor.
+    ///
+    /// next append: `press`, `release` (F2 §6, per the ledger).
+    pub pointer: extern "C" fn(
+        instance: *mut c_void,
+        x: f32,
+        y: f32,
+        r: RectC,
+        win_w: f32,
+        win_h: f32,
+    ) -> u32,
 }
 
 /// The prefix of [`PluginApi`] every version-6 plugin must fill —
@@ -560,6 +578,10 @@ pub const PLUGIN_API_HAS_CHROME: usize =
 /// The prefix that includes `drag`.
 pub const PLUGIN_API_HAS_DRAG: usize =
     std::mem::offset_of!(PluginApi, drag) + std::mem::size_of::<usize>();
+
+/// The prefix that includes `pointer`.
+pub const PLUGIN_API_HAS_POINTER: usize =
+    std::mem::offset_of!(PluginApi, pointer) + std::mem::size_of::<usize>();
 
 /// The attach point every plugin must export:
 ///

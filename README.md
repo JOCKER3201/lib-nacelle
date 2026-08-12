@@ -13,7 +13,6 @@ crate again.
 | `draw`, `font`, `theme` | drawing primitives, the glyph atlas, colours |
 | `base` | geometry, the drawing context, the panel model, the widget registry |
 | `flex` | the responsive layout engine, recomputed from the window every frame |
-| `geometry` | the control rectangles an application and a widget must agree on before either has drawn |
 | `object` | windows, buttons, sliders, drop-downs, checkboxes |
 | `ui` | the drawing vocabulary widgets are composed from |
 | `widget` | the contract widgets implement and an application drives them through |

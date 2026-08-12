@@ -5,13 +5,30 @@
 //! config.rs; not one byte of syntax, not one default, not one
 //! tolerance may drift.
 
-use nacelle::base::{self, LayoutMode, Panel};
+use nacelle::base::{self, LayoutMode, Panel, WidgetCategory, WidgetDef};
 use nacelle::layout::{layaut, LayoutDef};
+use nacelle::widget::registry;
 
+/// The corpus resolves panel names against a FIXTURE registry of its
+/// own. There is no built-in set to borrow: a registry is whatever an
+/// installation's addons declare, so a test that needs names has to
+/// bring them. FIRST call wins and panel indices bake into every
+/// Layout, so this is the one registry this binary ever has.
 fn setup() {
-    // FIRST call wins and panel indices bake into every Layout; the
-    // corpus resolves names against the builtin twelve.
-    base::set_registry(base::builtin_widgets());
+    base::set_registry(
+        ["clock", "cpu", "memory", "shell"]
+            .iter()
+            .map(|name| {
+                // An addon that declares nothing but its heights: the
+                // corpus is about the file format, not about placement.
+                let mut def: WidgetDef = registry::bare_def((*name).to_string());
+                def.ref_h_vh = 10.0;
+                def.min_h_vh = 6.0;
+                assert_eq!(def.category, WidgetCategory::Board);
+                def
+            })
+            .collect(),
+    );
 }
 
 fn p(name: &str) -> Panel {

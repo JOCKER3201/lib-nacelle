@@ -193,6 +193,21 @@ pub trait Widget {
         Action::None
     }
 
+    /// Whether a control of this widget lies under the point — the
+    /// answer an application needs BEFORE it asks anything else, to
+    /// turn the pointer into a hand the same frame it arrives.
+    ///
+    /// The widget is the only one that can answer: the rectangles are
+    /// its own, drawn from its own tokens, and an application that
+    /// computed them a second time would be duplicating a widget's
+    /// geometry and drifting from it. Hover carries no drawing context
+    /// and no session data — it is a question about pixels — so only
+    /// the rect and the window size are passed. The default is no: a
+    /// widget with nothing to click keeps the ordinary cursor.
+    fn pointer(&mut self, _x: f32, _y: f32, _r: Rect, _window: (f32, f32)) -> bool {
+        false
+    }
+
     /// A pointer drag over the widget — the host's single capture path
     /// (see [`DragPhase`]). `Begin` is the press: a widget that answers
     /// [`Action::None`] declines the capture and the press falls back to

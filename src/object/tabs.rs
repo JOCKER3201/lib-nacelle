@@ -328,7 +328,6 @@ pub fn strip<S: Surface>(
         Some(v) => (Some(v.hits), v.id),
         None => (None, 0),
     };
-    let mouse = sf.mouse();
     for (i, cell) in cells.iter().enumerate() {
         let ink = sf.class_state("tab", st.rung(i));
         // A sheared tab is a quad; an unsheared one is the family's
@@ -363,9 +362,7 @@ pub fn strip<S: Surface>(
         // so a trimmed tab is precisely the case where the label has
         // stopped doing its one job; an untrimmed one says nothing,
         // because it is already saying everything.
-        if text != labels[i] && cell.contains(mouse.0, mouse.1) {
-            sf.tooltip(super::tooltip::key(labels[i]), *cell, labels[i]);
-        }
+        paint::explain_trim(sf, super::tooltip::key(labels[i]), *cell, &text, labels[i]);
         let ty = paint::center_line_y(sf, cell.y, cell.h, look.label.px, look.label.leading);
         paint::cell_text(
             sf,

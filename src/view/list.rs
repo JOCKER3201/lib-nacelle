@@ -99,6 +99,11 @@ pub struct ListView<'a> {
     /// Draw the tree affordances: the depth indent and an expander on
     /// every row that has children.
     pub tree: bool,
+    /// A row name the ellipsis cut short explains itself when the
+    /// pointer rests on it (F2 §8.1). Only what was TRIMMED asks, and
+    /// only through the view path — a list drawn without one has nowhere
+    /// to file a request from, which is the table's arrangement too.
+    pub tooltip: bool,
 }
 
 /// The `[list]` and `[tree]` metrics, read ONCE per draw.
@@ -115,6 +120,12 @@ struct Look {
     glyph: f32,
     glyph_gap: f32,
     status_gap: f32,
+    /// `list.scroll_gutter` — the lane a row keeps clear at the scrolling
+    /// edge. An overlay bar costs the content nothing, so without this it
+    /// draws ON TOP of a row's trailing status; the master's 0u is the
+    /// drawing as it stands, and a theme that wants the bar beside the
+    /// text rather than over it says so here.
+    scroll_gutter: f32,
     bar_h: f32,
     bar_gap: f32,
     label: RoleLook,
@@ -144,6 +155,7 @@ impl Look {
             glyph: sf.px("list.glyph") * shrink,
             glyph_gap: sf.px("list.glyph_gap") * shrink,
             status_gap: sf.px("list.status_gap") * shrink,
+            scroll_gutter: sf.px("list.scroll_gutter") * shrink,
             bar_h: sf.px("list.bar_h") * shrink,
             bar_gap: sf.px("list.bar_gap") * shrink,
             label: paint::bound_role(sf, "list.label_role", shrink),
@@ -199,9 +211,11 @@ pub fn list<S: Surface, M: RowModel>(
     st: &ListStyle,
     view: Option<ListView>,
 ) {
-    let (mut state, mut hits, view_id, select, scroll, tree) = match view {
-        Some(v) => (Some(v.state), Some(v.hits), v.id, v.select, v.scroll, v.tree),
-        None => (None, None, 0, false, false, false),
+    let (mut state, mut hits, view_id, select, scroll, tree, explain) = match view {
+        Some(v) => {
+            (Some(v.state), Some(v.hits), v.id, v.select, v.scroll, v.tree, v.tooltip)
+        }
+        None => (None, None, 0, false, false, false, false),
     };
     let look = Look::read(sf, st.shrink, tree);
     let pitch = look.pitch();
@@ -284,6 +298,16 @@ pub fn list<S: Surface, M: RowModel>(
         }
         _ => 1.0,
     };
+    // The lane `list.scroll_gutter` asks a row to keep clear, charged to
+    // the side the bar is actually on and only while one is drawn. The
+    // master's 0u leaves every row exactly where it was.
+    let (gutter_l, gutter_r) = match (&geom, &bar_look) {
+        (Some(_), Some((look_bar, _))) if look.scroll_gutter > 0.0 => match look_bar.edge {
+            ScrollbarEdge::Left => (look.scroll_gutter, 0.0),
+            ScrollbarEdge::Right => (0.0, look.scroll_gutter),
+        },
+        _ => (0.0, 0.0),
+    };
     let mouse = sf.mouse();
 
     // A window that starts part-way down a row needs the body clipped,
@@ -321,12 +345,13 @@ pub fn list<S: Surface, M: RowModel>(
             h.push(row_r, Hit::Row { id: view_id, key: buf.key.clone() });
         }
 
-        let mut x = r.x + look.pad_x + buf.depth as f32 * look.indent;
+        let mut x = r.x + gutter_l + look.pad_x + buf.depth as f32 * look.indent;
         // Optional indent guides: one hairline per ancestor level, in
         // the column its expander would occupy.
         if look.guide_w > 0.0 && buf.depth > 0 {
             for k in 0..buf.depth {
-                let gx = r.x + look.pad_x + k as f32 * look.indent + look.disclosure / 2.0;
+                let gx =
+                    r.x + gutter_l + look.pad_x + k as f32 * look.indent + look.disclosure / 2.0;
                 sf.line(gx, y, gx, y + pitch, look.guide_w, look.guide_c);
             }
         }
@@ -366,7 +391,7 @@ pub fn list<S: Surface, M: RowModel>(
         }
         // The status is measured from the right edge; the label gets
         // what is left.
-        let mut right = r.right() - look.pad_x;
+        let mut right = r.right() - gutter_r - look.pad_x;
         if !buf.status.is_empty() {
             let sw = sf.measure(look.status.px, &buf.status, look.status.track);
             let sy = paint::center_line_y(sf, y, look.row_h, look.status.px, look.status.leading);
@@ -399,6 +424,22 @@ pub fn list<S: Surface, M: RowModel>(
             look.label.track,
             Align::Left,
         );
+        // A row name the ellipsis cut short finishes itself when the
+        // pointer rests on it (F2 §8.1). The anchor is the LABEL's own
+        // rectangle, not the row's: the status beside it is drawn whole
+        // or not at all, so it has nothing to explain and must not
+        // answer for its neighbour. The vertical test is the hover
+        // test's — a row half outside a scrolled window is half not
+        // there.
+        if explain && mouse.1 >= r.y && mouse.1 < r.bottom() {
+            paint::explain_trim(
+                sf,
+                crate::object::tooltip::cell_key(view_id, 0, &buf.key),
+                Rect::new(x, y, label_w, look.row_h),
+                &shown,
+                &buf.label,
+            );
+        }
         if let Some(frac) = buf.bar {
             let bar = Rect::new(x, y + text_h + look.bar_gap, label_w, look.bar_h);
             paint::meter(sf, bar, frac, buf.severity, true);
@@ -477,6 +518,110 @@ mod tests {
     }
 
     #[test]
+    fn a_row_names_its_own_corner_wheel_and_gutter_instead_of_borrowing_a_tiles() {
+        // The three the plugins reported missing. corner and wheel_px are
+        // declared at the values they were borrowing from `filetile.*`, so
+        // a row that switches names draws and scrolls exactly as before.
+        assert_eq!(px("list.corner"), px("filetile.corner"));
+        assert_eq!(px("list.wheel_px"), px("filetile.wheel_px"));
+        // scrollbar.mode = overlay costs the content nothing, so the bar
+        // may sit over a row's trailing status. The gutter is the theme's
+        // answer to that, and the master's answer is "leave it as it was".
+        assert_eq!(px("list.scroll_gutter"), 0.0);
+        assert_eq!(word("scrollbar.mode"), "overlay");
+    }
+
+    #[test]
+    fn the_empty_state_line_answers_to_its_own_name() {
+        // Both keys used to hang off the tail of [boot] with no header,
+        // so `emptystate.*` resolved to nothing at all. `px` first: it is
+        // what loads the master in a test that runs on its own.
+        assert!(px("emptystate.y_frac") > 0.0);
+        assert_eq!(word("emptystate.role"), "value");
+        // And the names that only existed because the header was missing
+        // are gone: a boot screen has no "nothing here" line.
+        assert!(crate::theme::id("boot.role").is_none());
+        assert!(crate::theme::id("boot.y_frac").is_none());
+    }
+
+    // ---- the trimmed name explains itself ----
+
+    use crate::view::model::Rows;
+    use crate::view::surface::tests::FakeSurface;
+
+    const LONG: &str = "org.freedesktop.NetworkManager";
+
+    /// A surface with just enough theme to draw a row that can be
+    /// pointed at: a row 20 px tall, 4 px of padding, and a body role
+    /// whose characters are 5 px wide (the fake measures half an em).
+    fn dressed() -> FakeSurface {
+        FakeSurface::new()
+            .token("list.row_h", 20.0)
+            .token("list.pad_x", 4.0)
+            .token("type.body.size", 10.0)
+            .token("type.body.leading", 1.0)
+    }
+
+    fn one_row(label: &str) -> Rows {
+        let mut row = RowBuf::new();
+        row.key = "nm".to_string();
+        row.label = label.to_string();
+        Rows::new(vec![row])
+    }
+
+    fn drawn(mut sf: FakeSurface, model: &Rows, tooltip: bool) -> FakeSurface {
+        let mut state = ListState::new();
+        let mut hits = super::super::hits::Hits::new();
+        list(
+            &mut sf,
+            Rect::new(0.0, 0.0, 100.0, 60.0),
+            model,
+            &ListStyle::default(),
+            Some(ListView {
+                state: &mut state,
+                hits: &mut hits,
+                id: 3,
+                select: false,
+                scroll: false,
+                tree: false,
+                tooltip,
+            }),
+        );
+        sf
+    }
+
+    #[test]
+    fn a_row_name_the_ellipsis_cut_short_explains_itself() {
+        // 30 characters at 5 px is 150 px of name in 92 px of room.
+        let model = one_row(LONG);
+        let sf = drawn(dressed().at(20.0, 10.0), &model, true);
+        assert_eq!(sf.tips.len(), 1, "one row under the pointer, one request");
+        let (id, r, text) = &sf.tips[0];
+        assert_eq!(text, LONG);
+        // The anchor is the label's box, not the row's: it starts after
+        // the padding and stops where the row's own width does.
+        assert_eq!((r.x, r.y, r.h), (4.0, 0.0, 20.0));
+        assert!(r.w < 100.0, "the label's room, not the whole row");
+        // The identity is the PLACE — this view, the label column, this
+        // row's key — so it survives the model being rebuilt around it.
+        assert_eq!(*id, crate::object::tooltip::cell_key(3, 0, "nm"));
+    }
+
+    #[test]
+    fn a_name_that_fits_and_a_list_that_was_not_asked_say_nothing() {
+        // Short enough to be drawn whole: there is nothing to add.
+        let short = one_row("nm");
+        assert!(drawn(dressed().at(20.0, 10.0), &short, true).tips.is_empty());
+        // Trimmed, but the caller did not ask for tooltips: a list that
+        // was drawn before this phase draws exactly as it did.
+        let model = one_row(LONG);
+        assert!(drawn(dressed().at(20.0, 10.0), &model, false).tips.is_empty());
+        // Trimmed and asked for, but the pointer is on the row BELOW the
+        // only one there is.
+        assert!(drawn(dressed().at(20.0, 45.0), &model, true).tips.is_empty());
+    }
+
+    #[test]
     fn a_selection_by_key_survives_the_row_moving() {
         let mut s = ListState::new();
         s.select(Some("beta".into()));
@@ -492,3 +637,4 @@ mod tests {
         assert_ne!(s.interact_epoch, e);
     }
 }
+

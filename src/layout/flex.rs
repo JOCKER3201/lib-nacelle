@@ -4,126 +4,176 @@
 //! so resizing or moving the window reflows the interface live. Layouts
 //! are flexbox column descriptions (FlexLayaut) solved by the `taffy`
 //! crate — the same layout algorithm web pages use: columns have real
-//! min/max pixel widths (side columns shrink before the terminal does)
-//! and collapse priorities (when a column can no longer fit its minimum
-//! width it disappears — collapse=1 first, then 2, ...). If the control
-//! panel loses its column, it comes back as a full-width bar at the
-//! bottom. On portrait windows the visible panels restack vertically
-//! (the body columns merge from the right until they fit the width;
-//! nothing is ever hidden for being short). Every registered widget is
-//! an
-//! individual panel. The built-in default layout and custom
-//! flexbox .layaut files share this engine; legacy .layaut files (fixed
-//! x/y/w/h at the 16:9 reference) are re-adapted with an edge-anchored
-//! transform on landscape and the flex restack on portrait.
+//! min/max pixel widths (the side columns shrink before the work
+//! surface does) and collapse priorities (when a column can no longer
+//! fit its minimum width it disappears — collapse=1 first, then 2,
+//! ...). A panel anchored as the BAR comes back full width at the
+//! bottom if it loses its column. On portrait windows the visible
+//! panels restack vertically (the body columns merge from the right
+//! until they fit the width; nothing is ever hidden for being short).
+//! Every registered widget is an individual panel. The generated
+//! default arrangement and custom flexbox .layaut files share this
+//! engine; legacy .layaut files (fixed x/y/w/h at the 16:9 reference)
+//! are re-adapted with an edge-anchored transform on landscape and the
+//! flex restack on portrait.
+//!
+//! No widget is named anywhere in here. Which column a widget stands
+//! in, where in it, how much of it it takes and which edge it is
+//! pinned to are the ADDON's declarations, read off the registry the
+//! addons directory built (see `widget::registry`).
 
 use crate::base::{
-    panel_count, FlexColumn, FlexLayaut, Layout, LayoutMode, LayoutSpec, Panel, Rect, SizeTable,
+    panel_count, FlexColumn, FlexLayaut, Layout, LayoutMode, LayoutSpec, Panel, PanelAnchor,
+    PanelSlot, Rect, SizeTable, WidgetCategory,
 };
 use taffy::prelude::{auto, length, percent};
 use taffy::style::{AvailableSpace, FlexDirection};
 use taffy::{Size, Style, TaffyTree};
 
-/// CSS-like pixel constraints of the built-in default columns.
+/// CSS-like pixel constraints of the generated default columns.
 const SIDE_MIN: f32 = 168.0;
 const SIDE_MAX: f32 = 340.0;
 const CENTER_MIN: f32 = 430.0;
 
-/// The three anchored roles the layout engine treats specially. They are
-/// matched BY NAME, because widgets come from the registry now: a set
-/// without a terminal or an on-screen keyboard simply has no anchor.
-fn named(name: &str) -> Option<Panel> {
-    Panel::from_name(name)
-}
-
-fn is(p: Panel, name: &str) -> bool {
-    p.name() == name
-}
-
-/// The built-in default layout as a flexbox description — the same
-/// structure a theme author writes in a flexbox .layaut file. It is the
-/// HOME arrangement of u1 §1.1: instruments stacked on the left with
-/// the two-button bar anchored bottom-left, the terminal and keyboard
-/// in the wide centre, the feeds on the right with the clock in its own
-/// box at the bottom. Mirrored verbatim by the shipped console.layaut;
-/// the desktop test `shipped_console_layaut_matches_builtin_default`
-/// proves they cannot diverge.
+/// The generated default arrangement, as a flexbox description — the
+/// same structure a theme author writes in a flexbox .layaut file.
+///
+/// There is no table of widgets here and there is none anywhere else in
+/// the toolkit: the shape below is three columns — two instrument sides
+/// and a wide work surface — and WHICH widget stands where is the
+/// addon's own declaration (`slot`, `order`, `weight`, `anchor`; see
+/// `widget::registry`). A widget that names no column joins the emptier
+/// side, so an installation's whole board is laid out whatever it holds
+/// and a machine with no addons gets an empty arrangement rather than
+/// an invented one.
+///
+/// The shipped console.layaut is this arrangement written out as an
+/// ordinary file; the desktop test
+/// `shipped_console_layaut_matches_builtin_default` proves they cannot
+/// diverge.
 pub fn default_flex() -> FlexLayaut {
-    let col = |basis, min, max, grow, collapse, gap, panels: &[(Panel, f32)]| FlexColumn {
+    // Only board widgets: a launcher's home is the fixture its category
+    // names, and the fixtures are composed elsewhere.
+    let mut stacks: [Vec<Panel>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut adrift: Vec<Panel> = Vec::new();
+    for p in Panel::all() {
+        if p.category() != WidgetCategory::Board {
+            continue;
+        }
+        match p.slot() {
+            PanelSlot::Left => stacks[0].push(p),
+            PanelSlot::Center => stacks[1].push(p),
+            PanelSlot::Right => stacks[2].push(p),
+            PanelSlot::Auto => adrift.push(p),
+        }
+    }
+    // A widget that asked for no column goes to the emptier side, in
+    // registry order — the arrangement holds everything installed
+    // without the engine having an opinion about any of it.
+    for p in adrift {
+        let side = if stacks[2].len() < stacks[0].len() { 2 } else { 0 };
+        stacks[side].push(p);
+    }
+    // Stable, so widgets that asked for the same place keep registry
+    // order between them.
+    for stack in stacks.iter_mut() {
+        stack.sort_by(|a, b| {
+            a.order().partial_cmp(&b.order()).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+    let col = |basis, min, max, grow, collapse, gap, stack: &[Panel]| FlexColumn {
         basis,
         min,
         max,
         grow,
         collapse,
         gap,
-        panels: panels.to_vec(),
-    };
-    // Named rather than hard-coded: a registry without one of these
-    // widgets just leaves it out of the default layout.
-    let by_name = |list: &[(&str, f32)]| -> Vec<(Panel, f32)> {
-        list.iter()
-            .filter_map(|(n, wt)| named(n).map(|p| (p, *wt)))
-            .collect()
+        panels: stack.iter().map(|p| (*p, p.weight())).collect(),
     };
     FlexLayaut {
         columns: vec![
-            // Left: the instrument stack. Weights only matter between
-            // the growers (cpu, memory); the Content-sized panels take
-            // exactly what they measure whatever their number says.
-            col(16.4, SIDE_MIN, SIDE_MAX, 0.0, 2, 1.0, &by_name(&[
-                ("sysinfo", 5.0),
-                ("hardware", 7.0),
-                ("cpu", 26.0),
-                ("memory", 18.0),
-                ("uptime", 8.0),
-                ("control", 12.0),
-            ])),
-            // Centre: the work surface. shell/keyboard are re-anchored
-            // by normalize() to the top and bottom of this column.
-            col(65.0, CENTER_MIN, f32::INFINITY, 1.0, 0, 1.7, &by_name(&[
-                ("shell", 62.0),
-                ("keyboard", 28.0),
-            ])),
-            // Right: the feeds, and the clock in its own box at the
-            // bottom (u1 §1.2 #12 — the images' clearest instruction).
-            col(16.4, SIDE_MIN, SIDE_MAX, 0.0, 1, 2.5, &by_name(&[
-                ("filesystem", 44.0),
-                ("processes", 26.0),
-                ("network", 10.0),
-                ("clock", 8.0),
-            ])),
+            // Left: an instrument stack. Weights only matter between
+            // the growers; a Content-sized panel takes exactly what it
+            // measures whatever its number says.
+            col(16.4, SIDE_MIN, SIDE_MAX, 0.0, 2, 1.0, &stacks[0]),
+            // Centre: the work surface, the column that grows. Whatever
+            // asked to be pinned is re-anchored here by normalize().
+            col(65.0, CENTER_MIN, f32::INFINITY, 1.0, 0, 1.7, &stacks[1]),
+            // Right: the second instrument stack.
+            col(16.4, SIDE_MIN, SIDE_MAX, 0.0, 1, 2.5, &stacks[2]),
         ],
         units_px: false,
         pad_x: None,
     }
 }
 
-/// The reference and minimum heights (vh) the built-in default asks
-/// for. Sizes belong to the LAYOUT, not to the widget (base.rs keeps
-/// them apart for exactly this reason), so the built-in layout has to
-/// name its own instead of inheriting the registry's — otherwise the
-/// ref/min column of console.layaut would silently not apply to the
-/// default. The minimums are u1 §0's arithmetic: each keeps the
-/// widget's last content row on screen (memory's SWAP meter, network's
-/// PING, cpu's LOAD line, uptime's KERNEL row).
+/// The reference and minimum heights (vh) of the generated default —
+/// what every widget it places declared for itself.
+///
+/// Sizes belong to the LAYOUT, not to the widget (base.rs keeps them
+/// apart for exactly this reason), and a .layaut names its own in its
+/// ref/min column. The generated arrangement has no numbers of its own
+/// to name: it is composed out of what is installed, so its table is
+/// the installation's.
 pub fn builtin_sizes() -> Vec<(Panel, f32, f32)> {
-    [
-        ("sysinfo", 4.5, 4.5),
-        ("hardware", 6.5, 6.5),
-        ("cpu", 15.5, 9.0),
-        ("memory", 12.0, 9.0),
-        ("uptime", 8.0, 7.0),
-        ("control", 13.0, 13.0),
-        ("shell", 60.0, 12.0),
-        ("keyboard", 28.0, 12.0),
-        ("filesystem", 40.0, 10.0),
-        ("processes", 22.0, 8.0),
-        ("network", 8.0, 8.0),
-        ("clock", 7.0, 5.5),
-    ]
-    .iter()
-    .filter_map(|(n, r, m)| named(n).map(|p| (p, *r, *m)))
-    .collect()
+    // The REGISTRY's numbers, not the table a layout happens to have
+    // installed: this is what the generated arrangement asks for, and
+    // asking the live table would make it echo whatever came last.
+    let declared = crate::base::default_sizes();
+    default_flex()
+        .columns
+        .iter()
+        .flat_map(|c| c.panels.iter())
+        .filter_map(|(p, _)| declared.get(p.idx()).map(|(r, m)| (*p, *r, *m)))
+        .collect()
+}
+
+/// A registry for the toolkit's own tests: twelve board widgets that
+/// declare a composition of the shape the engine is written for.
+///
+/// The names are this test's own — the engine knows none, and a test
+/// that borrowed the shipped addons' names would be proving the engine
+/// knows them. EVERY test in this binary that touches a panel must call
+/// this: the process-wide registry is fixed by the first call *or the
+/// first read*, and a test reading it first would freeze it empty for
+/// all the others.
+#[cfg(test)]
+pub(crate) fn install_test_registry() {
+    use crate::base::{PanelAnchor as A, PanelSlot as S, WidgetDef};
+    // A composition of the shape the engine is written for: two
+    // instrument sides, a pinned work surface, a bar.
+    let spec: [(&str, S, A, f32, f32); 12] = [
+        ("w01", S::Left, A::Flow, 4.5, 4.5),
+        ("w02", S::Left, A::Flow, 6.5, 6.5),
+        ("w03", S::Left, A::Flow, 15.5, 9.0),
+        ("w04", S::Left, A::Flow, 12.0, 9.0),
+        ("w05", S::Left, A::Flow, 8.0, 7.0),
+        ("w06", S::Left, A::Bar, 13.0, 13.0),
+        ("w07", S::Center, A::Top, 60.0, 12.0),
+        ("w08", S::Center, A::Bottom, 28.0, 12.0),
+        ("w09", S::Right, A::Flow, 40.0, 10.0),
+        ("w10", S::Right, A::Flow, 22.0, 8.0),
+        ("w11", S::Right, A::Flow, 8.0, 8.0),
+        ("w12", S::Right, A::Flow, 7.0, 5.5),
+    ];
+    crate::base::set_registry(
+        spec.iter()
+            .enumerate()
+            .map(|(i, (name, slot, anchor, r, m))| WidgetDef {
+                name: (*name).to_string(),
+                label: name.to_uppercase(),
+                ref_h_vh: *r,
+                min_h_vh: *m,
+                category: WidgetCategory::Board,
+                slot: *slot,
+                order: i as f32,
+                weight: None,
+                anchor: *anchor,
+                essential: false,
+            })
+            .collect(),
+    );
+    crate::base::set_panel_sizes(&builtin_sizes());
 }
 
 /// Device-independent layout unit. `min` / `max` in a .layaut and the
@@ -170,32 +220,27 @@ fn engine(fl: &FlexLayaut, w: f32, h: f32, pad: f32, t: &SizeTable) -> Layout {
     }
 }
 
-/// Enforces the anchor rules of the flex layout (only for panels that
-/// exist in the layaut): the CONTROL panel always sits in the BOTTOM
-/// LEFT corner (bottom of the leftmost column), the terminal in the
-/// CENTER at the very TOP and the on-screen keyboard in the CENTER at
-/// the very BOTTOM. All remaining panels flow wherever the algorithm
-/// puts them.
+/// Enforces the anchor rules of the flex layout, for the panels of the
+/// layaut that asked for one: a `Top` panel goes to the very TOP of the
+/// CENTER column, a `Bottom` panel to its very BOTTOM, and a `Bar` panel
+/// to the bottom of the FIRST column — from where a lost column brings
+/// it back as a full-width bar. Everything that asked for nothing flows
+/// wherever the algorithm puts it, and a layaut whose panels all flow
+/// comes out of here unchanged.
+///
+/// Which panel that is, is never asked here: the anchor is the addon's
+/// own declaration, so an installation with no terminal simply pins
+/// nothing to the top.
 fn normalize(fl: &FlexLayaut) -> FlexLayaut {
     let mut fl = fl.clone();
-    let mut shell_wt = None;
-    let mut keyboard_wt = None;
-    let mut control_wt = None;
+    let mut pinned: Vec<(Panel, f32)> = Vec::new();
     for c in fl.columns.iter_mut() {
-        c.panels.retain(|(p, wt)| match p {
-            p if is(*p, "shell") => {
-                shell_wt = Some(*wt);
-                false
+        c.panels.retain(|(p, wt)| {
+            if p.anchor() == PanelAnchor::Flow {
+                return true;
             }
-            p if is(*p, "keyboard") => {
-                keyboard_wt = Some(*wt);
-                false
-            }
-            p if is(*p, "control") => {
-                control_wt = Some(*wt);
-                false
-            }
-            _ => true,
+            pinned.push((*p, *wt));
+            false
         });
     }
     if fl.columns.is_empty() {
@@ -213,17 +258,34 @@ fn normalize(fl: &FlexLayaut) -> FlexLayaut {
         })
         .map(|(i, _)| i)
         .unwrap_or(0);
-    if let (Some(wt), Some(p)) = (shell_wt, named("shell")) {
-        fl.columns[center].panels.insert(0, (p, wt));
+    // Tops in the order they were declared in, so several of them stack
+    // in that order rather than in reverse.
+    for (i, (p, wt)) in anchored(&pinned, PanelAnchor::Top).into_iter().enumerate() {
+        fl.columns[center].panels.insert(i, (p, wt));
     }
-    if let (Some(wt), Some(p)) = (control_wt, named("control")) {
+    for (p, wt) in anchored(&pinned, PanelAnchor::Bar) {
         fl.columns[0].panels.push((p, wt));
     }
-    if let (Some(wt), Some(p)) = (keyboard_wt, named("keyboard")) {
+    for (p, wt) in anchored(&pinned, PanelAnchor::Bottom) {
         fl.columns[center].panels.push((p, wt));
     }
     fl.columns.retain(|c| !c.panels.is_empty());
     fl
+}
+
+/// The pinned panels asking for one edge, in declaration order.
+fn anchored(pinned: &[(Panel, f32)], a: PanelAnchor) -> Vec<(Panel, f32)> {
+    pinned.iter().filter(|(p, _)| p.anchor() == a).cloned().collect()
+}
+
+/// The panels of a layaut that asked for the given edge.
+fn anchored_in(fl: &FlexLayaut, a: PanelAnchor) -> Vec<(Panel, f32)> {
+    fl.columns
+        .iter()
+        .flat_map(|c| c.panels.iter())
+        .filter(|(p, _)| p.anchor() == a)
+        .cloned()
+        .collect()
 }
 
 /// Splits `span` between stacked panels by their weights, enforcing the
@@ -303,8 +365,36 @@ fn stack_heights(
     (hs, gap_px)
 }
 
-fn has_panel(fl: &FlexLayaut, p: Panel) -> bool {
-    fl.columns.iter().any(|c| c.panels.iter().any(|(k, _)| *k == p))
+/// Fills one of portrait's pinned bands. A single panel takes the band
+/// whole — the band was sized for it — and several share it by the
+/// weights they asked for, never squeezed under their minimums.
+fn stack_band(
+    out: &mut Layout,
+    band: &[(Panel, f32)],
+    r: Rect,
+    h: f32,
+    pad: f32,
+    t: &SizeTable,
+) {
+    match band {
+        [] => {}
+        [(p, _)] => out.set(*p, r),
+        _ => {
+            let weights: Vec<f32> = band.iter().map(|(_, wt)| *wt).collect();
+            let mins: Vec<f32> =
+                band.iter().map(|(p, _)| min_outer(*p, h, pad, t)).collect();
+            let wants: Vec<Option<f32>> = band
+                .iter()
+                .map(|(p, _)| t.intrinsic_h(*p).map(|ih| ih + 2.0 * pad))
+                .collect();
+            let (hs, gap_px) = stack_heights(&weights, &mins, &wants, 1.0, r.h);
+            let mut y = r.y;
+            for ((p, _), ph) in band.iter().zip(&hs) {
+                out.set(*p, Rect::new(r.x, y, r.w, *ph));
+                y += ph + gap_px;
+            }
+        }
+    }
 }
 
 /// The outer height a panel must never be squeezed under: its minimum
@@ -387,15 +477,15 @@ fn landscape(fl: &FlexLayaut, w: f32, h: f32, pad: f32, t: &SizeTable) -> Layout
         vis.remove(idx);
     }
 
-    // A layout that lost the control panel's column gets a full-width
-    // control bar at the bottom instead.
-    let control_dropped = named("control").is_some_and(|ctl| {
-        has_panel(fl, ctl)
-            && !vis
-                .iter()
-                .any(|c| c.panels.iter().any(|(p, _)| *p == ctl))
-    });
-    let bar_h = if control_dropped { h * 0.135 } else { 0.0 };
+    // A layout that lost a bar panel's column gets a full-width bar at
+    // the bottom instead — the way back to the settings survives the
+    // column that held it.
+    let dropped: Vec<Panel> = anchored_in(fl, PanelAnchor::Bar)
+        .into_iter()
+        .map(|(p, _)| p)
+        .filter(|p| !vis.iter().any(|c| c.panels.iter().any(|(k, _)| k == p)))
+        .collect();
+    let bar_h = if dropped.is_empty() { 0.0 } else { h * 0.135 };
 
     // Column widths via taffy (flex-basis/grow/shrink + min/max).
     let mut tf: TaffyTree<()> = TaffyTree::new();
@@ -448,7 +538,7 @@ fn landscape(fl: &FlexLayaut, w: f32, h: f32, pad: f32, t: &SizeTable) -> Layout
     // from 2.5vh to 97vh) come out exactly for the default layout.
     let top = h * 0.025;
     let mut content_bottom = h * 0.97;
-    if control_dropped {
+    if bar_h > 0.0 {
         content_bottom -= bar_h + h * 0.015;
     }
     let hi = (content_bottom - top).max(1.0);
@@ -475,17 +565,23 @@ fn landscape(fl: &FlexLayaut, w: f32, h: f32, pad: f32, t: &SizeTable) -> Layout
             y += ph + gap_px;
         }
     }
-    if let (true, Some(ctl)) = (control_dropped, named("control")) {
-        out.set(ctl, Rect::new(pad_x, content_bottom + h * 0.015, inner, bar_h));
+    // The bar itself: one panel takes the whole width, several share it.
+    if bar_h > 0.0 {
+        let n = dropped.len() as f32;
+        let bw = (inner - gap * (n - 1.0)) / n;
+        for (i, p) in dropped.iter().enumerate() {
+            let x = pad_x + (bw + gap) * i as f32;
+            out.set(*p, Rect::new(x, content_bottom + h * 0.015, bw, bar_h));
+        }
     }
     out
 }
 
-/// Portrait restack honouring the anchor rules: the terminal at the
-/// very top, the on-screen keyboard at the very bottom, the CONTROL
-/// panel as its own full-width bar between the body row and the
-/// keyboard, and the remaining panels in a row of columns in between.
-/// The row is NEVER dropped: hiding eight of twelve widgets because the
+/// Portrait restack honouring the anchor rules: the `Top` panels in a
+/// band at the very top, the `Bottom` ones at the very bottom, the
+/// `Bar` ones as their own full-width band between the body row and
+/// that, and everything that flows in a row of columns in between. The
+/// row is NEVER dropped: hiding eight of twelve widgets because the
 /// window is short is a content loss dressed as responsiveness (u1
 /// §2.3). A short window only re-proportions the bands, and a narrow
 /// one merges the row's columns from the right until they fit.
@@ -496,18 +592,17 @@ fn portrait_flex(fl: &FlexLayaut, w: f32, h: f32, pad: f32, t: &SizeTable) -> La
     let iw = w - 2.0 * edge;
     let mut out = Layout::empty(w, h);
 
-    // Row columns: each source column contributes its panels (minus the
-    // anchored shell/keyboard/control), one chunk per source column,
-    // merged from the right until at most max_chunks remain. No fixed
-    // split at 4 — a five-panel column is one chunk, not 4 + a lonely 1.
+    // Row columns: each source column contributes the panels that flow
+    // (the pinned ones take their own bands), one chunk per source
+    // column, merged from the right until at most max_chunks remain. No
+    // fixed split at 4 — a five-panel column is one chunk, not 4 + a
+    // lonely 1.
     let mut chunks: Vec<Vec<(Panel, f32)>> = Vec::new();
     for c in &fl.columns {
         let body: Vec<(Panel, f32)> = c
             .panels
             .iter()
-            .filter(|(p, _)| {
-                !is(*p, "shell") && !is(*p, "keyboard") && !is(*p, "control")
-            })
+            .filter(|(p, _)| p.anchor() == PanelAnchor::Flow)
             .cloned()
             .collect();
         if !body.is_empty() {
@@ -522,39 +617,37 @@ fn portrait_flex(fl: &FlexLayaut, w: f32, h: f32, pad: f32, t: &SizeTable) -> La
         }
     }
 
-    let shell_p = named("shell");
-    let kb_p = named("keyboard");
-    let ctl_p = named("control");
-    let has_shell = shell_p.is_some_and(|p| has_panel(fl, p));
-    let has_kb = kb_p.is_some_and(|p| has_panel(fl, p));
-    let has_ctl = ctl_p.is_some_and(|p| has_panel(fl, p));
+    let tops = anchored_in(fl, PanelAnchor::Top);
+    let bots = anchored_in(fl, PanelAnchor::Bottom);
+    let bars = anchored_in(fl, PanelAnchor::Bar);
     let has_row = !chunks.is_empty();
 
     // Band proportions: `small` only changes them, never what exists.
-    // (shell, row, control, keyboard) as fractions of the height; shell
+    // (top, row, bar, bottom) as fractions of the height; the top band
     // absorbs the slack the gaps leave.
-    let (_shell_f, row_f, ctl_f, kb_f) = if small {
+    let (_top_f, row_f, bar_f, bot_f) = if small {
         (0.15, 0.50, 0.12, 0.17)
     } else {
         (0.25, 0.40, 0.13, 0.16)
     };
 
-    let kb_h = if has_kb { h * kb_f } else { 0.0 };
-    // Control is ALWAYS its own full-width bar in portrait, between the
-    // row and the keyboard — never inside a chunk, where it took 41 % of
-    // the row's height for two buttons and crushed the instruments.
-    let ctl_h = if has_ctl { h * ctl_f } else { 0.0 };
+    let bot_h = if bots.is_empty() { 0.0 } else { h * bot_f };
+    // A bar panel is ALWAYS its own full-width band in portrait, between
+    // the row and the bottom band — never inside a chunk, where the two
+    // control buttons took 41 % of the row's height and crushed the
+    // instruments.
+    let bar_h = if bars.is_empty() { 0.0 } else { h * bar_f };
     let row_h = if has_row {
-        if has_shell {
+        if !tops.is_empty() {
             h * row_f
         } else {
-            // No terminal: the row takes the shell band too.
+            // Nothing pinned to the top: the row takes that band too.
             let mut rest = h - 2.0 * gap;
-            if kb_h > 0.0 {
-                rest -= kb_h + gap;
+            if bot_h > 0.0 {
+                rest -= bot_h + gap;
             }
-            if ctl_h > 0.0 {
-                rest -= ctl_h + gap;
+            if bar_h > 0.0 {
+                rest -= bar_h + gap;
             }
             rest.max(h * row_f)
         }
@@ -563,33 +656,34 @@ fn portrait_flex(fl: &FlexLayaut, w: f32, h: f32, pad: f32, t: &SizeTable) -> La
     };
 
     let mut used = 0.0;
-    for ph in [kb_h, row_h, ctl_h] {
+    for ph in [bot_h, row_h, bar_h] {
         if ph > 0.0 {
             used += ph + gap;
         }
     }
-    let shell_h = (h - 2.0 * gap - used).max(h * 0.2);
+    let top_h = (h - 2.0 * gap - used).max(h * 0.2);
 
-    // The terminal at the very top.
+    // The top band at the very top.
     let mut y = gap;
-    if let (true, Some(p)) = (has_shell, shell_p) {
-        out.set(p, Rect::new(edge, y, iw, shell_h));
-        y += shell_h + gap;
+    if !tops.is_empty() {
+        stack_band(&mut out, &tops, Rect::new(edge, y, iw, top_h), h, pad, t);
+        y += top_h + gap;
     }
 
-    // The keyboard at the very bottom.
-    if let (true, Some(p)) = (kb_h > 0.0, kb_p) {
-        out.set(p, Rect::new(edge, h - gap - kb_h, iw, kb_h));
+    // The bottom band at the very bottom.
+    if bot_h > 0.0 {
+        let r = Rect::new(edge, h - gap - bot_h, iw, bot_h);
+        stack_band(&mut out, &bots, r, h, pad, t);
     }
 
-    // The control bar directly above it (or at the bottom when there is
-    // no keyboard).
-    if let (true, Some(p)) = (ctl_h > 0.0, ctl_p) {
-        let mut cy = h - gap - ctl_h;
-        if kb_h > 0.0 {
-            cy -= kb_h + gap;
+    // The bar directly above it (or at the bottom when there is no
+    // bottom band).
+    if bar_h > 0.0 {
+        let mut by = h - gap - bar_h;
+        if bot_h > 0.0 {
+            by -= bot_h + gap;
         }
-        out.set(p, Rect::new(edge, cy, iw, ctl_h));
+        stack_band(&mut out, &bars, Rect::new(edge, by, iw, bar_h), h, pad, t);
     }
 
     if has_row {
@@ -691,6 +785,7 @@ mod tests {
     /// fixtures ship empty by design.
     #[test]
     fn every_registered_widget_is_placed() {
+        install_test_registry();
         let l = compute(1920.0, 1080.0, &LayoutMode::Flex, 8.0);
         for p in Panel::all().into_iter().filter(|p| p.category() == WidgetCategory::Board) {
             assert!(
@@ -706,6 +801,7 @@ mod tests {
     /// of the twelve widgets on any window under 900 lines.
     #[test]
     fn every_widget_placed_in_portrait_too() {
+        install_test_registry();
         for (w, h) in [(1080.0, 1920.0), (720.0, 1280.0), (400.0, 800.0)] {
             let l = compute(w, h, &LayoutMode::Flex, 8.0);
             for p in Panel::all().into_iter().filter(|p| p.category() == WidgetCategory::Board) {
@@ -720,13 +816,75 @@ mod tests {
         }
     }
 
+    /// The arrangement is COMPOSED, never written down: which column a
+    /// widget stands in, where in it and how much of it it takes are the
+    /// addon's own declarations, and the engine reads them off the
+    /// registry without knowing one name.
+    #[test]
+    fn the_arrangement_is_composed_from_what_the_addons_declared() {
+        install_test_registry();
+        let fl = default_flex();
+        let col = |i: usize| -> Vec<&'static str> {
+            fl.columns[i].panels.iter().map(|(p, _)| p.name()).collect()
+        };
+        assert_eq!(col(0), ["w01", "w02", "w03", "w04", "w05", "w06"], "slot: left");
+        assert_eq!(col(1), ["w07", "w08"], "slot: center");
+        assert_eq!(col(2), ["w09", "w10", "w11", "w12"], "slot: right");
+        // A widget that named no share of its column asked to be as
+        // tall as it says it is.
+        assert_eq!(fl.columns[0].panels[0].1, 4.5);
+    }
+
+    /// The pinned edges are the addons' request, not the engine's
+    /// opinion: the `Top` panel opens the work column, the `Bottom` one
+    /// closes it, and the `Bar` panel sits at the foot of the first
+    /// column — from where a lost column brings it back as a full-width
+    /// bar rather than dropping it.
+    #[test]
+    fn declared_anchors_pin_the_panels_that_asked() {
+        install_test_registry();
+        let (w, h) = (1920.0, 1080.0);
+        let l = compute(w, h, &LayoutMode::Flex, 8.0);
+        let top = Panel::from_name("w07").unwrap();
+        let bottom = Panel::from_name("w08").unwrap();
+        let bar = Panel::from_name("w06").unwrap();
+        let centre: Vec<Panel> = Panel::all()
+            .into_iter()
+            .filter(|p| (l.p(*p).x - l.p(top).x).abs() < 0.5)
+            .collect();
+        assert!(
+            centre.iter().all(|p| l.p(*p).y >= l.p(top).y - 0.5),
+            "the top anchor must open its column"
+        );
+        assert!(
+            centre.iter().all(|p| l.p(*p).bottom() <= l.p(bottom).bottom() + 0.5),
+            "the bottom anchor must close its column"
+        );
+        let left: Vec<Panel> = Panel::all()
+            .into_iter()
+            .filter(|p| (l.p(*p).x - l.p(bar).x).abs() < 0.5)
+            .collect();
+        assert!(
+            left.iter().all(|p| l.p(*p).bottom() <= l.p(bar).bottom() + 0.5),
+            "the bar anchor must close the first column"
+        );
+        // A landscape window too narrow for the side columns loses them
+        // both — and the bar panel comes back full width at the foot of
+        // the window instead of going with them.
+        let (nw, nh) = (450.0, 300.0);
+        let narrow = compute(nw, nh, &LayoutMode::Flex, 8.0);
+        assert!(narrow.p(bar).w > nw * 0.9, "the bar must span the window");
+        assert!(narrow.p(bar).y > nh * 0.8, "and sit at its foot");
+    }
+
     /// u1 §5.5 (5): the side column keeps the same proportion to the
     /// reference width (h * 0.30) at every screen size. Before the
     /// device-independent units it was 0.97 at 1080p and 0.62 at 4K —
     /// the console became a terminal with two ribbons.
     #[test]
     fn proportions_are_resolution_independent() {
-        let side = Panel::from_name("sysinfo").expect("sysinfo registered");
+        install_test_registry();
+        let side = Panel::from_name("w01").expect("the test registry's first panel");
         let ws_at = |w: f32, h: f32| -> f32 {
             let l = compute(w, h, &LayoutMode::Flex, 8.0);
             l.p(side).w / (h * 0.30)
@@ -747,15 +905,17 @@ mod tests {
 
     /// The 400x800 portrait row is the honest limit: one merged chunk,
     /// nine instruments, scaled below their minimums together rather
-    /// than hidden. The clock must land in the row, not off-screen.
+    /// than hidden. The last of them must land in the row, not
+    /// off-screen.
     #[test]
     fn phone_sized_portrait_merges_into_one_chunk() {
+        install_test_registry();
         let l = compute(400.0, 800.0, &LayoutMode::Flex, 8.0);
-        let clock = Panel::from_name("clock").unwrap();
-        let sysinfo = Panel::from_name("sysinfo").unwrap();
+        let last = Panel::from_name("w12").unwrap();
+        let first = Panel::from_name("w01").unwrap();
         // One chunk means the first and the last instrument share a
         // column: same x.
-        assert!((l.p(clock).x - l.p(sysinfo).x).abs() < 0.5);
+        assert!((l.p(last).x - l.p(first).x).abs() < 0.5);
     }
 
     /// The minimums the solver keeps are OUTER heights: content plus
@@ -766,8 +926,9 @@ mod tests {
     /// below (FILESYSTEM's tiles over the process header, 900x1600).
     #[test]
     fn published_chrome_raises_a_panels_minimum() {
+        install_test_registry();
         let (w, h, pad) = (900.0, 1600.0, 8.0);
-        let net = Panel::from_name("network").unwrap();
+        let net = Panel::from_name("w11").unwrap();
         let sizes = crate::base::default_sizes();
         let n = sizes.len();
         let mut chrome = vec![0.0; n];
@@ -785,7 +946,7 @@ mod tests {
             l0.p(net).h,
             l1.p(net).h
         );
-        // And the column still holds: panels sharing the network's
+        // And the column still holds: panels sharing that panel's
         // column may not overlap each other.
         let col: Vec<Rect> = Panel::all()
             .into_iter()

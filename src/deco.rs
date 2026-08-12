@@ -4,11 +4,16 @@
 //! engine's; WHAT the stage furniture looks like is decided here, and
 //! every value is a theme token, per the governing principle. The
 //! backdrop PLATE (traces, grid, vignette) is `theme::plate` — baked
-//! pixels, not per-frame geometry — and an ordinary board deliberately
-//! paints NO ground of its own: the clear and the plate must stay
-//! visible through every ride.
+//! pixels, not per-frame geometry.
+//!
+//! A board standing still paints NO ground of its own: the clear and
+//! the plate already fill the screen behind it. A board turning
+//! SIDEWAYS is a different thing — a WALL of a solid — and takes its
+//! ground with it ([`board_ground`]) over the flat [`ride_void`] the
+//! whole turn happens in; without that the walls are panes of glass
+//! with the frame's own clear showing through them.
 
-use crate::draw::DrawList;
+use crate::draw::{DrawList, ImageId};
 use crate::theme::{self, Color, TokenId};
 use std::sync::OnceLock;
 
@@ -26,6 +31,45 @@ fn col(c: theme::ThemeColor) -> Color {
 pub fn clear_color() -> Color {
     static VOID: OnceLock<TokenId> = OnceLock::new();
     col(theme::resolved().bed(tok(&VOID, "surface.void")))
+}
+
+/// The ground one board stands on, screen-sized, in the theme's own
+/// order: `backdrop.solid` — what lies behind the board — then the
+/// board's field `elev.board.fill`, then the baked backdrop plate, the
+/// decoration whose traces, grid and stars live on that field (5.5).
+/// Emitted by a board riding SIDEWAYS, before its panels, so the
+/// caller's yaw and perspective carry ground and panels together and
+/// the face turns as one solid wall. Two levels rather than one because
+/// a family-B board paints NOTHING of its own (`elev.board.fill` at
+/// alpha 0) and a wall of nothing is a pane of glass, not a wall: what
+/// that theme puts behind its panes is the backdrop, and the backdrop
+/// is what the wall carries. `plate` is the host's baked backdrop
+/// texture, or `None` when the theme bakes no decoration at all.
+pub fn board_ground(dl: &mut DrawList, w: f32, h: f32, plate: Option<ImageId>) {
+    static SOLID: OnceLock<TokenId> = OnceLock::new();
+    static FILL: OnceLock<TokenId> = OnceLock::new();
+    let t = theme::resolved();
+    for id in [tok(&SOLID, "backdrop.solid"), tok(&FILL, "elev.board.fill")] {
+        let c = col(t.bed(id));
+        if c.a > 0.0 {
+            dl.rect(0.0, 0.0, w, h, c);
+        }
+    }
+    if let Some(id) = plate {
+        // White at 1.0 is the multiplicative identity: the plate's
+        // pixels ARE the theme's baked colours.
+        dl.image(0.0, 0.0, w, h, id, Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+    }
+}
+
+/// The flat colour the sideways ride happens in: painted once under the
+/// whole cube, and the colour a wall settles toward as it turns away
+/// from the viewer, so a wall edge-on melts into the space behind it
+/// instead of into grey. Read as a BED — a raw master rides through
+/// near-black rather than mid-grey.
+pub fn ride_void() -> Color {
+    static VOID: OnceLock<TokenId> = OnceLock::new();
+    col(theme::resolved().bed(tok(&VOID, "motion.board_ride.void")))
 }
 
 /// A fixture's face: frosted glass over whatever sits beneath, plus

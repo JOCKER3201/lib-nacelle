@@ -3671,6 +3671,7 @@ gesture_frac = 60%                    # hand travel for a full quarter turn or a
 rubber_gain = 0.15                    # the rubbery give past the end of the row; -; f, 0.0 .. 1.0; main.rs:687 — the give is a visible material property, not a bound
 rubber_max  = 10%                     # how far that give may stretch at most; -; % of the viewport; main.rs:687's clamp, companion of rubber_gain
 epsilon     = 0.05                    # below this progress the ride is not drawn at all; -; f, 0.0 .. 0.5; main.rs:1676 — a rendering guard with a visible threshold
+void        = @surface.void           # the space the cube turns in: painted under the whole turn, and what a wall turning away settles toward; -; colour; @surface.void — the swapchain clear, so the ride happens in the dark the frame already stands on
 
 # ---- widget_grow · editor tear-off growth --------------------------------
 [motion.widget_grow]
@@ -4338,6 +4339,9 @@ bar_h = @progress.h                 # the thin bar a resource row carries · ima
 bar_gap = @space.2                  # gap between the label line and that bar · images 1,7 · len (u) · @space.2 = 1u = 5.4 px
 label_role = body                   # type role of a row's label · images 1,7 · role · type.body, the size a row of prose reads at
 status_role = caption               # type role of the trailing status word · images 1,7 · role · type.caption, a step under the label so the status reads as an aside
+corner = @corner.sm                 # a row's corner radius, for the hover/selection plate behind it · images 1,7 · len (u) · @corner.sm = 0.8u = 4.3 px, the value the plugins borrowed from filetile.corner
+wheel_px = 8u                       # scroll distance per wheel notch in a row list · images 1,7 · len (u) · 43.2 px, the value the plugins borrowed from filetile.wheel_px
+scroll_gutter = 0u                  # width kept clear at the scrolling edge of a row so an overlay bar has its own lane · images 1,7 · len (u) · 0u = today's drawing, where scrollbar.mode = overlay lets the bar sit over the row's trailing status; a theme that wants the bar beside the text sets this to scrollbar.w plus twice scrollbar.margin
 
 # =========================================================================
 # tree — a tree is not a second view: it is a MODEL that flattens to the
@@ -4685,8 +4689,9 @@ arrow_size_min_px = 4px             # absolute floor for arrow_size · images 3,
 # editor.grid.cols / .rows are USER settings, not theme tokens.
 # =========================================================================
 [editor]
-spawn_w_frac  = 0.20                # a freshly added widget's width share of the screen · - · frac · was w * 0.20 in editor.rs
-spawn_h_frac  = 0.25                # its height share · - · frac · was h * 0.25
+spawn_w_frac  = 0.28                # a freshly added widget's width share of the screen · - · frac · was w * 0.20 in editor.rs
+spawn_h_frac  = 0.32                # its height share · - · frac · was h * 0.25
+add_hold_ms   = 1000ms              # how long ADD WIDGET is held before placement starts · - · ms · borrowed motion.hold.duration_ms until it did; adding a widget is undoable, so it needs none of the deliberation a destructive control does
 proxy.close_max_w_frac = 0.20       # ceiling of the proxy close button as a share of proxy width · - · frac · was a hardcoded clamp
 proxy.close_max_h_frac = 0.40       # and of its height · - · frac · was a hardcoded clamp
 handle_color  = @accent.primary     # the corner grab squares on a widget proxy · - · col · @accent.primary; editor.rs:722
@@ -4828,6 +4833,16 @@ duration_ms = 3000ms                # how long the boot screen is on screen at a
 log_duration_ms = 1600ms            # how fast the log scrolls — all its lines inside this window · - · ms, 0ms .. 10000ms · boot.rs:38; the split between log and logo is the shape of the sequence
 logo_y_frac = 44%                   # where the logo's baseline sits · - · % of the viewport height · boot.rs:65's h/2 - big
 sub_gap = 0.4x @type.display.hero.size   # gap between the logo and its sub-line · - · rat of @type.display.hero.size · boot.rs:78
+
+# =========================================================================
+# emptystate — the line a panel draws when it has nothing to show. Its two
+# keys sat at the tail of [boot] with no header of their own, so the only
+# name that reached them was `boot.role` / `boot.y_frac`; every consumer
+# asked for `emptystate.*` and got nothing. The header is the whole fix —
+# the keys, their order and their values are unchanged, so no other token's
+# declaration order moves.
+# =========================================================================
+[emptystate]
 role = value                        # type role of the "nothing here" message · - · role · type.value
 y_frac = 40%                        # where that message sits in the empty box · - · % of the box's height · -
 
@@ -4853,6 +4868,18 @@ caption_role = tooltip              # type role of a file name · image 8 · rol
 caption_gap = 70%                   # gap between glyph and file name · image 8 · % of the caption block's height (3.2) · -
 wheel_px = 8u                       # scroll distance per wheel notch · image 8 · len (u) · 43.2 px
 row_justify = fill                  # fill stretches row pitch so the last visible row ends on the panel's floor; pack sits rows on filetile.gap · image 8 · enum: pack | fill · fs/lib.rs:266 — why the tiles do not sit on filetile.gap today
+
+# =========================================================================
+# search — the search panel: one query box from [field] over one answer
+# list from [list], and the two things NEITHER of those families can say,
+# because both belong to the pair rather than to either half. Everything
+# else the panel draws — the box, its caret, a row, its scrollbar, the
+# line it shows when it has nothing to show — is already declared above
+# and is deliberately not restated here.
+# =========================================================================
+[search]
+gap = @space.2                      # between the query box and the first answer under it · image 7 (the search field) · len (u) · @space.2 = 1u = 5.4 px, the same step icon-to-label takes; neutral by reference rather than a length chosen here
+debounce_ms = 200ms                 # how long after the last keystroke the search actually runs · - · ms, 0ms .. 3000ms · literal by rule, and deliberately NOT @tooltip.delay_ms: coupling a walk of the home directory to the pause before a tooltip would make one of the two wrong whenever the other moved. 0ms searches on every keystroke, which is the thing this token exists to prevent
 
 # =========================================================================
 # rhythm — alignment and vertical rhythm. This family replaces the 27 call
