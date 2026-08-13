@@ -4348,17 +4348,6 @@ border = @stroke.hair               # the ring around the menu BOX · - · str �
 item.role = body                    # type role of a menu row's label · - · role · type.body, which 5.25's gloss names as the target anyway
 item_inset = 0.5x @menu.row_h       # left inset of a row's label · - · rat of @menu.row_h · 12.0 px
 item_text_threshold = 0.7x @menu.row_h   # below this height an unfolding row draws no text · - · rat of @menu.row_h · 16.7 px
-anchor_gap = @space.1               # the air between the control that unfolds and the body it unfolds · - · len (u) · @space.1 = 0.5u = 2.7 px; the smallest step that leaves BACKGROUND between two rings
-# Why there has to be air at all. The body used to hang off `anchor.bottom()`
-# exactly, so the two shapes closed their outlines on ONE line: the ring was
-# stroked twice there, and each shape's corner curved into the other's, which
-# reads as a straight segment running out of one frame and into the next with
-# the rounding cancelled between them. Flush is also why the vertical edge
-# stepped from 2 px at 0.95 alpha (the anchor wears the `selected` rung while
-# its list is open) to 1 px at 0.78 (the body's own level) halfway down what
-# looks like one line. Two complete rounded frames with air between them say
-# what is true — a control, and the body it opened — and neither has to
-# borrow the other's edge to say it.
 anchor_width = anchor               # whether the menu takes its anchor's width or its own minimum · - · enum: anchor | min_w · -; context menus always size to content over the min_w floor
 rule = @stroke.hair                 # the separator between menu groups · - · str | none · @stroke.hair
 hint_role = caption                 # type role of the shortcut hint at a row's right edge · - · role · type.caption
