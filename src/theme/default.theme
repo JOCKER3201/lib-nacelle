@@ -283,6 +283,21 @@ pill     = pill
                     # pill badges, scrollbar thumbs · 1, 3, 4 (CRITICAL / CONTAINED badges) · sentinel, bakes to -2.0 = half the shorter side · sentinel by rule (5.0)
 segments = 6
                     # arc tessellation quads per corner; 6 at an 8 px radius is a 0.4 px chord error · - · n, 3 .. 16 · literal count (5.4)
+mode     = round
+                    # THE CUT, for the whole interface: how every radius above is taken off a box · 1-10 · enum: square | round | chamfer · no derivation; this is the one place a theme states its corner language
+# The cut lives beside the radii ON PURPOSE. Twelve presets used to state it
+# for themselves — eight elevations, panel, winframe, scrollbar, modal — with
+# "no derivation" written against each, so a file could say `round` in ten of
+# them and `chamfer` in two and be internally consistent by its own lights.
+# The shipped file did exactly that: the window frame, the context menu (which
+# follows the frame), the tooltip and the modal were cut, and everything
+# hanging off the panel was rounded. Family A's language in four places and
+# family B's in the rest of one file.
+# A radius without its cut is half a decision — the same reason every `*.corner`
+# in this file carries a `*_corner_mode` sibling rather than a bare length. The
+# twelve presets keep their sibling keys and a theme may still pin any one of
+# them; what changed is that they DERIVE, so a theme that wants the console
+# language writes `chamfer` once, here, and the whole interface answers.
 
 
 # =========================================================================
@@ -1474,7 +1489,7 @@ glass.tint           = #FFFFFF / 1.0          # multiply tint of the blur quad; 
 glass.wash           = none                   # alpha-over wash on the frost; the theme's own light · 7,8,10 · colour or none · none = the second quad is not drawn; user BlurOpacity scales this alpha
 # body, shape
 fill                 = @surface.void          # the backdrop bed when backdrop.source paints nothing over it (used INSTEAD of the glass pair while rank = 0) · 7,8,10 · colour or none · @surface.void — the opaque bed and the swapchain clear (5.5)
-corner               = round                  # corner treatment of the backdrop plate rect · 7,8,10 · enum: square | round | chamfer · no derivation; 5.12 names round, family A may say chamfer here
+corner               = @corner.mode           # corner treatment of the backdrop plate rect · 7,8,10 · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · 7,8,10 · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
 edge.color           = @component.panel.border # the backdrop plate has no ring in a silent theme · 7,8,10 · colour or none · @component.panel.border -> @border.default -> alpha(@accent.primary, 0.78)
@@ -1516,7 +1531,7 @@ glass.tint           = #FFFFFF / 1.0          # multiply tint of the blur quad; 
 glass.wash           = none                   # alpha-over wash on the frost; the theme's own light · 7,8,10 · colour or none · none = the second quad is not drawn; user BlurOpacity scales this alpha
 # body, shape
 fill                 = @surface.base          # the desktop field behind every panel (used INSTEAD of the glass pair while rank = 0) · 1-6 · colour or none · @surface.base — the screen background traces and vignette live on (5.5)
-corner               = round                  # corner treatment of the board rect · 1-6 · enum: square | round | chamfer · no derivation; 5.12 names round, family A may say chamfer here
+corner               = @corner.mode           # corner treatment of the board rect · 1-6 · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · 1-6 · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
 edge.color           = @component.panel.border # ring around the board field · 1-6 · colour or none · @component.panel.border -> @border.default -> alpha(@accent.primary, 0.78)
@@ -1600,7 +1615,7 @@ glass.tint           = #FFFFFF / 1.0          # multiply tint of the blur quad; 
 glass.wash           = none                   # alpha-over wash on the frost; the theme's own light · 7,8,10 · colour or none · none = the second quad is not drawn; user BlurOpacity scales this alpha
 # body, shape
 fill                 = @surface.raised        # the body of a lifted panel or an active tile (used INSTEAD of the glass pair while rank = 0) · 3,8 · colour or none · @surface.raised — one step up the surface ladder (5.5)
-corner               = round                  # corner treatment of the raised container rect · 3,8 · enum: square | round | chamfer · no derivation; 5.12 names round, family A may say chamfer here
+corner               = @corner.mode           # corner treatment of the raised container rect · 3,8 · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · 3,8 · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
 edge.color           = @component.panel.border # ring around a lifted container · 3,8 · colour or none · @component.panel.border -> @border.default -> alpha(@accent.primary, 0.78)
@@ -1642,7 +1657,7 @@ glass.tint           = #FFFFFF / 1.0          # multiply tint of the blur quad; 
 glass.wash           = none                   # alpha-over wash on the frost; the theme's own light · 7,8,10 · colour or none · none = the second quad is not drawn; user BlurOpacity scales this alpha
 # body, shape
 fill                 = @surface.panel         # the focused window body when glass.rank = 0 (used INSTEAD of the glass pair while rank = 0) · 7 · colour or none · @surface.panel — focus is carried by edge and glow, not by a different fill (5.12)
-corner               = round                  # corner treatment of the focused window rect · 7 · enum: square | round | chamfer · no derivation; 5.12 names round, family A may say chamfer here
+corner               = @corner.mode           # corner treatment of the focused window rect · 7 · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · 7 · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
 edge.color           = @component.panel.border # the focused frame; image 7 makes this a magenta->violet gradient · 7 · colour or none · @component.panel.border -> @border.default -> alpha(@accent.primary, 0.78)
@@ -1684,7 +1699,7 @@ glass.tint           = #FFFFFF / 1.0          # multiply tint of the blur quad; 
 glass.wash           = none                   # alpha-over wash on the frost; the theme's own light · 7,8,10 · colour or none · none = the second quad is not drawn; user BlurOpacity scales this alpha
 # body, shape
 fill                 = @surface.raised        # the menu / tooltip body when glass.rank = 0 (used INSTEAD of the glass pair while rank = 0) · - · colour or none · @surface.raised — popovers float above panels (5.5)
-corner               = round                  # corner treatment of the popover rect · - · enum: square | round | chamfer · no derivation; 5.12 names round, family A may say chamfer here
+corner               = @corner.mode           # corner treatment of the popover rect · - · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · - · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
 edge.color           = @component.panel.border # ring around a menu or tooltip · - · colour or none · @component.panel.border -> @border.default -> alpha(@accent.primary, 0.78)
@@ -1726,7 +1741,7 @@ glass.tint           = #FFFFFF / 1.0          # multiply tint of the blur quad; 
 glass.wash           = none                   # alpha-over wash on the frost; the theme's own light · 7,8,10 · colour or none · none = the second quad is not drawn; user BlurOpacity scales this alpha
 # body, shape
 fill                 = @surface.sunken        # the interior of a recessed well (used INSTEAD of the glass pair while rank = 0) · 1,2,7 · colour or none · @surface.sunken — recessed beds (5.5)
-corner               = round                  # corner treatment of the inset well rect · 1,2,7 · enum: square | round | chamfer · no derivation; 5.12 names round, family A may say chamfer here
+corner               = @corner.mode           # corner treatment of the inset well rect · 1,2,7 · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · 1,2,7 · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
 edge.color           = @component.panel.border # ring around a recessed well · 1,2,7 · colour or none · @component.panel.border -> @border.default -> alpha(@accent.primary, 0.78)
@@ -1768,7 +1783,7 @@ glass.tint           = #FFFFFF / 1.0          # multiply tint of the blur quad; 
 glass.wash           = none                   # alpha-over wash on the frost; the theme's own light · 7,8,10 · colour or none · none = the second quad is not drawn; user BlurOpacity scales this alpha
 # body, shape
 fill                 = none                   # the overlay plate paints nothing of its own; decor.* fills it (used INSTEAD of the glass pair while rank = 0) · 4 · colour or none · none = draw no quad; the baked overlay plate is the content (5.15)
-corner               = round                  # corner treatment of the overlay plate rect · 4 · enum: square | round | chamfer · no derivation; 5.12 names round, family A may say chamfer here
+corner               = @corner.mode           # corner treatment of the overlay plate rect · 4 · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · 4 · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
 edge.color           = @component.panel.border # the overlay plate has no ring · 4 · colour or none · @component.panel.border -> @border.default -> alpha(@accent.primary, 0.78)
@@ -1813,7 +1828,7 @@ glass.wash           = none                   # alpha-over wash on the frost; th
 # 5.12's prose says default gives fixture rank 0 and alpha(@surface.base, 0.92).
 # The prose is the one that speaks about default.theme, so 0.92 is written here.
 fill                 = alpha(@surface.base, 0.92) # the full-screen sheet over the frozen board; legible with no offscreen pass (used INSTEAD of the glass pair while rank = 0) · - · colour or none · stated for default in 5.12's prose; its table row says alpha at 0.0 instead
-corner               = round                  # corner treatment of the fixture sheet rect · - · enum: square | round | chamfer · no derivation; 5.12 names round, family A may say chamfer here
+corner               = @corner.mode           # corner treatment of the fixture sheet rect · - · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · - · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
 edge.color           = @component.panel.border # ring around the full-screen sheet · - · colour or none · @component.panel.border -> @border.default -> alpha(@accent.primary, 0.78)
@@ -4191,7 +4206,7 @@ content_pad = 2.8u                  # inset from the panel border to its content
 content_pad_x = same_as_parent      # horizontal half of content_pad, split when a theme wants it · images 1-10 · sentinel | len (u) · same_as_parent = @panel.content_pad
 content_pad_y = same_as_parent      # vertical half of content_pad · images 1-10 · sentinel | len (u) · same_as_parent = @panel.content_pad
 corner = @corner.md                 # panel corner radius · images 1,7 ("~8 px at 1440p") · len (u) · @corner.md = 1.2u = 6.5 px
-corner_mode = round                 # how that radius is cut · images 1,7 · enum: round | chamfer · family A may set chamfer
+corner_mode = @corner.mode          # how that radius is cut · images 1,7 · enum: round | chamfer · @corner.mode, the one place this file states its corner language
 border = @stroke.hair               # the resting panel ring · images 1-10, the brief's "thin glowing 1px border" · str · @stroke.hair
 border_focused = @stroke.regular    # the ring when the panel is the focused container · image 7 · str · @stroke.regular
 min_content_h = @rhythm.row         # the content box a short panel is never squeezed under; the container's degradation ladder (u2 §4.2) starts when the box would fall below it · images 1-10 · len (u) · @rhythm.row = 27.0 px
@@ -4289,7 +4304,7 @@ count_pad = 0.6u                    # padding around that number · images 7,9 �
 title_h = @titlebar.h               # the window title bar height · images 7,8 · len (u) · exactly today's vh(2.6); shared root
 border = @stroke.regular            # the frame ring · images 7,8 · str · today (vh*0.18).max(1.5) = 1.94
 corner = @corner.lg                 # frame corner radius · images 7,8 · len (u) · @corner.lg = 2.2u = 11.9 px
-corner_mode = chamfer               # how that corner is cut · images 7,8 · enum: round | chamfer · family A's language; family B sets round
+corner_mode = @corner.mode        # how that corner is cut · images 7,8 · enum: round | chamfer · @corner.mode, the one place this file states its corner language
 # The grip band lies OVER the title bar at the top edge and resize wins
 # over the title, so a band as deep as the bar leaves no title left to drag
 # by: at 1.1x this was 30.9 px against a bar of border + title_h = 30.0, and
@@ -4793,7 +4808,7 @@ w_hover = 2u                        # the width under the pointer · - · len (u
 margin = @space.1                   # gap between bar and content edge · - · len (u) · @space.1 = 0.5u = 2.7 px
 thumb_min = 6u                      # minimum thumb length, so a long document still shows one · - · len (u) · 32.4 px
 corner = @corner.pill               # the thumb's radius · - · len (u) | pill · @corner.pill = w/2
-corner_style = round                # which shape that radius is cut to · - · enum: square | round | chamfer · a length is not a shape (5.4d): the radius beside it says `pill`, and a capsule is round by name
+corner_style = @corner.mode         # which shape that radius is cut to · - · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 track = off                         # whether the groove behind the thumb is drawn · - · enum: on | off · -
 auto_hide = true                    # whether the bar fades out when idle · - · bool · -
 fade_ms = 260ms                     # how long that fade takes, from the last movement · - · ms, 0ms .. 2000ms · read only when auto_hide = true; 0ms cuts the bar instead of fading it
@@ -4931,7 +4946,7 @@ min_h = 48u                         # minimum modal height · - · len (u) · 25
 min_h_min_px = 260px                # absolute floor for min_h · - · device px · companion of modal.min_h (3.2)
 pad = 2.8u                          # padding inside the modal · - · len (u) · 15.1 px
 corner = @corner.lg                 # the modal's corner radius · - · len (u) · @corner.lg = 2.2u = 11.9 px
-corner_mode = chamfer               # how that corner is cut · - · enum: round | chamfer · family B sets round
+corner_mode = @corner.mode        # how that corner is cut · - · enum: round | chamfer · @corner.mode, the one place this file states its corner language
 border = @stroke.regular            # the modal's ring · - · str · @stroke.regular
 scrim_alpha = 0.55                  # how far the scrim darkens what is behind · - · frac 0..1 · the colour is component.modal.scrim
 title.role = title.window           # type role of the modal title · - · role · type.title.window
