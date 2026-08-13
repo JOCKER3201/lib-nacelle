@@ -474,7 +474,7 @@ impl Frame {
         // the window_control roles for the glyph — the close button is
         // the one destructive control and hovers in its own colour.
         let plate = |ctx: &mut Ctx, r: Rect, close: bool| -> Color {
-            let hot = r.contains(ctx.mouse.0, ctx.mouse.1);
+            let hot = ctx.mouse.over(r);
             let st = class_state(
                 t,
                 &ICON_BUTTON,
@@ -707,7 +707,7 @@ impl Frame {
         let inset = t.px(tok(&ITEM_INSET, "menu.item_inset")).max(0.0);
         for (i, (_, label)) in MENU.iter().enumerate() {
             let row = menu_row(mr, i);
-            let hot = row.contains(ctx.mouse.0, ctx.mouse.1);
+            let hot = ctx.mouse.over(row);
             let st = class_state(
                 t,
                 &MENU_ITEM,

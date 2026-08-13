@@ -377,6 +377,14 @@ impl MenuState {
         let p = unfold_p(self.opened_t, ctx.t);
         let visible_h = p * rows_h;
 
+        // The box claims the ground it covers ([`crate::pointer`]) before
+        // the rows below read the pointer, so an open menu takes the
+        // hover away from whatever it opened over — the same grab its
+        // clicks and its wheel already are — while the rows of the menu
+        // itself keep it. As much of the box as has UNFOLDED: a menu
+        // halfway open covers half of what it will.
+        ctx.mouse.cover(Rect::new(self.rect.x, self.rect.y, w, pad * 2.0 + visible_h));
+
         // ---- rows' geometry (full size — hit data) ----------------------
         self.rows.clear();
         let mut top = 0.0;
@@ -394,7 +402,7 @@ impl MenuState {
         // Pointer motion updates the highlight only when it enters a
         // DIFFERENT row (index, not raw position), and keyboard motion
         // holds hover off until the pointer actually moves again.
-        let mouse = ctx.mouse;
+        let mouse = ctx.mouse.at();
         if self.last_mouse != Some(mouse) {
             self.kbd_hold = false;
             self.last_mouse = Some(mouse);

@@ -98,7 +98,7 @@ fn shoot(fonts: &mut FontSystem, p: f32, mouse: (f32, f32)) -> (DrawList, Vec<(R
             w: W,
             h: H,
             t: 0.0,
-            mouse,
+            mouse: nacelle::pointer::Pointer::new(mouse.0, mouse.1),
             term_font_scale: 1.0,
             ui_font_scale: 1.0,
             panel_scale: 1.0,

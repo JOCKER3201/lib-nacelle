@@ -83,7 +83,7 @@ fn ctx<'a>(dl: &'a mut DrawList, fonts: &'a mut FontSystem, mouse: (f32, f32)) -
         w: W,
         h: H,
         t: 0.0,
-        mouse,
+        mouse: nacelle::pointer::Pointer::new(mouse.0, mouse.1),
         term_font_scale: 1.0,
         ui_font_scale: 1.0,
         panel_scale: 1.0,

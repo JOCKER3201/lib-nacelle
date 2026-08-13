@@ -1137,7 +1137,7 @@ impl ScriptWidget {
 impl Widget for ScriptWidget {
     fn draw(&mut self, ctx: &mut Ctx, r: Rect, host: &Host) {
         let Some(elements) = self.elements(host) else { return };
-        self.views.begin(ctx.mouse);
+        self.views.begin(ctx.mouse.at());
         let mut pass = ViewPass {
             state: &mut self.views,
             generation: host.snap.generation,
@@ -2448,6 +2448,7 @@ fn draw_stack(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pointer::Pointer;
 
     fn snapshot() -> crate::telemetry::Snapshot {
         crate::telemetry::Snapshot {
@@ -2689,7 +2690,7 @@ mod tests {
             w: 1920.0,
             h: 1080.0,
             t: 0.0,
-            mouse: (0.0, 0.0),
+            mouse: Pointer::new(0.0, 0.0),
             term_font_scale: 1.0,
             ui_font_scale: 1.0,
             panel_scale: 1.0,

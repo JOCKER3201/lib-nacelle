@@ -17,6 +17,7 @@ use nacelle::draw::DrawList;
 use nacelle::font::FontSystem;
 use nacelle::object::tooltip::Tooltips;
 use nacelle::object::{panel, segmented, tabs};
+use nacelle::pointer::Pointer;
 use nacelle::theme;
 use nacelle::ui::{self, Align, CellKind, ColWidth, Column, TableStyle, TableView};
 use nacelle::view::list::{ListState, ListStyle, ListView};
@@ -51,7 +52,7 @@ where
         w: W,
         h: H,
         t,
-        mouse,
+        mouse: Pointer::new(mouse.0, mouse.1),
         term_font_scale: 1.0,
         ui_font_scale: 1.0,
         panel_scale: 1.0,

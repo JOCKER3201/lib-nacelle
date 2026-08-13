@@ -24,6 +24,7 @@
 
 use nacelle::draw::DrawList;
 use nacelle::font::FontSystem;
+use nacelle::pointer::Pointer;
 use nacelle::theme::TokenId;
 use nacelle::ui::{
     self, Align, ColumnCell, ColumnsStyle, LabelWidth, Role, RowItem, RowsStyle, Run,
@@ -57,7 +58,7 @@ fn drawn<T>(f: impl FnOnce(&mut Ctx) -> T) -> (Vec<f32>, T) {
             w: W,
             h: H,
             t: 0.0,
-            mouse: (-1.0, -1.0),
+            mouse: Pointer::new(-1.0, -1.0),
             term_font_scale: 1.0,
             ui_font_scale: 1.0,
             panel_scale: 1.0,
@@ -81,7 +82,7 @@ fn proportional(role: Role, text: &str) -> f32 {
         w: W,
         h: H,
         t: 0.0,
-        mouse: (-1.0, -1.0),
+        mouse: Pointer::new(-1.0, -1.0),
         term_font_scale: 1.0,
         ui_font_scale: 1.0,
         panel_scale: 1.0,
@@ -240,7 +241,7 @@ fn a_machine_name_is_not_spaced_out_by_a_figure_box() {
             w: W,
             h: H,
             t: 0.0,
-            mouse: (-1.0, -1.0),
+            mouse: Pointer::new(-1.0, -1.0),
             term_font_scale: 1.0,
             ui_font_scale: 1.0,
             panel_scale: 1.0,
@@ -272,7 +273,7 @@ fn a_machine_name_is_not_spaced_out_by_a_figure_box() {
             w: W,
             h: H,
             t: 0.0,
-            mouse: (-1.0, -1.0),
+            mouse: Pointer::new(-1.0, -1.0),
             term_font_scale: 1.0,
             ui_font_scale: 1.0,
             panel_scale: 1.0,

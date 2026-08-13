@@ -214,8 +214,14 @@ pub fn accordion(
             }
         }
         // The pointer is over what it can SEE, which is the same rect
-        // the caller was handed.
-        let hover = shown.contains(ctx.mouse.0, ctx.mouse.1);
+        // the caller was handed — and only if nothing already drawn this
+        // frame stands over it.
+        let hover = ctx.mouse.over(shown);
+        // And this element is itself something to stand over. The box that
+        // used to claim this ground is gone, so each element claims its
+        // own: an element of an open list covers whatever the list was
+        // opened on top of.
+        ctx.mouse.cover(shown);
         // The anchor's own dress, drawn by the anchor's own code. The
         // element in force wears `selected` — the rung the anchor wears
         // while its list is open — and keeps it under the pointer as

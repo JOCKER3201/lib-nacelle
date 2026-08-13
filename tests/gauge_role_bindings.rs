@@ -27,6 +27,7 @@
 
 use nacelle::draw::DrawList;
 use nacelle::font::FontSystem;
+use nacelle::pointer::Pointer;
 use nacelle::theme::{self, LoadRequest};
 use nacelle::ui::{self, GaugeKind, GaugeLabels, GaugeStyle, GaugeValueFmt};
 use nacelle::{Ctx, Rect};
@@ -61,7 +62,7 @@ fn gauges(kind: GaugeKind) -> Vec<String> {
                 w: W,
                 h: H,
                 t: 0.0,
-                mouse: (-1.0, -1.0),
+                mouse: Pointer::new(-1.0, -1.0),
                 term_font_scale: 1.0,
                 ui_font_scale: 1.0,
                 panel_scale: 1.0,
@@ -93,7 +94,7 @@ fn text_sizes(kind: GaugeKind) -> Vec<f32> {
                 w: W,
                 h: H,
                 t: 0.0,
-                mouse: (-1.0, -1.0),
+                mouse: Pointer::new(-1.0, -1.0),
                 term_font_scale: 1.0,
                 ui_font_scale: 1.0,
                 panel_scale: 1.0,
@@ -131,7 +132,7 @@ fn role_px(name: &str) -> f32 {
             w: W,
             h: H,
             t: 0.0,
-            mouse: (0.0, 0.0),
+            mouse: Pointer::new(0.0, 0.0),
             term_font_scale: 1.0,
             ui_font_scale: 1.0,
             panel_scale: 1.0,

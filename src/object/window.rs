@@ -113,9 +113,15 @@ pub(crate) fn panel_edge_glow(
 /// how far the desktop darkens, so three call sites cannot carry three
 /// designs. The caller's historical alpha is ignored for that reason; the
 /// parameter stays only so existing embedders keep compiling.
+///
+/// It also claims the whole screen for the pointer ([`crate::pointer`]),
+/// which is what MODAL means said in the one place it is drawn: nothing
+/// behind the scrim is under the hand, including the parts of the desktop
+/// the window itself does not stand on.
 pub fn backdrop(ctx: &mut Ctx, _alpha: f32) {
     static SCRIM: OnceLock<TokenId> = OnceLock::new();
     static STRENGTH: OnceLock<TokenId> = OnceLock::new();
+    ctx.mouse.cover(Rect::new(0.0, 0.0, ctx.w, ctx.h));
     let t = theme::resolved();
     let scrim = col(t.bed(tok(&SCRIM, "component.modal.scrim")));
     let strength = t.px(tok(&STRENGTH, "modal.scrim_alpha")).clamp(0.0, 1.0);
@@ -129,6 +135,14 @@ pub fn backdrop(ctx: &mut Ctx, _alpha: f32) {
 /// wants square corners sets it to `0u` and one that wants a deep cut sets it
 /// large; `panel.corner_mode` says HOW that length is cut — a tessellated arc
 /// or a 45° chamfer — and `panel.border` is the stroke.
+///
+/// The box is claimed for the pointer ([`crate::pointer`]) before anything
+/// is drawn into it: an OPAQUE frame is exactly the statement "what was
+/// under this rectangle can no longer be seen", and a control that cannot
+/// be seen is not the one the hand is on. Claimed here rather than by each
+/// caller so that every window in every application gets it — including
+/// the ones written after this line — and claimed FIRST so the window's
+/// own contents, drawn into it afterwards, keep the pointer.
 pub fn frame(ctx: &mut Ctx, r: Rect) {
     static FILL: OnceLock<TokenId> = OnceLock::new();
     static LINE: OnceLock<TokenId> = OnceLock::new();
@@ -137,6 +151,7 @@ pub fn frame(ctx: &mut Ctx, r: Rect) {
     static MODE: OnceLock<TokenId> = OnceLock::new();
     static MODE_IDX: OnceLock<(Option<u16>, Option<u16>)> = OnceLock::new();
     static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
+    ctx.mouse.cover(r);
     let t = theme::resolved();
     let fill = col(t.bed(tok(&FILL, "component.panel.fill")));
     let line = col(t.color(tok(&LINE, "component.panel.border")));
