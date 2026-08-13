@@ -684,8 +684,21 @@ pub struct Ctx<'a> {
     pub h: f32,
     /// Time since application start, in seconds.
     pub t: f64,
-    /// Mouse cursor position.
-    pub mouse: (f32, f32),
+    /// The pointer — and who is allowed to see it ([`crate::pointer`]).
+    ///
+    /// It was a bare `(f32, f32)`, and that was the fault: a position on
+    /// its own answers every control the same way, so a keyboard cap
+    /// under an open window lit up exactly as readily as the window's own
+    /// row over it. A control asks [`Pointer::at`] (or, better,
+    /// [`Pointer::over`]) and is answered against what has been drawn
+    /// over it; a caller PLACING something at the cursor — a tooltip
+    /// choosing a side, a menu opening where the click landed — asks
+    /// [`Pointer::raw`].
+    ///
+    /// Owned by the frame and handed back to the application afterwards:
+    /// what covered the pointer is the one thing about a frame the next
+    /// frame needs.
+    pub mouse: crate::pointer::Pointer,
     /// Terminal font size multiplier (TermFontSize= in nacelle-desktop.conf).
     pub term_font_scale: f32,
     /// Interface font size multiplier (UIFontSize= in nacelle-desktop.conf).

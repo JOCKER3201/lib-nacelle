@@ -120,7 +120,7 @@ impl Tooltips {
     /// almost every caller wants, since almost every caller has a `Ctx`
     /// in hand and a rect it has just drawn.
     pub fn hover(&mut self, ctx: &Ctx, id: u64, anchor: Rect, text: &str) {
-        if anchor.contains(ctx.mouse.0, ctx.mouse.1) {
+        if ctx.mouse.over(anchor) {
             self.request(id, anchor, text, ctx.t);
         }
     }
@@ -242,7 +242,11 @@ impl Tooltips {
         let h = (block_h + 2.0 * pad_y).max(min_h);
 
         // ---- place ------------------------------------------------------
-        let (x, y) = place(ctx.mouse, anchor, (w, h), offset, (ctx.w, ctx.h));
+        // PLACEMENT, so the device position: the box opens on whichever
+        // side of the cursor it fits, and the cursor is where the cursor
+        // is. What may be explained at all was decided by the hover that
+        // filed the request.
+        let (x, y) = place(ctx.mouse.raw(), anchor, (w, h), offset, (ctx.w, ctx.h));
         let r = Rect::new(x, y, w, h);
         self.rect = Some(r);
         self.shown = Some(text.clone());

@@ -25,6 +25,7 @@ use nacelle::object::menu::{MenuEntry, MenuItem, MenuState};
 use nacelle::object::segmented::{self, StripState};
 use nacelle::object::text_input::{self, InputModel, InputStyle};
 use nacelle::object::tooltip::{key, Tooltips};
+use nacelle::pointer::Pointer;
 use nacelle::theme;
 use nacelle::{Ctx, Rect};
 
@@ -38,7 +39,7 @@ fn ctx<'a>(dl: &'a mut DrawList, fonts: &'a mut FontSystem, t: f64) -> Ctx<'a> {
         w: W,
         h: H,
         t,
-        mouse: (150.0, 110.0),
+        mouse: Pointer::new(150.0, 110.0),
         term_font_scale: 1.0,
         ui_font_scale: 1.0,
         panel_scale: 1.0,

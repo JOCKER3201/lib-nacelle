@@ -11,6 +11,7 @@
 use nacelle::draw::DrawList;
 use nacelle::font::FontSystem;
 use nacelle::object::tooltip::{key, Tooltips};
+use nacelle::pointer::Pointer;
 use nacelle::theme;
 use nacelle::{Ctx, Rect};
 
@@ -29,7 +30,7 @@ fn ctx<'a>(
         w: W,
         h: H,
         t,
-        mouse,
+        mouse: Pointer::new(mouse.0, mouse.1),
         term_font_scale: 1.0,
         ui_font_scale: 1.0,
         panel_scale: 1.0,

@@ -181,6 +181,7 @@ mod tests {
     use super::*;
     use crate::draw::{DrawCmd, DrawList, TextAnchor, Vertex};
     use crate::font::{FontSystem, Figures, FONT_MONO, FONT_UI};
+    use crate::pointer::Pointer;
 
     const ROW: Rect = Rect { x: 60.0, y: 200.0, w: 380.0, h: 34.0 };
     /// No space anywhere: a blank draws no quad, and the glyph sequence
@@ -212,7 +213,7 @@ mod tests {
             w: 1920.0,
             h: 1080.0,
             t: 0.0,
-            mouse: (0.0, 0.0),
+            mouse: Pointer::new(0.0, 0.0),
             term_font_scale: 1.0,
             ui_font_scale: 1.0,
             panel_scale: 1.0,

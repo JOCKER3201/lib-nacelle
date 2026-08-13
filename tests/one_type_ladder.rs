@@ -22,6 +22,7 @@
 
 use nacelle::draw::DrawList;
 use nacelle::font::FontSystem;
+use nacelle::pointer::Pointer;
 use nacelle::theme::TokenId;
 use nacelle::ui;
 use nacelle::Ctx;
@@ -48,7 +49,7 @@ fn px_of(binding: &'static str) -> f32 {
             w: 1920.0,
             h: 1080.0,
             t: 0.0,
-            mouse: (0.0, 0.0),
+            mouse: Pointer::new(0.0, 0.0),
             term_font_scale: 1.0,
             ui_font_scale: 1.0,
             panel_scale: 1.0,
@@ -198,7 +199,7 @@ fn the_role_a_script_used_to_reach_for_is_still_the_smaller_one() {
             w: 1920.0,
             h: 1080.0,
             t: 0.0,
-            mouse: (0.0, 0.0),
+            mouse: Pointer::new(0.0, 0.0),
             term_font_scale: 1.0,
             ui_font_scale: 1.0,
             panel_scale: 1.0,

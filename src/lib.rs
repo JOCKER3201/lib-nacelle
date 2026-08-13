@@ -18,6 +18,9 @@
 //! * [`channel`] — what one widget tells another: named values the host
 //!   holds, so two compiled widgets in two `.so` files can agree on a
 //!   fact without sharing memory.
+//! * [`pointer`] — where the pointer is and who may see it: the rule
+//!   that a control with something drawn over it is not the control
+//!   under the hand.
 //! * [`object`] — reusable on-screen objects: windows and dialogs,
 //!   buttons, sliders, drop-downs, checkboxes, and the frame put
 //!   around windows the application does not own.
@@ -54,6 +57,7 @@ pub mod focus;
 pub mod font;
 pub mod object;
 pub mod plugin;
+pub mod pointer;
 pub mod runtime;
 pub mod script;
 pub mod sound;

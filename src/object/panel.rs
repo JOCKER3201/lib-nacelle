@@ -426,6 +426,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::draw::{DrawCmd, DrawList};
     use crate::font::{FontSystem, FONT_MONO};
+    use crate::pointer::Pointer;
     use std::path::{Path, PathBuf};
 
     // ------------------------------------------------------ face harness
@@ -468,7 +469,7 @@ pub(crate) mod tests {
                 // Well past every unfold in the master, so an animated
                 // object is measured at rest rather than mid-open.
                 t: 1000.0,
-                mouse: (-1.0, -1.0),
+                mouse: Pointer::new(-1.0, -1.0),
                 term_font_scale: 1.0,
                 ui_font_scale: 1.0,
                 panel_scale: 1.0,

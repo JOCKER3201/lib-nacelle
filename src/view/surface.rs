@@ -537,8 +537,12 @@ impl Surface for CtxSurface<'_, '_> {
         self.ctx.t
     }
 
+    /// The pointer this view may see: [`crate::pointer::Pointer::AWAY`]
+    /// while something else is drawn over it. Every hover in the toolkit
+    /// reads the pointer through this one method, so the rule reaches all
+    /// of them by being stated once here.
     fn mouse(&self) -> (f32, f32) {
-        self.ctx.mouse
+        self.ctx.mouse.at()
     }
 
     fn scale(&self) -> f32 {
@@ -551,7 +555,7 @@ impl Surface for CtxSurface<'_, '_> {
     /// would explain the wrong thing, and one comparison is cheaper than
     /// finding that out on screen.
     fn tooltip(&mut self, id: u64, anchor: Rect, text: &str) {
-        if !anchor.contains(self.ctx.mouse.0, self.ctx.mouse.1) {
+        if !self.ctx.mouse.over(anchor) {
             return;
         }
         let now = self.ctx.t;
