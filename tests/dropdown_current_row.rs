@@ -31,10 +31,10 @@ const ROW_H: f32 = 30.0;
 /// move it and clear of the screen edges.
 const ANCHOR: Rect = Rect { x: 200.0, y: 300.0, w: 400.0, h: 36.0 };
 
-/// How one row was dressed: the plate laid over the opaque bed — `None`
-/// for a row the ladder marks in no way — and the ink its label is set
-/// in. Two channels is the whole of what a rung can move on a row that
-/// draws no shape of its own.
+/// How one row was dressed: the plate laid over the popover's bed —
+/// `None` for a row the ladder marks in no way — and the ink its label
+/// is set in. Two channels is the whole of what a rung can move on a row
+/// that draws no shape of its own.
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct Dress {
     plate: Option<[f32; 4]>,
@@ -49,8 +49,11 @@ fn rgba(c: nacelle::theme::Color) -> [f32; 4] {
 /// so nothing here is hovering and the rungs under test are the resting
 /// ones.
 ///
-/// A row is bed, then at most one plate, then its label — in that
-/// order — so a new bed opens a new row and the walk needs no index.
+/// The list draws its POPOVER BOX first — one shaped fill for the whole
+/// object, where each row used to paint a rectangle of its own — and
+/// then, per row, at most one plate followed by its label. So the walk
+/// takes the first shaped fill as the box, and a label closes the row
+/// the plate before it (if any) belonged to.
 fn dressed(fonts: &mut FontSystem, current: Option<usize>) -> Vec<Dress> {
     let names: Vec<String> = ["ALPHA", "BETA", "GAMMA"].iter().map(|s| s.to_string()).collect();
     let mut dl = DrawList::recording();
@@ -79,15 +82,26 @@ fn dressed(fonts: &mut FontSystem, current: Option<usize>) -> Vec<Dress> {
     }
     let mut out: Vec<Dress> = Vec::new();
     let mut plate: Option<[f32; 4]> = None;
+    let mut box_drawn = false;
     for c in dl.cmds() {
         match c {
-            // A bed: the row before this one is finished.
-            DrawCmd::Rect { .. } => plate = None,
-            DrawCmd::RingFill { color, .. } => plate = Some(rgba(*color)),
-            DrawCmd::Text { color, .. } => out.push(Dress { plate, text: rgba(*color) }),
+            DrawCmd::RingFill { color, .. } => {
+                if box_drawn {
+                    plate = Some(rgba(*color));
+                } else {
+                    // The one bed, drawn once for the whole list.
+                    box_drawn = true;
+                }
+            }
+            // A label closes its row.
+            DrawCmd::Text { color, .. } => {
+                out.push(Dress { plate, text: rgba(*color) });
+                plate = None;
+            }
             _ => {}
         }
     }
+    assert!(box_drawn, "the list drew no box of its own — every claim below is about rows");
     out
 }
 

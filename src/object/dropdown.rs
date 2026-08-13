@@ -14,15 +14,31 @@
 //! language — and drawn only on the rungs that actually mark a row:
 //! a plate every row wears marks nothing.
 //!
-//! The BOX those rows sit in is menu furniture and stays that way. The
-//! master's `component.menu.fill` is by its own words "the opaque bed of
-//! a drop-down or window menu", and `menu.anchor_width` / `menu.min_w`
-//! decide how wide the popover opens. What changed here is the rows'
-//! clothes, not the container's — and the context menu (`menu.rs`) keeps
-//! `menu.item`, which is the point: two objects, two classes.
+//! The open list is ONE OBJECT and it occupies a SURFACE LEVEL: Elev 5,
+//! `[elev.popover]`, which the master glosses "menu, tooltip, dropdown,
+//! context menu, drag ghost". It used to occupy none — every row painted
+//! `component.menu.fill` under itself and nothing was drawn around the
+//! whole, so an open list was a stack of rectangles rather than a box:
+//! it had no ring at all, and its rows ran the full width of the anchor
+//! while the anchor and the button above it both kept an inset. The one
+//! ring it now draws comes from `elev.popover.edge.color`, which is
+//! `@component.panel.border` — the SAME token `[elev.focused]` states,
+//! so the list is framed like the window it opens in and not one new
+//! token was needed to say so.
+//!
+//! The level is drawn through [`super::elev::Level`] and not out of
+//! primitives, because a rung is a dictionary — glass, ring, both glows,
+//! the drop shadow, the reflection — and an object that assembles its
+//! own owns a private copy of every one of those rules.
+//!
+//! `menu.anchor_width` / `menu.min_w` still decide how wide the popover
+//! opens and `menu.pad` is still the room inside it: the container is
+//! menu furniture and stays that way. The context menu (`menu.rs`) keeps
+//! `menu.item` for its rows, which is the point: two objects, two
+//! classes.
 
 use super::focus_ring;
-use crate::draw::Corner;
+use crate::draw::{Corner, CornerStyle};
 use crate::focus::{Caps, FocusId};
 use crate::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
 use crate::{ui, Ctx, Rect};
@@ -35,6 +51,46 @@ fn tok(cell: &'static OnceLock<TokenId>, name: &'static str) -> TokenId {
 /// The engine's colour, in the draw list's clothes.
 fn col(c: theme::ThemeColor) -> Color {
     Color { r: c.r, g: c.g, b: c.b, a: c.a }
+}
+
+/// How far a cut reaches into the box along its corner's diagonal, in
+/// the cut's own units.
+///
+/// The three styles are not comparable by `size`: a chamfer of `s` puts
+/// its 45° face at `s/√2` from the corner point, a round corner of `s`
+/// puts its arc at `s(√2 − 1)`, and a square corner removes nothing at
+/// all. So a chamfer takes more material than a round of the same
+/// length, and the number below is what says so — the only ordering
+/// this file makes on shapes, and it is arithmetic rather than a
+/// preference.
+fn depth(c: Corner) -> f32 {
+    let s = c.size.max(0.0);
+    match c.style {
+        CornerStyle::Square => 0.0,
+        CornerStyle::Round => s * (std::f32::consts::SQRT_2 - 1.0),
+        CornerStyle::Chamfer => s / std::f32::consts::SQRT_2,
+    }
+}
+
+/// The cut a row wears where its corner sits ON the popover's inner
+/// boundary: whichever of the two takes more material.
+///
+/// This is the clip, and it is geometric rather than a scissor because
+/// the draw list's clip stack is a RECTANGLE (`cmd_set_scissor`) and a
+/// rectangle cannot hold a round or a chamfered corner. Taking the
+/// deeper of the two is exact whenever the two agree on style — which
+/// is the shipped case, `@corner.mode` being the one root the whole
+/// file cuts from — and never leaves the row outside the box otherwise.
+///
+/// A row whose own cut is already the deeper one keeps it, which is why
+/// the master's list is untouched by this: the row's clothes are the
+/// row's, and the box only overrules them where the row would cross it.
+fn clipped(row: Corner, box_: Corner) -> Corner {
+    if depth(box_) > depth(row) {
+        box_
+    } else {
+        row
+    }
 }
 
 /// How a list is dressed for this frame — the two things about it that
@@ -71,6 +127,13 @@ pub struct AccordionStyle {
 /// or pass 1.0 for fully open). Returns the drawn item rectangles in
 /// order — partially unfolded items are included but marked not-full.
 ///
+/// The popover BOX is drawn first and everything else inside it. It is
+/// `p` of its finished self in height — box and contents unfold as one
+/// object, so there is never a full-size frame standing around a list
+/// that is half open. `menu.pad` is the room it keeps, on all four
+/// sides, which is what puts the rows inside the ring instead of
+/// running past it.
+///
 /// [`AccordionStyle`] carries the rest: whether the rows join the focus
 /// chain, and which of them is the one already in force. A list that
 /// wants neither passes `&AccordionStyle::default()`.
@@ -82,7 +145,8 @@ pub fn accordion(
     p: f32,
     style: &AccordionStyle,
 ) -> Vec<(Rect, bool)> {
-    static FILL: OnceLock<TokenId> = OnceLock::new();
+    static LEVEL: OnceLock<super::elev::Level> = OnceLock::new();
+    static PAD: OnceLock<TokenId> = OnceLock::new();
     static SKEW: OnceLock<TokenId> = OnceLock::new();
     static THRESHOLD: OnceLock<TokenId> = OnceLock::new();
     static ROLE: OnceLock<TokenId> = OnceLock::new();
@@ -122,9 +186,9 @@ pub fn accordion(
     // same window stepped its digits differently. Read ONCE, outside the
     // row loop — the box costs a theme read and ten glyph lookups.
     let fig = role.figures(ctx.fonts, font, px);
-    // Same token as button::quad, so the list stays flush with the
-    // anchor's slanted edge: the rows take the anchor's own inset, and
-    // a theme that shears its buttons shears the list under them.
+    // Same token as button::quad, so the BOX stays flush with the
+    // anchor's slanted edge, and a theme that shears its buttons shears
+    // the popover under them. The rows take their inset from the box.
     let skew = t.px(tok(&SKEW, "button.skew"));
     // Below this SHARE of a row's full height an unfolding row draws no
     // text. A fraction and not a length, because an accordion's row
@@ -136,10 +200,18 @@ pub fn accordion(
     // makes an unreadable list. Container furniture, so still `[menu]`.
     let aw = tok(&ANCHOR_W, "menu.anchor_width");
     let floored = *ANCHOR_W_IDX.get_or_init(|| theme::enum_index(aw, "min_w")) == Some(t.enum_of(aw));
-    let mut row_w = anchor.w - skew;
+    let mut box_w = anchor.w - skew;
     if floored {
-        row_w = row_w.max(t.px(tok(&MIN_W, "menu.min_w")));
+        box_w = box_w.max(t.px(tok(&MIN_W, "menu.min_w")));
     }
+    // The room the box keeps inside its ring — `[menu].pad`, "padding
+    // inside the menu box", which is what the context menu already
+    // insets its rows by. THIS is the inset the owner's report was
+    // about: the anchor and the editor button above the list both kept
+    // one and the rows kept none, so the rows ran wider than everything
+    // they belonged under.
+    let pad = t.px(tok(&PAD, "menu.pad")).max(0.0);
+    let row_w = (box_w - 2.0 * pad).max(0.0);
     // `[list].gap` is what stands between two rows and `[list].rule` is
     // what is drawn there. The master says `@space.0` and `none`: rows
     // touch and nothing is drawn between them, which is the whole of
@@ -156,20 +228,56 @@ pub fn accordion(
     let corners = [corner; 4];
     let seg = super::window::corner_segments(t, &SEGMENTS, corner.size);
     let pitch = item_h + gap;
-    // The sweep covers the rows and the gaps between them, but not a
-    // gap under the last row: a list is as tall as its content.
-    let visible_h = p.clamp(0.0, 1.0) * (pitch * names.len() as f32 - gap).max(0.0);
+    // The content the box holds when it is finished: the rows and the
+    // gaps between them, but not a gap under the last row — a list is as
+    // tall as its content.
+    let content_h = (pitch * names.len() as f32 - gap).max(0.0);
+    // …and the box that holds it, plus the room it keeps above and
+    // below. The unfold scales THE WHOLE BOX: at `p` the box is `p` of
+    // its finished height, so the ring grows with the list instead of
+    // standing at full size around a list that is half out. Everything
+    // vertical below is a consequence of this one line.
+    let p = p.clamp(0.0, 1.0);
+    let box_h = p * (content_h + 2.0 * pad);
     let mut out = Vec::new();
+    if box_h <= 0.0 || names.is_empty() {
+        // A closed list is not a box of zero height, it is no box — and a
+        // list of nothing is not a frame around nothing. Before the box
+        // existed the row loop simply never ran, so an empty list drew
+        // nothing by accident; now it has to be said, because the box is
+        // drawn before the rows are counted.
+        return out;
+    }
+    // The surface level, drawn before anything stands on it, and its cut
+    // handed back so the rows are fitted to the shape that was actually
+    // drawn rather than to a second reading of the same tokens.
+    let popover = Rect::new(anchor.x, anchor.bottom(), box_w, box_h);
+    let (box_corners, _) =
+        LEVEL.get_or_init(|| super::elev::Level::of("elev.popover")).draw(ctx, popover);
+    // The boundary the rows are held inside: the box's own, moved in by
+    // the pad. `Corner::inset` is what keeps a moved boundary parallel
+    // to the one it came from — a round corner offsets to a concentric
+    // arc, a chamfer's 45° face shrinks by `(2 − √2)·pad` — so the
+    // inner shape is the outer shape and not an approximation of it.
+    let inner: [Corner; 4] = [
+        box_corners[0].inset(pad),
+        box_corners[1].inset(pad),
+        box_corners[2].inset(pad),
+        box_corners[3].inset(pad),
+    ];
+    let inner_y = anchor.bottom() + pad;
+    let visible_h = (box_h - 2.0 * pad).max(0.0);
     let mut ring: Option<Rect> = None;
     for (i, name) in names.iter().enumerate() {
         let top = pitch * i as f32;
         if top >= visible_h {
             break;
         }
-        // The edge closest to the anchor coincides with the anchor's
-        // bottom edge (shorter by the skew of the parallelogram).
+        // Inside the box on every side: the pad from its left edge, the
+        // pad from the edge closest to the anchor, and as wide as the
+        // room between its two flanks.
         let h = (visible_h - top).min(item_h);
-        let r = Rect::new(anchor.x, anchor.bottom() + top, row_w, h);
+        let r = Rect::new(anchor.x + pad, inner_y + top, row_w, h);
         // Floating-point tolerance: the LAST item's height comes from a
         // subtraction and can be epsilon short of item_h.
         let full = h >= item_h - 0.5;
@@ -198,11 +306,12 @@ pub fn accordion(
             Some(c) => t.class_state(c, mark.unwrap_or(State::Idle)),
             None => StateStyle::RAW,
         };
-        // Opaque menu material first — the bed the whole popover stands
-        // on, unbroken from row to row.
-        ctx.dl
-            .rect(r.x, r.y, r.w, r.h, col(t.color(tok(&FILL, "component.menu.fill"))));
-        // Then the mark: a PLATE under the row, cut to the shape
+        // No bed under the row. The bed is the BOX's, drawn once above:
+        // a rectangle per row was the stack of rectangles the owner
+        // reported, and the reason the list could not have a ring — a
+        // ring needs a whole, and there was none.
+        //
+        // The mark is a PLATE under the row, cut to the shape
         // `[list].corner_style` names, and only for a row the ladder
         // has something to say about. It replaces the ring this object
         // used to stroke around every row from `menu.item`'s
@@ -216,13 +325,26 @@ pub fn accordion(
             // capsule but a radius wider than the shape can hold. The
             // full-height cut settled above is reused for the rows that
             // ARE at full height, which is every row of a list at rest.
-            if full {
-                ctx.dl.ring_fill(r, &corners, seg, col(ink.fill));
+            let (mut c, s) = if full {
+                (corners, seg)
             } else {
                 let c = Corner::sized(cut, radius, r);
-                let s = super::window::corner_segments(t, &SEGMENTS, c.size);
-                ctx.dl.ring_fill(r, &[c; 4], s, col(ink.fill));
+                ([c; 4], super::window::corner_segments(t, &SEGMENTS, c.size))
+            };
+            // …and then held inside the box, at whichever of its four
+            // corners the row is actually sitting on one. The top row
+            // shares the box's top two, the row the unfold has reached
+            // shares its bottom two, and a row in the middle shares
+            // none — so a list of one row is clipped at all four.
+            if top <= 0.0 {
+                c[0] = clipped(c[0], inner[0]);
+                c[1] = clipped(c[1], inner[1]);
             }
+            if r.bottom() >= inner_y + visible_h - 0.5 {
+                c[2] = clipped(c[2], inner[2]);
+                c[3] = clipped(c[3], inner[3]);
+            }
+            ctx.dl.ring_fill(r, &c, s, col(ink.fill));
         }
         if h >= text_threshold {
             ctx.dl.text_center_fig(

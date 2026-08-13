@@ -1698,11 +1698,11 @@ glass.rank           = 0                      # frost rank of the popover: 0 emi
 glass.tint           = #FFFFFF / 1.0          # multiply tint of the blur quad; its alpha is the frost coverage · 7,8,10 · colour, straight alpha 0..1 · no derivation — white at 1.0 is an identity multiply
 glass.wash           = none                   # alpha-over wash on the frost; the theme's own light · 7,8,10 · colour or none · none = the second quad is not drawn; user BlurOpacity scales this alpha
 # body, shape
-fill                 = @surface.raised        # the menu / tooltip body when glass.rank = 0 (used INSTEAD of the glass pair while rank = 0) · - · colour or none · @surface.raised — popovers float above panels (5.5)
+fill                 = @elev.focused.fill     # the drop-down body when glass.rank = 0 (used INSTEAD of the glass pair while rank = 0) · - · colour or none · @elev.focused.fill — a drop-down belongs to the window it unfolds in and is bedded like it, not one rung above it
 corner               = @corner.mode           # corner treatment of the popover rect · - · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · - · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
-edge.color           = @component.panel.border # ring around a menu or tooltip · - · colour or none · @component.panel.border -> @border.default -> alpha(@accent.primary, 0.78)
+edge.color           = @elev.focused.edge.color # ring around a drop-down · - · colour or none · @elev.focused.edge.color — the SAME ring as the window, by derivation. Both used to name @component.panel.border and matched by coincidence: moving the window's ring left this one behind
 edge.color2          = same_as_parent         # far end of a two-stop edge; SUGAR, bakes to an anonymous gradient · - · colour or same_as_parent · same_as_parent = copy edge.color, i.e. a flat ring
 edge.mode            = solid                  # how the ring is coloured · - · solid | gradient · no derivation; gradient reads edge.gradient, else the color/color2 pair
 edge.gradient        = none                   # named multi-stop ring; image 7's magenta->violet->blue focused frame · 7 · @grad.<name> with 2..8 stops, or none · none = no named gradient, so edge.color2 sugar (if set) wins

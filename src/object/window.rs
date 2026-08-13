@@ -32,9 +32,26 @@ pub(crate) fn corner_style(
     mode: TokenId,
     idx: &'static OnceLock<(Option<u16>, Option<u16>)>,
 ) -> CornerStyle {
-    let (round, chamfer) = *idx.get_or_init(|| {
-        (theme::enum_index(mode, "round"), theme::enum_index(mode, "chamfer"))
-    });
+    cut_of(t, mode, *idx.get_or_init(|| vocabulary(mode)))
+}
+
+/// The `(round, chamfer)` indices in one corner-mode token's vocabulary.
+///
+/// Taken apart from [`corner_style`] because a caller that reads a WHOLE
+/// dictionary at once — [`super::elev::Level`], which memoises every key
+/// of one `[elev.*]` level in a single struct — has nowhere to hang a
+/// `static` per token and no reason to: the vocabulary is the master's,
+/// so it is settled once with the ids beside it.
+pub(crate) fn vocabulary(mode: TokenId) -> (Option<u16>, Option<u16>) {
+    (theme::enum_index(mode, "round"), theme::enum_index(mode, "chamfer"))
+}
+
+/// [`corner_style`] with the vocabulary already in hand.
+pub(crate) fn cut_of(
+    t: &theme::ResolvedTheme,
+    mode: TokenId,
+    (round, chamfer): (Option<u16>, Option<u16>),
+) -> CornerStyle {
     let cur = Some(t.enum_of(mode));
     if cur == round {
         CornerStyle::Round
