@@ -147,6 +147,7 @@ pub fn accordion(
 ) -> Vec<(Rect, bool)> {
     static LEVEL: OnceLock<super::elev::Level> = OnceLock::new();
     static PAD: OnceLock<TokenId> = OnceLock::new();
+    static ANCHOR_GAP: OnceLock<TokenId> = OnceLock::new();
     static SKEW: OnceLock<TokenId> = OnceLock::new();
     static THRESHOLD: OnceLock<TokenId> = OnceLock::new();
     static ROLE: OnceLock<TokenId> = OnceLock::new();
@@ -211,6 +212,13 @@ pub fn accordion(
     // one and the rows kept none, so the rows ran wider than everything
     // they belonged under.
     let pad = t.px(tok(&PAD, "menu.pad")).max(0.0);
+    // The air between the control and the body it opened. Flush, the two
+    // shapes close their outlines on ONE line: stroked twice, and each
+    // corner curving into the other so the rounding reads as cancelled.
+    // The gap does NOT scale with the unfold — the body starts where it
+    // starts and grows downward; a gap that opened with it would drag the
+    // whole list away from its anchor as it unfolded.
+    let anchor_gap = t.px(tok(&ANCHOR_GAP, "menu.anchor_gap")).max(0.0);
     let row_w = (box_w - 2.0 * pad).max(0.0);
     // `[list].gap` is what stands between two rows and `[list].rule` is
     // what is drawn there. The master says `@space.0` and `none`: rows
@@ -251,7 +259,7 @@ pub fn accordion(
     // The surface level, drawn before anything stands on it, and its cut
     // handed back so the rows are fitted to the shape that was actually
     // drawn rather than to a second reading of the same tokens.
-    let popover = Rect::new(anchor.x, anchor.bottom(), box_w, box_h);
+    let popover = Rect::new(anchor.x, anchor.bottom() + anchor_gap, box_w, box_h);
     let (box_corners, _) =
         LEVEL.get_or_init(|| super::elev::Level::of("elev.popover")).draw(ctx, popover);
     // The boundary the rows are held inside: the box's own, moved in by
@@ -265,7 +273,7 @@ pub fn accordion(
         box_corners[2].inset(pad),
         box_corners[3].inset(pad),
     ];
-    let inner_y = anchor.bottom() + pad;
+    let inner_y = anchor.bottom() + anchor_gap + pad;
     let visible_h = (box_h - 2.0 * pad).max(0.0);
     let mut ring: Option<Rect> = None;
     for (i, name) in names.iter().enumerate() {

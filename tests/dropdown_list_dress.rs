@@ -109,7 +109,15 @@ fn shoot(fonts: &mut FontSystem, current: Option<usize>, mouse: (f32, f32), p: f
 fn popover(p: f32) -> [f32; 4] {
     let w = (ANCHOR.w - px_of("button.skew")).max(px_of("menu.min_w"));
     let content = ROW_H * NAMES.len() as f32 + px_of("list.gap") * (NAMES.len() - 1) as f32;
-    [ANCHOR.x, ANCHOR.bottom(), w, p * (content + 2.0 * px_of("menu.pad"))]
+    // `menu.anchor_gap` below the anchor, not flush with it: two complete
+    // rounded frames with background between them, so neither borrows the
+    // other's edge.
+    [
+        ANCHOR.x,
+        ANCHOR.bottom() + px_of("menu.anchor_gap"),
+        w,
+        p * (content + 2.0 * px_of("menu.pad")),
+    ]
 }
 
 /// Whether a command's rect is the box's — within a hair, because the
@@ -254,7 +262,7 @@ fn a_drop_downs_rows_are_list_rows_and_the_mark_on_one_is_a_plate() {
         r,
         [
             ANCHOR.x + pad,
-            ANCHOR.bottom() + pad + ROW_H,
+            ANCHOR.bottom() + px_of("menu.anchor_gap") + pad + ROW_H,
             ANCHOR.w - px_of("button.skew") - 2.0 * pad,
             ROW_H
         ],
@@ -274,11 +282,16 @@ fn a_drop_downs_rows_are_list_rows_and_the_mark_on_one_is_a_plate() {
     );
     // A hovered row answers the same way, one rung over — proof the
     // plate is the ladder's and not the `current` flag's.
-    let on_first_row = (ANCHOR.x + pad + 10.0, ANCHOR.bottom() + pad + 5.0);
+    let on_first_row =
+        (ANCHOR.x + pad + 10.0, ANCHOR.bottom() + px_of("menu.anchor_gap") + pad + 5.0);
     let hovered = shoot(&mut fonts, None, on_first_row, 1.0);
     let hp = plates(&hovered);
     assert_eq!(hp.len(), 1, "the pointer marks {} rows", hp.len());
-    assert_eq!(hp[0].0[1], ANCHOR.bottom() + pad, "the plate is not under the pointer's row");
+    assert_eq!(
+        hp[0].0[1],
+        ANCHOR.bottom() + px_of("menu.anchor_gap") + pad,
+        "the plate is not under the pointer's row"
+    );
     assert_eq!(hp[0].2, t.class_state(class, State::Hover).fill.a);
     // The row in force keeps its mark under the pointer, one rung up.
     let both = shoot(&mut fonts, Some(0), on_first_row, 1.0);
@@ -371,7 +384,7 @@ fn a_drop_downs_rows_are_list_rows_and_the_mark_on_one_is_a_plate() {
     assert!(gap_px > 0.0, "the fixture's own gap did not bake");
     assert_eq!(
         plates(&gapped)[0].0[1],
-        ANCHOR.bottom() + px_of("menu.pad") + ROW_H + gap_px,
+        ANCHOR.bottom() + px_of("menu.anchor_gap") + px_of("menu.pad") + ROW_H + gap_px,
         "[list].gap does not open a seam between two rows"
     );
     skin("[list]\nrule = @stroke.hair\nrule_every = 1\n");
