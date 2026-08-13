@@ -10,9 +10,13 @@
 //! Everything below is measured out of a recording [`DrawList`], which
 //! is the picture itself and not a claim about it:
 //!
-//! * a resting list puts NO ring and NO outline on the screen, and the
+//! * a resting list puts NO ring and NO outline around a ROW, and the
 //!   class it draws from still states a width — so the absence is this
-//!   object's decision, not a theme that happens to ask for nothing;
+//!   object's decision, not a theme that happens to ask for nothing.
+//!   The one ring the list does draw is around the WHOLE — its
+//!   `[elev.popover]` box, whose subject is [`dropdown_popover_frame`],
+//!   and every count here subtracts it by its rectangle so a claim
+//!   about rows cannot read the container;
 //! * the row in force gets ONE plate, cut to `[list].corner_style`, and
 //!   the rows beside it get none;
 //! * the label's px is the px it always was, because both the binding
@@ -96,26 +100,61 @@ fn shoot(fonts: &mut FontSystem, current: Option<usize>, mouse: (f32, f32), p: f
     dl
 }
 
-/// Every stroked box in the picture: the `rect_outline` the row ring
-/// used to be, plus the shaped `ring` that would replace it if the
-/// object ever strokes the plate's outline instead.
-fn boxes(dl: &DrawList) -> usize {
+/// The popover box the list draws around itself, for the theme loaded
+/// right now and this file's anchor at unfold `p`.
+///
+/// Recomputed from tokens rather than remembered, so it follows every
+/// fixture below — and so the claims about ROWS can tell the container's
+/// commands from theirs without counting on emission order.
+fn popover(p: f32) -> [f32; 4] {
+    let w = (ANCHOR.w - px_of("button.skew")).max(px_of("menu.min_w"));
+    let content = ROW_H * NAMES.len() as f32 + px_of("list.gap") * (NAMES.len() - 1) as f32;
+    [ANCHOR.x, ANCHOR.bottom(), w, p * (content + 2.0 * px_of("menu.pad"))]
+}
+
+/// Whether a command's rect is the box's — within a hair, because the
+/// height is a product.
+fn is_popover(r: [f32; 4], p: f32) -> bool {
+    let b = popover(p);
+    (0..4).all(|i| (r[i] - b[i]).abs() < 0.01)
+}
+
+/// Every stroked box in the picture EXCEPT the popover's own ring: the
+/// `rect_outline` the row ring used to be, plus the shaped `ring` that
+/// would replace it if the object ever strokes a plate's outline.
+///
+/// The container's ring is subtracted by its RECTANGLE, so this counts
+/// what it says it counts: rings around rows. The ring around the whole
+/// is the thing the owner asked for.
+fn boxes(dl: &DrawList, p: f32) -> usize {
     dl.cmds()
         .iter()
-        .filter(|c| matches!(c, DrawCmd::RectOutline { .. } | DrawCmd::Ring { .. }))
+        .filter(|c| match c {
+            DrawCmd::RectOutline { .. } => true,
+            DrawCmd::Ring { r, .. } => !is_popover(*r, p),
+            _ => false,
+        })
         .count()
 }
 
-/// Every plate: the shaped fill under a row, with the rect it covers,
-/// its corner and its colour's alpha.
-fn plates(dl: &DrawList) -> Vec<([f32; 4], Corner, f32)> {
+/// Every plate: the shaped fill under a ROW, with the rect it covers,
+/// its corner and its colour's alpha. The popover's own shaped fill is
+/// not a plate and is subtracted the same way.
+fn plates_at(dl: &DrawList, p: f32) -> Vec<([f32; 4], Corner, f32)> {
     dl.cmds()
         .iter()
         .filter_map(|c| match c {
-            DrawCmd::RingFill { r, corners, color } => Some((*r, corners[0], color.a)),
+            DrawCmd::RingFill { r, corners, color } if !is_popover(*r, p) => {
+                Some((*r, corners[0], color.a))
+            }
             _ => None,
         })
         .collect()
+}
+
+/// [`plates_at`] for the finished list, which is most of this file.
+fn plates(dl: &DrawList) -> Vec<([f32; 4], Corner, f32)> {
+    plates_at(dl, 1.0)
 }
 
 /// Every label: where it sits, in which font slot, at what px.
@@ -154,6 +193,20 @@ fn px_of(name: &str) -> f32 {
     t.px(theme::id(name).unwrap_or_else(|| panic!("the master declares {name}")))
 }
 
+/// The unfold `p` at which the box has opened far enough to hold
+/// `rows` rows' worth of content.
+///
+/// The box scales as ONE object — the room it keeps is part of what
+/// unfolds — so `p` is not the fraction of the content that shows.
+/// Every `p` below is written through this, so the fixtures state what
+/// they mean ("one and a half rows out") and follow a theme that
+/// changes the pad or the gap.
+fn unfold(rows: f32) -> f32 {
+    let pad = px_of("menu.pad");
+    let content = ROW_H * NAMES.len() as f32 + px_of("list.gap") * (NAMES.len() - 1) as f32;
+    (rows * (ROW_H + px_of("list.gap")) + 2.0 * pad) / (content + 2.0 * pad)
+}
+
 #[test]
 fn a_drop_downs_rows_are_list_rows_and_the_mark_on_one_is_a_plate() {
     master();
@@ -165,11 +218,11 @@ fn a_drop_downs_rows_are_list_rows_and_the_mark_on_one_is_a_plate() {
     // open THEMES list nine.
     let idle = shoot(&mut fonts, None, AWAY, 1.0);
     assert_eq!(
-        boxes(&idle),
+        boxes(&idle, 1.0),
         0,
-        "a resting list still strokes {} box(es) — a ring around every row is \
-         what makes nine themes read as nine loose boxes",
-        boxes(&idle)
+        "a resting list still strokes {} box(es) AROUND ROWS — a ring around every \
+         row is what makes nine themes read as nine loose boxes",
+        boxes(&idle, 1.0)
     );
     // The negative control for that zero: the class the rows draw from
     // DOES state a ring, on every rung the list can stand on. So the
@@ -184,7 +237,7 @@ fn a_drop_downs_rows_are_list_rows_and_the_mark_on_one_is_a_plate() {
              tell a refused ring from an absent one"
         );
     }
-    // And the rows really were drawn: bed per row, label per row.
+    // And the rows really were drawn: one label per row.
     assert_eq!(labels(&idle).len(), NAMES.len(), "a list that drew no labels proves nothing");
 
     // ---- 2 · the mark is a plate, and only the marked row wears one ---
@@ -193,10 +246,18 @@ fn a_drop_downs_rows_are_list_rows_and_the_mark_on_one_is_a_plate() {
     let marked = plates(&mid);
     assert_eq!(marked.len(), 1, "one row in force, {} plates", marked.len());
     let (r, corner, alpha) = marked[0];
-    // Under the row it belongs to, edge to edge with it.
+    // Under the row it belongs to, edge to edge with it — and that row
+    // is INSIDE the box, by the room `[menu].pad` keeps on every side.
+    let pad = px_of("menu.pad");
+    assert!(pad > 0.0, "the master keeps no room inside the menu box — nothing below bites");
     assert_eq!(
         r,
-        [ANCHOR.x, ANCHOR.bottom() + ROW_H, ANCHOR.w - px_of("button.skew"), ROW_H],
+        [
+            ANCHOR.x + pad,
+            ANCHOR.bottom() + pad + ROW_H,
+            ANCHOR.w - px_of("button.skew") - 2.0 * pad,
+            ROW_H
+        ],
         "the plate is not the second row's own rectangle"
     );
     // In the ladder's own colour, off the `selected` rung and nowhere
@@ -213,13 +274,14 @@ fn a_drop_downs_rows_are_list_rows_and_the_mark_on_one_is_a_plate() {
     );
     // A hovered row answers the same way, one rung over — proof the
     // plate is the ladder's and not the `current` flag's.
-    let hovered = shoot(&mut fonts, None, (ANCHOR.x + 10.0, ANCHOR.bottom() + 5.0), 1.0);
+    let on_first_row = (ANCHOR.x + pad + 10.0, ANCHOR.bottom() + pad + 5.0);
+    let hovered = shoot(&mut fonts, None, on_first_row, 1.0);
     let hp = plates(&hovered);
     assert_eq!(hp.len(), 1, "the pointer marks {} rows", hp.len());
-    assert_eq!(hp[0].0[1], ANCHOR.bottom(), "the plate is not under the pointer's row");
+    assert_eq!(hp[0].0[1], ANCHOR.bottom() + pad, "the plate is not under the pointer's row");
     assert_eq!(hp[0].2, t.class_state(class, State::Hover).fill.a);
     // The row in force keeps its mark under the pointer, one rung up.
-    let both = shoot(&mut fonts, Some(0), (ANCHOR.x + 10.0, ANCHOR.bottom() + 5.0), 1.0);
+    let both = shoot(&mut fonts, Some(0), on_first_row, 1.0);
     assert_eq!(
         plates(&both)[0].2,
         t.class_state(class, State::SelectedHover).fill.a,
@@ -309,7 +371,7 @@ fn a_drop_downs_rows_are_list_rows_and_the_mark_on_one_is_a_plate() {
     assert!(gap_px > 0.0, "the fixture's own gap did not bake");
     assert_eq!(
         plates(&gapped)[0].0[1],
-        ANCHOR.bottom() + ROW_H + gap_px,
+        ANCHOR.bottom() + px_of("menu.pad") + ROW_H + gap_px,
         "[list].gap does not open a seam between two rows"
     );
     skin("[list]\nrule = @stroke.hair\nrule_every = 1\n");
@@ -317,13 +379,15 @@ fn a_drop_downs_rows_are_list_rows_and_the_mark_on_one_is_a_plate() {
     assert_eq!(lines(&ruled), NAMES.len(), "[list].rule draws no hairline when a theme asks");
 
     // ---- 10 · the unfold threshold is [list]'s now -------------------
-    // A half-open list: at 0.5 the first row is at full height and the
+    // One and a half rows out: the first is at full height and the
     // second is half of one, which is under 0.7 of a row either way —
     // so a threshold of 0 is what tells the two fixtures apart.
     skin("[list]\nunfold_text_threshold = 0.7\n");
-    let shy = labels(&shoot(&mut fonts, None, AWAY, 0.5)).len();
+    let half = unfold(1.5);
+    let shy = labels(&shoot(&mut fonts, None, AWAY, half)).len();
     skin("[list]\nunfold_text_threshold = 0.0\n");
-    let eager = labels(&shoot(&mut fonts, None, AWAY, 0.5)).len();
+    let half = unfold(1.5);
+    let eager = labels(&shoot(&mut fonts, None, AWAY, half)).len();
     assert!(
         eager > shy,
         "[list].unfold_text_threshold does not decide when an unfolding row takes \
@@ -342,7 +406,7 @@ fn a_drop_downs_rows_are_list_rows_and_the_mark_on_one_is_a_plate() {
     let dl = shoot(&mut fonts, Some(0), AWAY, 1.0);
     assert_eq!(
         plates(&dl)[0].0[2],
-        ANCHOR.w - sheared,
+        ANCHOR.w - sheared - 2.0 * px_of("menu.pad"),
         "a row kept the anchor's full width under a shear that shortened the \
          edge it hangs from"
     );
@@ -381,8 +445,9 @@ fn a_drop_downs_rows_are_list_rows_and_the_mark_on_one_is_a_plate() {
     // and 15 on the 9 px that row passes through is not a capsule but a
     // radius the shape cannot hold.
     skin("[list]\ncorner = @corner.pill\ncorner_style = round\n");
-    let opening = shoot(&mut fonts, Some(0), AWAY, 0.1);
-    let (r, corner, _) = plates(&opening)[0];
+    let half_row = unfold(0.5);
+    let opening = shoot(&mut fonts, Some(0), AWAY, half_row);
+    let (r, corner, _) = plates_at(&opening, half_row)[0];
     assert!(r[3] < ROW_H, "the fixture's row is at full height, so it proves nothing");
     assert!(
         (corner.size - r[3] / 2.0).abs() < 0.01,

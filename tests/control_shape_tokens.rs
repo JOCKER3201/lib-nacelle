@@ -247,20 +247,29 @@ fn every_shape_token_the_audit_found_unread_now_moves_the_picture() {
     // ---- menu.anchor_width -------------------------------------------
     // A narrow anchor under `min_w` gets the declared floor; under
     // `anchor` it keeps the anchor's own width, as it always did.
+    //
+    // What `anchor_width` decides is the BOX's width; a row is that box
+    // less the room `[menu].pad` keeps on either flank, which is the
+    // inset the rows did not have while they were the box.
     let narrow = Rect::new(100.0, 400.0, 40.0, 36.0);
     let rects = |fonts: &mut FontSystem| {
         let mut dl = DrawList::new();
         let mut c = ctx(&mut dl, fonts);
         dropdown::accordion(&mut c, narrow, 30.0, &names, 1.0, &dropdown::AccordionStyle::default())
     };
+    let pad_of = || theme::resolved().px(theme::id("menu.pad").expect("[menu] declares pad"));
     skin("[menu]\nanchor_width = anchor\n");
     let skew = theme::resolved().px(theme::id("button.skew").expect("[button] declares skew"));
-    assert_eq!(rects(&mut fonts)[0].0.w, narrow.w - skew, "the list left its anchor's width");
+    assert_eq!(
+        rects(&mut fonts)[0].0.w,
+        narrow.w - skew - 2.0 * pad_of(),
+        "the list left its anchor's width"
+    );
     skin("[menu]\nanchor_width = min_w\n");
     let floor = theme::resolved().px(theme::id("menu.min_w").expect("[menu] declares min_w"));
     assert_eq!(
         rects(&mut fonts)[0].0.w,
-        floor,
+        floor - 2.0 * pad_of(),
         "menu.anchor_width = min_w did not widen the list to its floor"
     );
 }

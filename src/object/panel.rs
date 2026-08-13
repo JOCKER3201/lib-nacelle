@@ -13,8 +13,7 @@
 //! is no fallback underneath any read: a missing token degrades through
 //! the engine's per-kind default and is allowed to look raw.
 
-use super::window::{corner_segments, corner_style, panel_edge_glow};
-use crate::draw::Corner;
+use super::elev;
 use crate::font::Figures;
 use crate::theme::{self, Color, TokenId};
 use crate::ui;
@@ -214,36 +213,14 @@ fn report_step(panel: usize, step: u8) {
 /// edge glow, then the title band from `chrome`, and the same rect this
 /// returns must be the one `click` and `wheel` later receive (u2 §4.1).
 pub fn draw(ctx: &mut Ctx, r: Rect, chrome: &Chrome, panel_idx: usize) -> Rect {
-    static FILL: OnceLock<TokenId> = OnceLock::new();
-    static EDGE: OnceLock<TokenId> = OnceLock::new();
-    static EDGE_W: OnceLock<TokenId> = OnceLock::new();
-    static CORNER_MODE: OnceLock<TokenId> = OnceLock::new();
-    static CORNER_IDX: OnceLock<(Option<u16>, Option<u16>)> = OnceLock::new();
-    static RADIUS: OnceLock<TokenId> = OnceLock::new();
-    static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
-    let t = theme::resolved();
+    static LEVEL: OnceLock<elev::Level> = OnceLock::new();
 
-    // Material. `elev.panel.glass.rank` is 0 in every shipped theme, so
-    // the body is the fill; the glass pair joins when the renderer's
-    // blur ranks do (Appendix B R3/R6 — the container does not wait).
-    let fill = col(t.bed(tok(&FILL, "elev.panel.fill")));
-    let style = corner_style(t, tok(&CORNER_MODE, "elev.panel.corner"), &CORNER_IDX);
-    // Through `Corner::sized`, not a clamp: `elev.panel.radius` is a
-    // length a master may write as `pill`, and `pill` bakes negative
-    // because it has no value until there is a box to be round on.
-    let cut = Corner::sized(style, t.px(tok(&RADIUS, "elev.panel.radius")), r);
-    let corners = [cut; 4];
-    let seg = corner_segments(t, &SEGMENTS, cut.size);
-    if fill.a > 0.0 {
-        ctx.dl.ring_fill(r, &corners, seg, fill);
-    }
-    // The ring, and family A's bloom over it when the theme opts in.
-    let edge = col(t.color(tok(&EDGE, "elev.panel.edge.color")));
-    let edge_w = t.px(tok(&EDGE_W, "elev.panel.edge.width")).max(0.0);
-    if edge.a > 0.0 && edge_w > 0.0 {
-        ctx.dl.ring(r, &corners, seg, edge_w, edge);
-        panel_edge_glow(ctx.dl, t, r, &corners, seg, edge);
-    }
+    // Material, ring, and family A's bloom over the ring — Elev 2, read
+    // as a whole rung rather than key by key. `elev.panel.glass.rank` is
+    // 0 in every shipped theme, so the body is the fill; the glass pair
+    // joins when the renderer's blur ranks do (Appendix B R3/R6), and it
+    // joins for every rung at once because there is one reader.
+    LEVEL.get_or_init(|| elev::Level::of("elev.panel")).draw(ctx, r);
 
     let titled = chrome.title.is_some() || chrome.right.is_some();
     let placed = place(r, titled);
