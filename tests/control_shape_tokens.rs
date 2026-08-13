@@ -229,9 +229,10 @@ fn every_shape_token_the_audit_found_unread_now_moves_the_picture() {
     );
 
     // ---- list.label_role, in the drop-down ---------------------------
-    // The binding a LIST row's label takes, on the rows a drop-down
-    // draws — which are list rows (`list.item`), not menu rows. It read
-    // `menu.item.role` until the rows were dressed as what they are.
+    // The binding a drop-down ELEMENT's label takes. The element wears
+    // the anchor's dress and the list's type ladder, so the size comes
+    // from here and not from `[button].role`; `dropdown_element_is_the_
+    // anchor` is where that split is stated in full.
     let names = vec!["ALPHA".to_string(), "BETA".to_string()];
     let list = |c: &mut Ctx| {
         dropdown::accordion(c, ROW, 30.0, &names, 1.0, &dropdown::AccordionStyle::default());
@@ -248,28 +249,43 @@ fn every_shape_token_the_audit_found_unread_now_moves_the_picture() {
     // A narrow anchor under `min_w` gets the declared floor; under
     // `anchor` it keeps the anchor's own width, as it always did.
     //
-    // What `anchor_width` decides is the BOX's width; a row is that box
-    // less the room `[menu].pad` keeps on either flank, which is the
-    // inset the rows did not have while they were the box.
+    // What `anchor_width` decides is the ELEMENT's width outright. There
+    // is no box around the list any more and so no `[menu].pad` between
+    // the two: an element hangs off the anchor's bottom EDGE, which is
+    // the anchor's width less whatever `[button].skew` takes off it.
     let narrow = Rect::new(100.0, 400.0, 40.0, 36.0);
     let rects = |fonts: &mut FontSystem| {
         let mut dl = DrawList::new();
         let mut c = ctx(&mut dl, fonts);
         dropdown::accordion(&mut c, narrow, 30.0, &names, 1.0, &dropdown::AccordionStyle::default())
     };
-    let pad_of = || theme::resolved().px(theme::id("menu.pad").expect("[menu] declares pad"));
     skin("[menu]\nanchor_width = anchor\n");
     let skew = theme::resolved().px(theme::id("button.skew").expect("[button] declares skew"));
-    assert_eq!(
-        rects(&mut fonts)[0].0.w,
-        narrow.w - skew - 2.0 * pad_of(),
-        "the list left its anchor's width"
-    );
+    assert_eq!(rects(&mut fonts)[0].0.w, narrow.w - skew, "the list left its anchor's width");
     skin("[menu]\nanchor_width = min_w\n");
     let floor = theme::resolved().px(theme::id("menu.min_w").expect("[menu] declares min_w"));
     assert_eq!(
         rects(&mut fonts)[0].0.w,
-        floor - 2.0 * pad_of(),
+        floor,
         "menu.anchor_width = min_w did not widen the list to its floor"
+    );
+
+    // ---- menu.anchor_gap ---------------------------------------------
+    // The one number the blind is spaced by: the air under the anchor
+    // and the air between any two elements. `dropdown_blind` proves the
+    // two seams are the SAME number; this audit's job is the token's own
+    // reach — a theme moves it and the picture follows.
+    let tight = {
+        skin("[menu]\nanchor_gap = @space.0\n");
+        rects(&mut fonts)[1].0.y
+    };
+    let airy = {
+        skin("[menu]\nanchor_gap = 4u\n");
+        rects(&mut fonts)[1].0.y
+    };
+    assert!(
+        airy > tight,
+        "menu.anchor_gap does not open the seam between two elements ({airy} against \
+         {tight})"
     );
 }

@@ -82,11 +82,24 @@ pub fn corners(t: &theme::ResolvedTheme) -> ([Corner; 4], u8) {
     )
 }
 
-/// Draws an opaque parallelogram button with a centered label.
-/// Nothing behind the button shows through it.
-pub fn draw(ctx: &mut Ctx, r: Rect, label: &str, st: ButtonState) {
+/// Everything a button is EXCEPT its label: the opaque plate, the
+/// ladder's state wash over it, and the ring that rung states — all
+/// three on the corners [`corners`] settles. Answers the rung it drew,
+/// so a caller that sets its own label sets it in the ink the ladder
+/// chose rather than in a second reading of the same class.
+///
+/// Split out of [`draw`] because a button is not the only object that
+/// IS one. A drop-down's rows are the anchor seen N times over: the
+/// owner asked for the anchor's own background, its own frame and its
+/// own corner on every row, and a second reading of `shape.button.fill`,
+/// `button.corner` and the `button` class at that call site would be a
+/// private copy of these three rules — the drift [`super::elev`] was
+/// pulled out of `panel.rs`/`window.rs` to end. The label is NOT in
+/// here, because a row's label is set in the role its own list binds
+/// (`list.label_role`) while a cap is set in `button.role`: the dress is
+/// shared, the type ladder is not.
+pub fn dress(ctx: &mut Ctx, r: Rect, st: ButtonState) -> StateStyle {
     static PLATE: OnceLock<TokenId> = OnceLock::new();
-    static ROLE: OnceLock<TokenId> = OnceLock::new();
     static CLASS: OnceLock<Option<u16>> = OnceLock::new();
     let t = theme::resolved();
     let (corners, seg) = corners(t);
@@ -102,6 +115,14 @@ pub fn draw(ctx: &mut Ctx, r: Rect, label: &str, st: ButtonState) {
     if style.edge_width > 0.0 {
         ctx.dl.ring(r, &corners, seg, style.edge_width, col(style.edge));
     }
+    style
+}
+
+/// Draws an opaque parallelogram button with a centered label.
+/// Nothing behind the button shows through it.
+pub fn draw(ctx: &mut Ctx, r: Rect, label: &str, st: ButtonState) {
+    static ROLE: OnceLock<TokenId> = OnceLock::new();
+    let style = dress(ctx, r, st);
     // The cap is set in the role `button.role` NAMES, not in the role that
     // happens to share the object's name: repointing the binding moves the
     // label's whole ladder at once, which is the only reason the binding

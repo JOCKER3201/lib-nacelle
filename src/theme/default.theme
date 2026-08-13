@@ -1690,7 +1690,14 @@ reflect.alpha        = 0.0                    # opacity of the mirrored smear wh
 reflect.fade         = 2.0                    # exponent of the reflection's alpha ramp toward 0 · 8 · f, > 0 · no derivation; 2.0 is the quadratic falloff image 8's desk shows
 
 # -------------------------------------------------------------------------
-# elev.popover — (Elev 5) menu, tooltip, dropdown, context menu, drag ghost.
+# elev.popover — (Elev 5) menu, tooltip, context menu, drag ghost.
+#
+# NOT the drop-down list any more. A drop-down used to be one framed box
+# on this rung with its rows kept inside it; it is now the anchor plus N
+# separate elements, each dressed as the anchor is (`[button]`), with
+# `[menu].anchor_gap` of background between them and nothing drawn around
+# the group. The rung keeps its glosses for the objects that are still a
+# single surface.
 # -------------------------------------------------------------------------
 [elev.popover]
 # glass — two quads; skipped entirely while rank is 0
@@ -1698,11 +1705,11 @@ glass.rank           = 0                      # frost rank of the popover: 0 emi
 glass.tint           = #FFFFFF / 1.0          # multiply tint of the blur quad; its alpha is the frost coverage · 7,8,10 · colour, straight alpha 0..1 · no derivation — white at 1.0 is an identity multiply
 glass.wash           = none                   # alpha-over wash on the frost; the theme's own light · 7,8,10 · colour or none · none = the second quad is not drawn; user BlurOpacity scales this alpha
 # body, shape
-fill                 = @elev.focused.fill     # the drop-down body when glass.rank = 0 (used INSTEAD of the glass pair while rank = 0) · - · colour or none · @elev.focused.fill — a drop-down belongs to the window it unfolds in and is bedded like it, not one rung above it
+fill                 = @elev.focused.fill     # the popover body when glass.rank = 0 (used INSTEAD of the glass pair while rank = 0) · - · colour or none · @elev.focused.fill — a popover belongs to the window it opens in and is bedded like it, not one rung above it
 corner               = @corner.mode           # corner treatment of the popover rect · - · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · - · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
-edge.color           = @elev.focused.edge.color # ring around a drop-down · - · colour or none · @elev.focused.edge.color — the SAME ring as the window, by derivation. Both used to name @component.panel.border and matched by coincidence: moving the window's ring left this one behind
+edge.color           = @elev.focused.edge.color # ring around a popover · - · colour or none · @elev.focused.edge.color — the SAME ring as the window, by derivation. Both used to name @component.panel.border and matched by coincidence: moving the window's ring left this one behind
 edge.color2          = same_as_parent         # far end of a two-stop edge; SUGAR, bakes to an anonymous gradient · - · colour or same_as_parent · same_as_parent = copy edge.color, i.e. a flat ring
 edge.mode            = solid                  # how the ring is coloured · - · solid | gradient · no derivation; gradient reads edge.gradient, else the color/color2 pair
 edge.gradient        = none                   # named multi-stop ring; image 7's magenta->violet->blue focused frame · 7 · @grad.<name> with 2..8 stops, or none · none = no named gradient, so edge.color2 sugar (if set) wins
@@ -4348,6 +4355,21 @@ border = @stroke.hair               # the ring around the menu BOX · - · str �
 item.role = body                    # type role of a menu row's label · - · role · type.body, which 5.25's gloss names as the target anyway
 item_inset = 0.5x @menu.row_h       # left inset of a row's label · - · rat of @menu.row_h · 12.0 px
 item_text_threshold = 0.7x @menu.row_h   # below this height an unfolding row draws no text · - · rat of @menu.row_h · 16.7 px
+anchor_gap = @space.1               # the air between a control that unfolds and every element it unfolds · - · len (u) · @space.1 = 0.5u = 2.7 px; the smallest step that leaves BACKGROUND between two rings
+# ONE number, used twice over. A drop-down is no longer a box with rows
+# inside it: it is the anchor plus N separate elements, each dressed as the
+# anchor is — same plate, same ring, same corner, same class ladder. Two
+# complete rounded frames flush against each other stroke their shared edge
+# twice, and each one's corner curves into the other's so the rounding reads
+# as cancelled; this is the air that stops that happening. The owner asked
+# for every element of the list to be spaced exactly like the first, so the
+# SAME token stands between the anchor and element 0 and between element i
+# and element i+1. A list that took its outer gap from here and its inner
+# gap from `[list].gap` could not answer that with one line, which is why
+# the drop-down reads neither `[list].gap` nor `[list].rule` any more —
+# those are the furniture of a list drawn as one body, and this one is not.
+# The gap does not scale with the unfold: it is a distance between two
+# finished objects, not a share of an animation.
 anchor_width = anchor               # whether the menu takes its anchor's width or its own minimum · - · enum: anchor | min_w · -; context menus always size to content over the min_w floor
 rule = @stroke.hair                 # the separator between menu groups · - · str | none · @stroke.hair
 hint_role = caption                 # type role of the shortcut hint at a row's right edge · - · role · type.caption
@@ -4510,7 +4532,7 @@ label_role = body                   # type role of a row's label · images 1,7 �
 status_role = caption               # type role of the trailing status word · images 1,7 · role · type.caption, a step under the label so the status reads as an aside
 corner = @corner.sm                 # a row's corner radius, for the hover/selection plate behind it · images 1,7 · len (u) · @corner.sm = 0.8u = 4.3 px, the value the plugins borrowed from filetile.corner
 corner_style = @button.corner_style # which shape that plate's corners take · images 1,7 · enum: square | round | chamfer · follows the button: the plate is the row's whole hit target, and a hit target answers in the control language
-unfold_text_threshold = 0.7         # the share of a row's full height below which a row still unfolding draws no label · images 1,7 · frac · 0.7, the ratio [menu].item_text_threshold states against its own row height (0.7x @menu.row_h) — the drop-down list reads it here now that its rows are list rows, and as a FRACTION because an accordion's row height is the one its anchor hands it, never @list.row_h
+unfold_text_threshold = 0.7         # the share of a row's full height below which a row still unfolding draws no label · images 1,7 · frac · 0.7, the ratio [menu].item_text_threshold states against its own row height (0.7x @menu.row_h) — the drop-down reads it here because a drop-down element's LABEL is the list's (label_role above) even though its dress is the anchor's ([button]), and as a FRACTION because an element's height is the one its anchor hands it, never @list.row_h
 wheel_px = 8u                       # scroll distance per wheel notch in a row list · images 1,7 · len (u) · 43.2 px, the value the plugins borrowed from filetile.wheel_px
 scroll_gutter = 0u                  # width kept clear at the scrolling edge of a row so an overlay bar has its own lane · images 1,7 · len (u) · 0u = today's drawing, where scrollbar.mode = overlay lets the bar sit over the row's trailing status; a theme that wants the bar beside the text sets this to scrollbar.w plus twice scrollbar.margin
 
