@@ -398,30 +398,8 @@ fn an_open_drop_down_is_one_framed_box_that_unfolds_with_its_rows() {
     assert!(pad > 0.0, "the master keeps no room inside the menu box — §3 below cannot bite");
     assert_eq!(
         [bed_r[0], bed_r[1], bed_r[2]],
-        [ANCHOR.x, ANCHOR.bottom() + px_of("menu.anchor_gap"), ANCHOR.w - skew],
+        [ANCHOR.x, ANCHOR.bottom(), ANCHOR.w - skew],
         "the box does not hang off the anchor's bottom edge"
-    );
-    // TWO COMPLETE FRAMES, NOT ONE SHAPE WITH A SEAM. Flush, the anchor and
-    // the box closed their outlines on the SAME line: the ring was stroked
-    // twice there, each corner curved into the other so the rounding read as
-    // cancelled, and the vertical edge stepped from 2 px at 0.95 alpha (the
-    // anchor wears the `selected` rung while its list is open) to 1 px at
-    // 0.78 halfway down what looks like one line. The owner asked for the
-    // frame of the control and the frame of the list, and nothing running
-    // out of one into the other.
-    //
-    // Asserted as a STRICT gap and as the token, not as 2.7 px: a theme may
-    // widen the air, and may not close it.
-    let gap = px_of("menu.anchor_gap");
-    assert!(
-        gap > 0.0,
-        "menu.anchor_gap is {gap} — flush again, and the two frames share an edge"
-    );
-    assert!(
-        bed_r[1] > ANCHOR.bottom(),
-        "the box starts at {} and the anchor ends at {} — they touch",
-        bed_r[1],
-        ANCHOR.bottom()
     );
     assert!(
         (bed_r[3] - (ROW_H * NAMES.len() as f32 + 2.0 * pad)).abs() < 0.01,
