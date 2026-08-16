@@ -107,9 +107,13 @@ pub struct AccordionStyle {
 /// Draws the blind at unfold progress `p` (0..1, eased by the caller or
 /// pass 1.0 for fully open). Returns the element rectangles in order —
 /// AS DRAWN, which for an element still half under the anchor is the
-/// half that is out. The caller hit-tests these, so an element is
-/// clickable where it can be seen and nowhere else; the `bool` says
-/// whether the whole of it is out.
+/// half that is out, and which for a list unfolding inside somebody
+/// else's clip is what that clip leaves of it: the caller hit-tests
+/// these, so an element is clickable where it can be seen and nowhere
+/// else. An element the enclosing clip took whole is reported at its
+/// place with NO AREA — the entry stays, because the caller maps the
+/// index to an act, but there is nothing left to press. The `bool` says
+/// whether the whole of it is out AND uncut.
 ///
 /// [`AccordionStyle`] carries the rest: whether the elements join the
 /// focus chain, and which of them is the one already in force. A list
@@ -183,6 +187,21 @@ pub fn accordion(
     // Where the anchor ends and the world below it begins. Everything
     // above this line belongs to the anchor.
     let horizon = anchor.bottom();
+    // THE CLIP THAT WAS ALREADY THERE. The elements are DRAWN under the
+    // caller's clip stack — `push_clip` intersects, so a list unfolding
+    // inside a scrolled body is cut by that body's box — but the rects
+    // handed back used to know only the horizon. A caller aiming at
+    // them would then press an element the scissor had already taken:
+    // invisible, and clickable, OVER whatever really stood there. So
+    // every rect is cut by the stack's top too, which is the
+    // intersection of everything pushed — exactly what the picture was
+    // cut by. Read BEFORE this function's own horizon clip goes on: the
+    // horizon lives in the `top`/`seen` arithmetic below, and the own
+    // clip's other three edges are the window's, which the rects must
+    // NOT be cut to — a list at the window's bottom hangs past the edge
+    // and its tail stays pressable there, deliberately (the settings
+    // window pins that behaviour until the accordion learns to scroll).
+    let outer = ctx.dl.clip();
     // Stowed: the whole stack tucked under the anchor, every element at
     // the same place, none of it showing.
     let stowed = horizon - item_h;
@@ -205,7 +224,25 @@ pub fn accordion(
         let top = y.max(horizon);
         let seen = (y + item_h - top).max(0.0);
         let shown = Rect::new(slat.x, top, slat.w, seen);
-        let full = seen >= item_h - 0.5;
+        // …and what of THAT the enclosing clip leaves standing. The
+        // same intersection `push_clip` performed on the way in, so the
+        // reported rect, the cover and the hover all agree with the
+        // scissor the plate was actually drawn under. With no foreign
+        // clip this is `shown`, bit for bit.
+        let shown = match outer {
+            Some([ox, oy, ow, oh]) => {
+                let x0 = shown.x.max(ox);
+                let y0 = shown.y.max(oy);
+                let x1 = (shown.x + shown.w).min(ox + ow);
+                let y1 = (shown.y + shown.h).min(oy + oh);
+                Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
+            }
+            None => shown,
+        };
+        // All out from under the anchor AND uncut by the world around:
+        // only such an element joins the focus chain, because a ring on
+        // a sliver says "this is the whole object" about a part.
+        let full = shown.h >= item_h - 0.5 && shown.w >= row_w - 0.5;
         if at_rest && full {
             if let (Some(base), Some(fc)) = (style.focus, ctx.focus.as_deref_mut()) {
                 if fc.register(base.item(i), shown, Caps::NONE).ring {
