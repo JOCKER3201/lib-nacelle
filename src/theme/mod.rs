@@ -179,12 +179,21 @@ struct Engine {
     /// handing out `&'static` from [`resolved`] affordable: a resize storm
     /// re-uses a bake instead of leaking one per event.
     cache: HashMap<(usize, u32), &'static ResolvedTheme>,
+    /// The same bakes the map above holds, reached WITHOUT the resolve that
+    /// computes their key. `cache` is keyed on the `u` a resolve has to
+    /// produce first, so every miss on [`set_viewport`]'s repeat check paid
+    /// for resolving every token in the theme — and two monitors of unequal
+    /// height alternate viewports every frame, which is never a repeat. What
+    /// a viewport bakes to cannot change while the schema and the siblings
+    /// stand, so the viewport itself is a sound key.
+    by_viewport: HashMap<(usize, u32, u32), &'static ResolvedTheme>,
     diagnostics: Arc<ThemeDiagnostics>,
 }
 
 static ENGINE: OnceLock<Mutex<Engine>> = OnceLock::new();
 static ACTIVE: AtomicPtr<ResolvedTheme> = AtomicPtr::new(std::ptr::null_mut());
 static EPOCH: AtomicU32 = AtomicU32::new(0);
+static RESOLVES: AtomicU32 = AtomicU32::new(0);
 static DIAGS: OnceLock<Mutex<Arc<ThemeDiagnostics>>> = OnceLock::new();
 
 fn diags_slot() -> &'static Mutex<Arc<ThemeDiagnostics>> {
@@ -231,6 +240,22 @@ fn empty_theme() -> &'static ResolvedTheme {
 /// resize, format change (§7.4).
 pub fn epoch() -> u32 {
     EPOCH.load(Ordering::Acquire)
+}
+
+/// How many times the engine has resolved the theme in this process.
+///
+/// A diagnostic, and the only witness this one has. A resolve walks every
+/// token in the file, so it belongs to a theme load, a mood, a variant or a
+/// screen height the session has not seen before — never to a frame. Nothing
+/// else the engine exposes can tell a re-resolve from a cache hit: the
+/// published pointer and [`epoch`] read exactly the same either way, which is
+/// how `--desktop` came to resolve the whole theme twice a frame on a
+/// mixed-height desktop without a single observable saying so.
+///
+/// Rises monotonically. Compare two readings; the absolute value means
+/// nothing.
+pub fn resolves() -> u32 {
+    RESOLVES.load(Ordering::Relaxed)
 }
 
 /// The strings that came with the loaded theme.
@@ -617,6 +642,7 @@ pub fn load_with(req: LoadRequest) -> Arc<ThemeDiagnostics> {
         active: 0,
         viewport,
         cache: HashMap::new(),
+        by_viewport: HashMap::new(),
         diagnostics: Arc::new(ThemeDiagnostics::default()),
     };
 
@@ -671,16 +697,38 @@ fn explicit_density(schema: &Schema, spec: &ThemeSpec) -> (bool, bool) {
 impl Engine {
     fn bake_active(&mut self, out: &mut Vec<Diagnostic>) -> &'static ResolvedTheme {
         let i = self.active.min(self.siblings.len().saturating_sub(1));
-        let s = &self.siblings[i];
-        let r = resolve::resolve(&self.schema, &s.spec, out);
+        // Asked BEFORE the resolve, never after. The `u` that keys `cache`
+        // is what a resolve produces, so reaching that cache costs a full
+        // resolve of the whole theme — and `set_viewport` only drops a
+        // REPEAT of the last viewport, which two alternating monitor
+        // heights never are. Without this the program resolved every token
+        // twice a frame, for as long as it ran, on any desktop whose
+        // screens are not the same height.
+        let vk = (
+            i,
+            self.viewport.screen_h.to_bits(),
+            self.viewport.ui_scale.to_bits(),
+        );
+        if let Some(&t) = self.by_viewport.get(&vk) {
+            return t;
+        }
+        RESOLVES.fetch_add(1, Ordering::Relaxed);
+        let (r, explicit_density) = {
+            let s = &self.siblings[i];
+            (
+                resolve::resolve(&self.schema, &s.spec, out),
+                s.explicit_density,
+            )
+        };
         let input = BakeInput {
             viewport: self.viewport,
             epoch: EPOCH.load(Ordering::Acquire).wrapping_add(1),
-            explicit_density: s.explicit_density,
+            explicit_density,
         };
         let probe = bake::metrics(&self.schema, &r, &input, &mut Vec::new());
         let key = (i, probe.u.to_bits());
-        if let Some(t) = self.cache.get(&key) {
+        if let Some(&t) = self.cache.get(&key) {
+            self.by_viewport.insert(vk, t);
             return t;
         }
         let baked: &'static ResolvedTheme = Box::leak(Box::new(bake::bake(
@@ -690,6 +738,7 @@ impl Engine {
             out,
         )));
         self.cache.insert(key, baked);
+        self.by_viewport.insert(vk, baked);
         baked
     }
 }
