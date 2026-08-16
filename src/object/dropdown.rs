@@ -216,12 +216,22 @@ pub fn accordion(
         // The pointer is over what it can SEE, which is the same rect
         // the caller was handed — and only if nothing already drawn this
         // frame stands over it.
+        // The claim comes FIRST, the question second — the order is the
+        // fix, not a preference. `Pointer::begin` reveals the pointer only
+        // once as many covers have been recorded as the depth at which it
+        // was claimed LAST frame, and last frame this element's own cover
+        // was what claimed it. Asking before covering left the count one
+        // short, so every element of every unfolded list was occluded by
+        // ITSELF and hover never fired anywhere in the toolkit. `cover`'s
+        // own doc states the intended shape: claim the box, then draw the
+        // controls into it.
+        ctx.mouse.cover(shown);
         let hover = ctx.mouse.over(shown);
         // And this element is itself something to stand over. The box that
         // used to claim this ground is gone, so each element claims its
         // own: an element of an open list covers whatever the list was
         // opened on top of.
-        ctx.mouse.cover(shown);
+
         // The anchor's own dress, drawn by the anchor's own code. The
         // element in force wears `selected` — the rung the anchor wears
         // while its list is open — and keeps it under the pointer as

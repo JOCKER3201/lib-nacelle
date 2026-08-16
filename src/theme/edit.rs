@@ -119,17 +119,45 @@ pub fn oklch_literal(c: Oklch) -> String {
 /// and are NOT written here. Writing them would put a value in the file that
 /// changes nothing, which is exactly what makes `cockpit.theme:154-156` ask
 /// for a gradient border today and get a flat one.
-pub fn border_edits(scope: Scope, kind: Border, colour: Oklch) -> Vec<Edit> {
+/// The one edit that changes the border's COLOUR and nothing else.
+///
+/// Split out for the state the editor opens in: no border kind chosen yet.
+/// Sending a kind then would not be neutral — LINE's switch turns the halo
+/// off — so a colour slider moved before the list is touched must move the
+/// colour alone. (Verified finding, 2026-08-16: the earlier shape mapped
+/// "no choice" to LINE and a colour drag switched five themes' halos off
+/// as a side effect.)
+pub fn border_colour_edit(scope: Scope, colour: Oklch) -> Edit {
     let Scope::Theme = scope;
-    let mut out = vec![Edit::new("elev.panel.edge.color", oklch_literal(colour))];
-    // The halo is switched, never coloured: it wears the line's colour.
-    out.push(Edit::new(
-        "glow.panel_edge.enabled",
-        match kind {
-            Border::Line => "false",
-            Border::Neon => "true",
-        },
-    ));
+    Edit::new("elev.panel.edge.color", oklch_literal(colour))
+}
+
+/// `halo_dressed` answers "does the theme already draw a visible halo" —
+/// resolved radius AND alpha both above zero. The caller reads it off the
+/// live theme; this function stays pure so the tests need no engine.
+pub fn border_edits(scope: Scope, kind: Border, colour: Oklch, halo_dressed: bool) -> Vec<Edit> {
+    let mut out = vec![border_colour_edit(scope, colour)];
+    match kind {
+        // The theme's own radius and alpha are left standing: LINE only
+        // takes the halo away, and `enabled = false` is the whole of that
+        // (`window.rs:97` returns before either is read).
+        Border::Line => out.push(Edit::new("glow.panel_edge.enabled", "false")),
+        // NEON dresses the halo ONLY where the theme has not: the default
+        // master ships `radius = 0u` and `alpha = 0.0` and `window.rs:104`
+        // returns at zero, so a bare switch was invisible there. A theme
+        // that has dressed its own halo — Cockpit 1.6u/0.34, aurora
+        // 0.70u/0.35, azure 0.6u/0.16, spring 1.1u/0.30, instrument
+        // 0.7u/0.22 — keeps its dress: writing the seeds over those five
+        // was the earlier shape's mistake, found in verification, and the
+        // comment that excused it had checked exactly one theme.
+        Border::Neon => {
+            out.push(Edit::new("glow.panel_edge.enabled", "true"));
+            if !halo_dressed {
+                out.push(Edit::new("glow.panel_edge.radius", "1.6u"));
+                out.push(Edit::new("glow.panel_edge.alpha", "0.34"));
+            }
+        }
+    }
     out
 }
 
@@ -197,7 +225,7 @@ mod tests {
         // `glow.panel_edge.color` exists in the master and has no reader, so
         // a second colour here would be a value that changes nothing. If a
         // reader is ever added, THIS test is where the second write belongs.
-        let neon = border_edits(Scope::Theme, Border::Neon, c(0.7, 0.15, 200.0, 1.0));
+        let neon = border_edits(Scope::Theme, Border::Neon, c(0.7, 0.15, 200.0, 1.0), false);
         let colours: Vec<_> = neon.iter().filter(|e| e.token.ends_with("color")).collect();
         assert_eq!(
             colours.len(),
@@ -209,22 +237,38 @@ mod tests {
     }
 
     #[test]
-    fn line_and_neon_differ_only_by_the_switch() {
+    fn neon_dresses_the_halo_and_line_does_not_touch_it() {
         let colour = c(0.7, 0.15, 200.0, 1.0);
-        let line = border_edits(Scope::Theme, Border::Line, colour);
-        let neon = border_edits(Scope::Theme, Border::Neon, colour);
-        assert_eq!(line.len(), neon.len());
-        let differing: Vec<_> = line
-            .iter()
-            .zip(neon.iter())
-            .filter(|(a, b)| a.value != b.value)
-            .map(|(a, _)| a.token)
-            .collect();
-        assert_eq!(
-            differing,
-            vec!["glow.panel_edge.enabled"],
-            "line and neon parted on more than the switch"
-        );
+        let line = border_edits(Scope::Theme, Border::Line, colour, false);
+        let neon = border_edits(Scope::Theme, Border::Neon, colour, false);
+        let neon_dressed = border_edits(Scope::Theme, Border::Neon, colour, true);
+        // A theme that has dressed its own halo keeps it: aurora's 0.70u
+        // must not become Cockpit's 1.6u because someone chose NEON.
+        for k in ["glow.panel_edge.radius", "glow.panel_edge.alpha"] {
+            assert!(
+                !neon_dressed.iter().any(|e| e.token == k),
+                "NEON overwrote {k} on a theme that had already dressed its halo"
+            );
+        }
+        // NEON must write a radius and an alpha, because the default master
+        // ships both at zero and the renderer draws nothing at zero — a
+        // switch alone was measured invisible on default and inert on
+        // Cockpit, which ships the halo already on.
+        for k in ["glow.panel_edge.radius", "glow.panel_edge.alpha"] {
+            assert!(
+                neon.iter().any(|e| e.token == k),
+                "NEON did not write {k}; on the default theme it is invisible"
+            );
+            // And LINE must NOT: the theme's own halo dress survives a trip
+            // through LINE, so switching back to NEON finds it as it was.
+            assert!(
+                !line.iter().any(|e| e.token == k),
+                "LINE wrote {k}, flattening the theme's own halo"
+            );
+        }
+        let of = |v: &Vec<Edit>| v.iter().find(|e| e.token.ends_with("enabled")).unwrap().value.clone();
+        assert_eq!(of(&line), "false");
+        assert_eq!(of(&neon), "true");
     }
 
     #[test]
@@ -243,8 +287,10 @@ mod tests {
         let colour = c(0.7, 0.15, 200.0, 1.0);
         let mut all = Vec::new();
         for kind in [Border::Line, Border::Neon] {
-            all.extend(border_edits(Scope::Theme, kind, colour));
+            all.extend(border_edits(Scope::Theme, kind, colour, false));
+            all.extend(border_edits(Scope::Theme, kind, colour, true));
         }
+        all.push(border_colour_edit(Scope::Theme, colour));
         for kind in [Glass::Solid, Glass::Blur, Glass::Frosted] {
             all.extend(glass_edits(Scope::Theme, kind, colour, colour));
         }

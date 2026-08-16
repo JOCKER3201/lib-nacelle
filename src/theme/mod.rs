@@ -198,6 +198,14 @@ struct Engine {
     /// [`content_epoch`] does not move for them — the font slots are named by
     /// the file, and a colour being tried out cannot rename them.
     preview: Vec<(TokenId, expr::Expr)>,
+    /// Moves when the preview SET changes; keys `preview_cache` so a set
+    /// that has not changed re-uses its bake instead of leaking one per
+    /// frame. Without this, `set_viewport`'s per-screen call re-baked the
+    /// preview on every frame of every screen — the morning's 100 % CPU
+    /// fault, reintroduced through a different door, plus ~9 MB/s of
+    /// leaked bakes on a two-monitor desktop.
+    preview_rev: u32,
+    preview_cache: HashMap<(usize, u32, u32, u32), &'static ResolvedTheme>,
     diagnostics: Arc<ThemeDiagnostics>,
 }
 
@@ -679,6 +687,8 @@ pub fn load_with(req: LoadRequest) -> Arc<ThemeDiagnostics> {
         cache: HashMap::new(),
         by_viewport: HashMap::new(),
         preview: Vec::new(),
+        preview_rev: 0,
+        preview_cache: HashMap::new(),
         diagnostics: Arc::new(ThemeDiagnostics::default()),
     };
 
@@ -743,13 +753,31 @@ impl Engine {
         // heights never are. Without this the program resolved every token
         // twice a frame, for as long as it ran, on any desktop whose
         // screens are not the same height.
-        // A preview bypasses BOTH caches, in each direction. Reading one would
-        // answer with the file's colours while the editor is showing other
-        // ones; writing one would leave a tried-out value in a map that
-        // outlives the editing session and hand it back long after the person
-        // pressed CANCEL. So a preview is always baked fresh and never kept —
-        // which is affordable exactly because it is bounded: see `set_preview`.
+        // A preview bypasses the two STANDING caches — reading either would
+        // answer with the file's colours while the editor shows other ones —
+        // and keeps its own, keyed additionally by `preview_rev`. The
+        // revision is what makes keeping safe: every change to the set bumps
+        // it and drains the map, so a bake can never outlive the values it
+        // was made of. Without this memo a STANDING preview was re-baked by
+        // `set_viewport` on every frame of every screen — the morning's
+        // 100 % CPU fault through another door, plus ~9 MB/s of leaked
+        // bakes on a two-monitor desktop, plus a plate re-bake per frame.
+        //
+        // Verified limit, recorded not fixed: with THREE or more screens the
+        // frozen per-bake epochs can collide so that `poll_plates` misses
+        // one re-bake of the decoration after a preview pulse. Unreachable
+        // with two screens; the same class exists on the ordinary path at
+        // `set_sibling`.
         if !self.preview.is_empty() {
+            let pk = (
+                i,
+                self.viewport.screen_h.to_bits(),
+                self.viewport.ui_scale.to_bits(),
+                self.preview_rev,
+            );
+            if let Some(&t) = self.preview_cache.get(&pk) {
+                return t;
+            }
             let (mut spec, explicit_density) = {
                 let s = &self.siblings[i];
                 (s.spec.clone(), s.explicit_density)
@@ -766,7 +794,10 @@ impl Engine {
                 explicit_density,
             };
             RESOLVES.fetch_add(1, Ordering::Relaxed);
-            return Box::leak(Box::new(bake::bake(&self.schema, &r, &input, out)));
+            let baked: &'static ResolvedTheme =
+                Box::leak(Box::new(bake::bake(&self.schema, &r, &input, out)));
+            self.preview_cache.insert(pk, baked);
+            return baked;
         }
         let vk = (
             i,
@@ -851,18 +882,16 @@ pub fn set_viewport(screen_h: f32, ui_scale: f32) {
 /// would wake the whole face reload — a walk of the font directories and an
 /// atlas reset — behind every slider.
 ///
-/// # WHY THIS IS FOR SETTLED VALUES AND NOT FOR EVERY TICK
+/// # WHY THE CALLER STILL PACES ITSELF
 ///
 /// A bake is 76 031 bytes, measured, and nothing ever frees one: they are
 /// handed out as `&'static` so that reading the theme costs one atomic load
-/// with no lifetime to thread through a draw call. At sixty frames a second a
-/// dragged slider would leak 4.5 MB per second — about 22 MB across a
-/// five-second drag — and none of it would come back.
-///
-/// So the caller applies a value when it has SETTLED, not on every motion
-/// event. That is a handful of bakes per drag instead of hundreds. The slider
-/// itself moves at whatever rate the hand does; what is bounded here is how
-/// often the whole desktop is re-baked to show it.
+/// with no lifetime to thread through a draw call. The revision memo means a
+/// STANDING set costs nothing per frame — but every CHANGED set is a fresh
+/// bake per screen, permanently. A caller applying every motion event at
+/// sixty a second would leak 4.5 MB/s; the desktop's editor pulses at ten,
+/// which is ~0.8 MB for a second of active dragging and nothing once the
+/// hand stops.
 ///
 /// If a preview on every tick is ever wanted, the thing to change is not this
 /// function: it is that bakes are leaked. Retiring them means the lock-free
@@ -895,6 +924,10 @@ pub fn set_preview(values: &[(&str, &str)]) -> Vec<String> {
         taken.push((id, e));
     }
     g.preview = taken;
+    // A new set is a new revision; the old revision's bakes will never be
+    // asked for again, so the map is drained rather than left to grow.
+    g.preview_rev = g.preview_rev.wrapping_add(1);
+    g.preview_cache.clear();
     let mut out = Vec::new();
     let t = g.bake_active(&mut out);
     publish(t);
@@ -913,6 +946,8 @@ pub fn clear_preview() {
         return;
     }
     g.preview.clear();
+    g.preview_rev = g.preview_rev.wrapping_add(1);
+    g.preview_cache.clear();
     let mut out = Vec::new();
     let t = g.bake_active(&mut out);
     publish(t);
