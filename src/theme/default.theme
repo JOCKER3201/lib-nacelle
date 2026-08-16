@@ -4372,6 +4372,15 @@ anchor_gap = @space.1               # the air between a control that unfolds and
 # The gap does not scale with the unfold: it is a distance between two
 # finished objects, not a share of an animation.
 anchor_width = anchor               # whether the menu takes its anchor's width or its own minimum · - · enum: anchor | min_w · -; context menus always size to content over the min_w floor
+# THE FRAME of an unfolded body. A drop-down grows one pitch per element,
+# and a list of forty themes or four hundred font families used to hang
+# past the desktop's edge — pressable where it could not be seen. Past
+# this share of the viewport's height the blind stops and the body
+# SCROLLS inside its frame instead: the wheel moves it, the toolkit's
+# scrollbar stands in the inset lane beside the slats, and an element
+# outside the frame neither draws nor answers the mouse.
+max_h_frac = 40%                    # the tallest unfolded body, from the anchor's underside down · - · % of the viewport height · 432 px @1080p ≈ 13 elements; a longer list scrolls (M8, 2026-08-16)
+max_h_min_px = 96px                 # absolute floor for max_h_frac's result · - · device px · companion of menu.max_h_frac (3.2); a tiny window still shows a few elements
 rule = @stroke.hair                 # the separator between menu groups · - · str | none · @stroke.hair
 hint_role = caption                 # type role of the shortcut hint at a row's right edge · - · role · type.caption
 hint_gap = @space.4                 # gap between the label column and the hint column · - · len (u) · @space.4 = 2u = 10.8 px
@@ -4983,6 +4992,15 @@ back_w_min = 13u                    # minimum width of that column · - · len (
 back_w_min_min_px = 70px            # absolute floor for back_w_min · - · device px · companion of settings.back_w_min (3.2)
 list_w_frac = 60%                   # width of the settings list column · - · % of the modal's width · -
 grid_cols = 3                       # columns in the settings icon grid · - · n · -
+col_gap = @space.6                  # rynna między kolumnami pasa · - · len (u) · 4u = 21.6 px
+zone_gap = @space.6                 # odstęp pionowy między pasami · - · len (u) · = section_gap, jeden rytm
+col_min_w = 72u                     # próg: węższa kolumna = pas składa się do listy · - · len (u) · 388.8 px
+col_min_w_min_px = 360px            # podłoga companion (3.2) · - · device px · dobrana tak, by 500 px składało, 720p+ trzymało kolumny
+bar_gap = @space.4                  # odstęp przycisków paska akcji · - · len (u) · 2u = 10.8 px
+rail_w_frac = 22%                   # szyna sekcji edytora (krok 3) · - · % szerokości treści · wzorem back_w_frac
+rail_w_min = 13u                    # minimum szyny · - · len (u) · 70.2 px
+rail_w_min_min_px = 70px            # podłoga companion (3.2) · - · device px · -
+subrail_w_frac = @settings.rail_w_frac  # druga kolumna podstron (ANEKS: układ trzypanelowy) · - · % szerokości treści · decyzja właściciela 2026-08-16: OBIE kolumny nawigacji równe, treść bierze całą resztę; poniżej progu col_min_w całe okno składa się do pionowej listy
 hint.role = caption                 # type role of a setting's hint line · - · role · type.caption
 hint_inset = 1.6x @type.caption.size    # inset of that hint under its control · - · rat of @type.caption.size · -
 note.role = caption                 # type role of a section note · - · role · type.caption
