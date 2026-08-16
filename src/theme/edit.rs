@@ -19,10 +19,13 @@
 //! nobody reads is worse than a missing control, because it looks like it
 //! works. Measured 2026-08-16, with the anchors kept next to each set below.
 //!
-//! The gap is a real task, not a permanent shape: `glass.rank` has no reader
-//! at all, and `glass.tint`/`glass.wash` are read only for the fixture rung,
-//! by hand, in `deco.rs`. When the ladder is honoured for every rung, the sets
-//! here widen and nothing else about this module changes.
+//! The gap narrows as the renderer learns: on 2026-08-16 the panel rung's
+//! glass became real (`elev::Level` and `window::frame` both read
+//! `elev.panel.glass.*`, and `glass.rank` gained its first reader), so the
+//! background sets below write it. The fixture rung keeps its own hand-made
+//! path in `deco.rs` and is deliberately NOT addressed here — the owner's
+//! scope for a background is windows and widgets, never the desktop's own
+//! decoration.
 
 use super::color::Oklch;
 
@@ -161,37 +164,68 @@ pub fn border_edits(scope: Scope, kind: Border, colour: Oklch, halo_dressed: boo
     out
 }
 
-/// Tokens that carry the background, for one scope.
+/// Tokens that carry the background, for one scope: WINDOWS AND WIDGETS,
+/// never the desktop's decoration.
 ///
-/// The glass pair is read for the fixture rung only (`deco.rs:84-88`), so that
-/// is the rung addressed here. `elev.panel.fill` is what a panel actually
-/// draws when there is no glass (`object/elev.rs:97-100`, and the master's own
-/// note at the `fill` key: "used INSTEAD of the glass pair while rank = 0").
-///
-/// `glass.rank` is NOT written. It has no reader anywhere in the workspace —
-/// grep finds comments and nothing else — so a rank in the file would be a
-/// promise the renderer never keeps.
-pub fn glass_edits(scope: Scope, kind: Glass, tint: Oklch, wash: Oklch) -> Vec<Edit> {
+/// The seam is exact and it was found by reading, not chosen for comfort:
+/// `component.panel.fill` is read directly by `window::frame` and inherited
+/// by the panel rung through the master's derivation (`[elev.panel] fill =
+/// @component.panel.fill`), so ONE token colours both. Writing
+/// `elev.panel.fill` instead would sever that derivation for good — the
+/// windows would stop following. The glass trio lives on the panel rung
+/// (`elev.panel.glass.*`, underived, safe to write) and is read by BOTH
+/// drawers since 2026-08-16. The fixture's own glass (`elev.fixture.*`,
+/// `deco.rs`) is not touched from here, which is what keeps the board's
+/// decoration out of the editor's reach by construction.
+/// `opacity`, `depth` and `coverage` are the kind's own knobs, 0..1 and
+/// 1..=3: opacity scales the whole effect (a translucent SOLID lets the
+/// scene through sharp; a translucent tint blends the blur with the sharp
+/// base beneath it), depth picks the pyramid rank, and coverage is the
+/// wash's alpha — a slider now, where an opening literal stood before
+/// verification called it out.
+pub fn glass_edits(
+    scope: Scope,
+    kind: Glass,
+    tint: Oklch,
+    wash: Oklch,
+    opacity: f32,
+    depth: f32,
+    coverage: f32,
+) -> Vec<Edit> {
     let Scope::Theme = scope;
+    let op = opacity.clamp(0.0, 1.0);
+    // Fractional on purpose: the emitter mixes two pyramid rungs by the
+    // fraction, so 1.7 is a real depth and not a rounding of 2.
+    let rank = format!("{:.2}", depth.clamp(1.0, 3.0));
     match kind {
-        // No glass: the surface's own fill carries the colour, and the wash
-        // is cleared so a previous frosted state does not sit on top of it.
         Glass::Solid => vec![
-            Edit::new("elev.panel.fill", oklch_literal(wash)),
-            Edit::new("elev.fixture.glass.wash", "none"),
+            Edit::new("component.panel.fill", oklch_literal(Oklch { alpha: op, ..wash })),
+            Edit::new("elev.panel.glass.rank", "0"),
         ],
-        // Blurred, tint left alone: multiplying by a colour can only darken,
-        // so a blur that wants to stay honest to the scene behind it does not
-        // tint at all.
         Glass::Blur => vec![
-            Edit::new("elev.fixture.glass.tint", oklch_literal(Oklch { alpha: 1.0, ..tint })),
-            Edit::new("elev.fixture.glass.wash", oklch_literal(wash)),
+            Edit::new("elev.panel.glass.rank", rank),
+            Edit::new("elev.panel.glass.tint", oklch_literal(Oklch { alpha: op, ..tint })),
+            // A fully transparent colour, NOT the word `none`. The master
+            // may declare the key with `none`, but the same word arriving
+            // through an overlay bakes to OPAQUE BLACK and paints itself
+            // over the glass — measured 2026-08-16, three screenshots: the
+            // set with `none` renders black panels, the same set without
+            // the line renders glass. The resolver's overlay handling of
+            // the sentinel is a real bug, recorded in the plan; until it
+            // is fixed, the editor writes what it means: no wash, as a
+            // colour with nothing in it.
+            Edit::new(
+                "elev.panel.glass.wash",
+                oklch_literal(Oklch { l: 0.0, c: 0.0, h: 0.0, alpha: 0.0 }),
+            ),
         ],
-        // Both quads carry colour: the tint pulls the scene toward the glass
-        // and the wash lays over it until nothing reads through.
         Glass::Frosted => vec![
-            Edit::new("elev.fixture.glass.tint", oklch_literal(tint)),
-            Edit::new("elev.fixture.glass.wash", oklch_literal(wash)),
+            Edit::new("elev.panel.glass.rank", rank),
+            Edit::new("elev.panel.glass.tint", oklch_literal(Oklch { alpha: op, ..tint })),
+            Edit::new(
+                "elev.panel.glass.wash",
+                oklch_literal(Oklch { alpha: coverage.clamp(0.0, 1.0), ..wash }),
+            ),
         ],
     }
 }
@@ -284,6 +318,8 @@ mod tests {
             "elev.panel.edge.axis",
             "glow.panel_edge.color",
         ];
+        // `glass.rank` left this list on 2026-08-16, the day it gained its
+        // first reader (`elev::Level::draw`, `window::frame`).
         let colour = c(0.7, 0.15, 200.0, 1.0);
         let mut all = Vec::new();
         for kind in [Border::Line, Border::Neon] {
@@ -292,7 +328,7 @@ mod tests {
         }
         all.push(border_colour_edit(Scope::Theme, colour));
         for kind in [Glass::Solid, Glass::Blur, Glass::Frosted] {
-            all.extend(glass_edits(Scope::Theme, kind, colour, colour));
+            all.extend(glass_edits(Scope::Theme, kind, colour, colour, 1.0, 2.0, 0.42));
         }
         for e in &all {
             assert!(
@@ -300,26 +336,90 @@ mod tests {
                 "the model wrote `{}`, which no renderer reads",
                 e.token
             );
-            assert!(
-                !e.token.ends_with("glass.rank"),
-                "the model wrote a glass rank; nothing reads one"
-            );
         }
     }
 
+    /// The scope is windows and widgets, and the tokens are the proof: the
+    /// shared fill goes through `component.panel.fill` (windows read it
+    /// directly, panels inherit it), NEVER through `elev.panel.fill` —
+    /// writing the rung's own fill would sever the derivation and the
+    /// windows would stop following the colour. And nothing here may touch
+    /// the fixture: the desktop's decoration is out of the editor's reach
+    /// by construction, which this test keeps true.
     #[test]
-    fn blur_leaves_the_tint_opaque_and_frosted_does_not() {
-        // Multiplying by a translucent tint is not "less tint" — the blur quad
-        // is a multiply, so alpha there means something other than strength.
-        // Blur keeps it at 1.0 on purpose and the difference is worth pinning.
+    fn the_background_lands_on_the_shared_seam_and_never_on_the_fixture() {
+        let colour = c(0.3, 0.05, 220.0, 1.0);
+        for kind in [Glass::Solid, Glass::Blur, Glass::Frosted] {
+            for e in glass_edits(Scope::Theme, kind, colour, colour, 1.0, 2.0, 0.42) {
+                assert!(
+                    !e.token.starts_with("elev.fixture"),
+                    "{:?} wrote {} — the desktop's decoration is not the editor's",
+                    kind,
+                    e.token
+                );
+                assert_ne!(
+                    e.token, "elev.panel.fill",
+                    "{kind:?} wrote the rung's own fill, severing the derivation \
+                     that keeps windows following the colour"
+                );
+            }
+        }
+        let solid = glass_edits(Scope::Theme, Glass::Solid, colour, colour, 1.0, 2.0, 0.42);
+        assert!(
+            solid.iter().any(|e| e.token == "component.panel.fill"),
+            "SOLID does not colour the seam both windows and panels read"
+        );
+        assert!(
+            solid.iter().any(|e| e.token == "elev.panel.glass.rank" && e.value == "0"),
+            "SOLID left a previous glass standing"
+        );
+    }
+
+    /// The OPACITY knob owns the tint's alpha for BOTH glassy kinds, and
+    /// the COVERAGE knob owns the wash's — the sliders' own alphas are
+    /// discarded on purpose, so the file always carries what the knobs say
+    /// and never a stale channel smuggled in through a seeded colour.
+    #[test]
+    fn the_knobs_own_the_alphas_and_the_colours_do_not() {
         let tint = c(0.6, 0.05, 220.0, 0.5);
         let wash = c(0.2, 0.02, 220.0, 0.34);
-        let blur = glass_edits(Scope::Theme, Glass::Blur, tint, wash);
-        let frosted = glass_edits(Scope::Theme, Glass::Frosted, tint, wash);
         let tint_of = |v: &Vec<Edit>| {
             v.iter().find(|e| e.token.ends_with("glass.tint")).unwrap().value.clone()
         };
-        assert!(!tint_of(&blur).contains('/'), "blur tinted with an alpha");
-        assert!(tint_of(&frosted).contains('/'), "frosted lost the tint's alpha");
+        // Full opacity: no alpha tail, whatever the seeded colour carried.
+        let blur = glass_edits(Scope::Theme, Glass::Blur, tint, wash, 1.0, 2.0, 0.42);
+        assert!(!tint_of(&blur).contains('/'), "full opacity grew an alpha tail");
+        // Dialled down: the tail is the KNOB's number, for blur and frosted
+        // alike — a translucent tint blends the blur with the sharp scene.
+        for kind in [Glass::Blur, Glass::Frosted] {
+            let v = glass_edits(Scope::Theme, kind, tint, wash, 0.6, 2.0, 0.42);
+            assert!(
+                tint_of(&v).contains("/ 0.600"),
+                "{kind:?}: the tint's alpha is not the opacity knob's 0.6"
+            );
+        }
+        // And the wash follows coverage, not the seeded colour's 0.34.
+        let frosted = glass_edits(Scope::Theme, Glass::Frosted, tint, wash, 1.0, 2.0, 0.7);
+        let wash_of = frosted
+            .iter()
+            .find(|e| e.token.ends_with("glass.wash"))
+            .unwrap();
+        assert!(
+            wash_of.value.contains("/ 0.700"),
+            "the wash's alpha is not the coverage knob's 0.7"
+        );
+        // Depth lands in the rank, clamped to the pyramid the renderer has.
+        let deep = glass_edits(Scope::Theme, Glass::Blur, tint, wash, 1.0, 9.0, 0.42);
+        assert!(
+            deep.iter().any(|e| e.token.ends_with("glass.rank") && e.value == "3.00"),
+            "a depth past the pyramid was not clamped"
+        );
+        // And a fraction survives to the file — the whole point of the
+        // two-fan emitter.
+        let mid = glass_edits(Scope::Theme, Glass::Blur, tint, wash, 1.0, 1.7, 0.42);
+        assert!(
+            mid.iter().any(|e| e.token.ends_with("glass.rank") && e.value == "1.70"),
+            "a fractional depth was rounded away"
+        );
     }
 }
