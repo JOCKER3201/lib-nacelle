@@ -4343,7 +4343,7 @@ rule = @stroke.hair                 # the title bar's floor line · images 7,8 �
 # hint/chevron/rule/submenu keys below, which the two older menus ignore.
 # =========================================================================
 [menu]
-row_h = 0.85x @titlebar.h           # one menu row · - · rat of @titlebar.h · 23.9 px; the drop-down's btn_h*0.8 = 36.3 unified down
+row_h = 1.05x @titlebar.h           # one menu row · - · rat of @titlebar.h · 29.5 px; raised from 0.85x (23.9 px) at the owner's ask 2026-08-16 — the unfolded elements sat too tight
 pad = 0.35x @menu.row_h             # padding inside the menu box · - · rat of @menu.row_h · 8.4 px
 min_w = 7.0x @titlebar.h            # minimum menu width · - · rat of @titlebar.h · 196.6 px
 corner = 0.5x @winframe.corner      # menu corner radius · - · rat of @winframe.corner · 5.9 px
@@ -4353,7 +4353,7 @@ border = @stroke.hair               # the ring around the menu BOX · - · str �
 # 20 named type roles and 5.25 itself glosses it "(→ body)". Written as the
 # role that exists; if a `menu` role is added to 5.16, change this line.
 item.role = body                    # type role of a menu row's label · - · role · type.body, which 5.25's gloss names as the target anyway
-item_inset = 0.5x @menu.row_h       # left inset of a row's label · - · rat of @menu.row_h · 12.0 px
+item_inset = 0.7x @menu.row_h       # left inset of a row's label · - · rat of @menu.row_h · 20.7 px; raised with row_h 2026-08-16, the same ask
 item_text_threshold = 0.7x @menu.row_h   # below this height an unfolding row draws no text · - · rat of @menu.row_h · 16.7 px
 anchor_gap = @space.1               # the air between a control that unfolds and every element it unfolds · - · len (u) · @space.1 = 0.5u = 2.7 px; the smallest step that leaves BACKGROUND between two rings
 # ONE number, used twice over. A drop-down is no longer a box with rows
