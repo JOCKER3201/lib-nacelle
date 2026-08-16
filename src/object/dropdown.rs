@@ -55,11 +55,32 @@
 //! corners stand slightly proud of the anchor's silhouette. Clipping to
 //! the rounding would need a shaped clip, which this draw list does not
 //! have. Stated here rather than papered over.
+//!
+//! THE FRAME. A blind is as tall as its slats until the slats outgrow
+//! the window: a list of forty themes or four hundred font families
+//! used to hang past the desktop's edge, pressable where it could not
+//! be seen. The body now stops at `menu.max_h_frac` of the viewport's
+//! height (floored by `menu.max_h_min_px`, the 3.2 companion) and what
+//! does not fit SCROLLS inside that frame. The offset, its clamp, its
+//! physics and its bar are the toolkit's ([`crate::view::scroll`]): the
+//! caller owns the [`ScrollView`] — the list is stateless, an offset is
+//! not — and hands the wheel over with the toolkit's sign (positive
+//! notches toward the end of the content, so the CALLER NEGATES the
+//! platform's delta, exactly as the settings window already does for its
+//! pages). The bar is the toolkit's scrollbar in the master's inset
+//! lane, carved from the slats' width only while the list scrolls — a
+//! short list keeps the anchor's width to the pixel. An element outside
+//! the frame is reported with no area and registers nothing: the frame
+//! cuts the hits exactly as it cuts the picture, the same rule the
+//! foreign-clip fix states one paragraph down.
 
 use super::button::ButtonState;
 use super::focus_ring;
 use crate::focus::{Caps, FocusId};
 use crate::theme::{self, Color, TokenId};
+use crate::view::paint;
+use crate::view::scroll::{self, ScrollPhysics, ScrollView, ScrollbarEdge, ScrollbarLook, Snap};
+use crate::view::surface::CtxSurface;
 use crate::{ui, Ctx, Rect};
 use std::sync::OnceLock;
 
@@ -107,13 +128,23 @@ pub struct AccordionStyle {
 /// Draws the blind at unfold progress `p` (0..1, eased by the caller or
 /// pass 1.0 for fully open). Returns the element rectangles in order —
 /// AS DRAWN, which for an element still half under the anchor is the
-/// half that is out, and which for a list unfolding inside somebody
-/// else's clip is what that clip leaves of it: the caller hit-tests
-/// these, so an element is clickable where it can be seen and nowhere
-/// else. An element the enclosing clip took whole is reported at its
-/// place with NO AREA — the entry stays, because the caller maps the
-/// index to an act, but there is nothing left to press. The `bool` says
-/// whether the whole of it is out AND uncut.
+/// half that is out, which for a body longer than its frame is what the
+/// frame leaves in view at the current offset, and which for a list
+/// unfolding inside somebody else's clip is what that clip leaves of
+/// it: the caller hit-tests these, so an element is clickable where it
+/// can be seen and nowhere else. An element the frame or the enclosing
+/// clip took whole is reported at its place with NO AREA — the entry
+/// stays, because the caller maps the index to an act, but there is
+/// nothing left to press. The `bool` says whether the whole of it is
+/// out AND uncut.
+///
+/// `scroll` is the body's offset, owned by the caller because the list
+/// is drawn fresh every frame and an offset is not: reset it when the
+/// list opens, feed it wheel notches with [`ScrollView::wheel`] — the
+/// toolkit's sign, positive toward the end, so the caller negates the
+/// platform's delta — and this function ticks, clamps and draws the bar.
+/// A list shorter than its frame never moves and never shows one, so a
+/// caller with a three-element list loses nothing by carrying the state.
 ///
 /// [`AccordionStyle`] carries the rest: whether the elements join the
 /// focus chain, and which of them is the one already in force. A list
@@ -125,6 +156,7 @@ pub fn accordion(
     names: &[String],
     p: f32,
     style: &AccordionStyle,
+    scroll: &mut ScrollView,
 ) -> Vec<(Rect, bool)> {
     static GAP: OnceLock<TokenId> = OnceLock::new();
     static SKEW: OnceLock<TokenId> = OnceLock::new();
@@ -133,6 +165,8 @@ pub fn accordion(
     static ANCHOR_W: OnceLock<TokenId> = OnceLock::new();
     static ANCHOR_W_IDX: OnceLock<Option<u16>> = OnceLock::new();
     static MIN_W: OnceLock<TokenId> = OnceLock::new();
+    static MAX_H_FRAC: OnceLock<TokenId> = OnceLock::new();
+    static MAX_H_MIN_PX: OnceLock<TokenId> = OnceLock::new();
     let t = theme::resolved();
     let role = ui::bound_role(&ROLE, "list.label_role");
     // No `ui_font_scale`: the viewport carries the user's scale into u,
@@ -195,18 +229,41 @@ pub fn accordion(
     // invisible, and clickable, OVER whatever really stood there. So
     // every rect is cut by the stack's top too, which is the
     // intersection of everything pushed — exactly what the picture was
-    // cut by. Read BEFORE this function's own horizon clip goes on: the
-    // horizon lives in the `top`/`seen` arithmetic below, and the own
-    // clip's other three edges are the window's, which the rects must
-    // NOT be cut to — a list at the window's bottom hangs past the edge
-    // and its tail stays pressable there, deliberately (the settings
-    // window pins that behaviour until the accordion learns to scroll).
+    // cut by. Read BEFORE this function's own frame clip goes on: the
+    // horizon and the frame's bottom live in the `top`/`seen`
+    // arithmetic below, and the own clip's side edges are the window's,
+    // which the rects must NOT be cut to.
     let outer = ctx.dl.clip();
     // Stowed: the whole stack tucked under the anchor, every element at
     // the same place, none of it showing.
     let stowed = horizon - item_h;
     let pitch = item_h + gap;
-    ctx.dl.push_clip(0.0, horizon, ctx.w, (ctx.h - horizon).max(0.0));
+    // THE FRAME. The finished body is one pitch per element — the seam
+    // under the anchor plus a slat plus a seam, `names.len()` times over
+    // — and it may stand no taller than `menu.max_h_frac` of the
+    // viewport, floored by `menu.max_h_min_px` so a tiny window still
+    // shows a few elements. What does not fit scrolls: the offset is the
+    // caller's [`ScrollView`], ticked here the way the settings window
+    // ticks its pages — `Snap::None`, because the clip is real and half
+    // an element in the frame is half an element on the screen.
+    let content = pitch * names.len() as f32;
+    let cap = (ctx.h * t.px(tok(&MAX_H_FRAC, "menu.max_h_frac")))
+        .max(t.px(tok(&MAX_H_MIN_PX, "menu.max_h_min_px")))
+        .max(0.0);
+    let body_h = content.min(cap);
+    let frame_bottom = horizon + body_h;
+    let scrolls = content > body_h + 0.5;
+    scroll.tick(ctx.t, body_h, content, Snap::None, &ScrollPhysics::from_theme());
+    let offset = scroll.offset();
+    // THE LANE. The master's bar is inset — it stands BESIDE the content
+    // (the owner's ask: a bar over the controls read as a defect) — so a
+    // body that scrolls carves the bar's lane out of the slats' width.
+    // Only then: a list that fits keeps the anchor's width to the pixel,
+    // which is every list the toolkit drew before it learnt to scroll.
+    let look = ScrollbarLook::from_theme();
+    let bar_box_w = row_w;
+    let row_w = if scrolls { (row_w - scroll::inset_w(&look)).max(0.0) } else { row_w };
+    ctx.dl.push_clip(0.0, horizon, ctx.w, body_h);
     // A blind that has stopped moving is a list; a blind still moving is
     // an animation. Only the first joins the focus chain.
     let at_rest = p >= 1.0;
@@ -214,15 +271,18 @@ pub fn accordion(
     for (i, name) in names.iter().enumerate() {
         // Element `i`'s travel: `item_h` to clear the anchor, the gap
         // below it, and one pitch for every element that stands above
-        // it. Linear in `i`, so the last one goes furthest.
-        let y = stowed + p * (item_h + gap + pitch * i as f32);
+        // it. Linear in `i`, so the last one goes furthest — and the
+        // whole column stands `offset` higher than its resting place,
+        // which is what scrolling a fixed frame over a longer body IS.
+        let y = stowed + p * (item_h + gap + pitch * i as f32) - offset;
         let slat = Rect::new(anchor.x, y, row_w, item_h);
-        // What of it is out from under the anchor. The scissor's own
-        // arithmetic, repeated here because the rect handed back has to
-        // BE the rect that was drawn: a caller aiming at where an
-        // element will eventually be would be aiming at the anchor.
+        // What of it is inside the frame. The scissor's own arithmetic,
+        // repeated here because the rect handed back has to BE the rect
+        // that was drawn: a caller aiming at where an element will
+        // eventually be would be aiming at the anchor — or, past the
+        // frame's bottom, at whatever the desktop drew under the list.
         let top = y.max(horizon);
-        let seen = (y + item_h - top).max(0.0);
+        let seen = ((y + item_h).min(frame_bottom) - top).max(0.0);
         let shown = Rect::new(slat.x, top, slat.w, seen);
         // …and what of THAT the enclosing clip leaves standing. The
         // same intersection `push_clip` performed on the way in, so the
@@ -301,6 +361,32 @@ pub fn accordion(
     // report the first element as a different object from the rest.
     if let Some(r) = ring {
         focus_ring::draw(ctx, r);
+    }
+    // THE BAR. Geometry from the toolkit ([`scroll::scrollbar`]), paint
+    // from the toolkit ([`paint::scrollbar`]) — the same two calls the
+    // settings window makes for its pages, over the same state, so the
+    // list's bar and the page's bar cannot drift apart. It stands in the
+    // lane carved above, against the slats' ORIGINAL right edge, and
+    // under the master it auto-hides: a list at rest shows no bar until
+    // the wheel moves it, exactly like a page.
+    if scrolls {
+        let area = Rect::new(anchor.x, horizon, bar_box_w, body_h);
+        // The band the bar could occupy at its WIDEST: a bar that grows
+        // under the pointer must not shrink out from under it.
+        let reach = look.w_hover.max(look.w) + look.margin;
+        let band = match look.edge {
+            ScrollbarEdge::Left => Rect::new(area.x, area.y, reach, area.h),
+            ScrollbarEdge::Right => Rect::new(area.right() - reach, area.y, reach, area.h),
+        };
+        let hovered = ctx.mouse.over(band);
+        if let Some(geom) = scroll::scrollbar(area, &look, offset, body_h, content, hovered) {
+            let alpha = if hovered {
+                1.0
+            } else {
+                scroll.fade_alpha(ctx.t, look.auto_hide, look.fade_ms)
+            };
+            paint::scrollbar(&mut CtxSurface::new(ctx), &geom, alpha, hovered, scroll.dragging());
+        }
     }
     out
 }

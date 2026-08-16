@@ -35,6 +35,7 @@ use nacelle::draw::DrawList;
 use nacelle::font::FontSystem;
 use nacelle::object::dropdown::{self, AccordionStyle};
 use nacelle::theme;
+use nacelle::view::ScrollView;
 use nacelle::{Ctx, Rect};
 
 const W: f32 = 1920.0;
@@ -81,7 +82,18 @@ fn shoot(fonts: &mut FontSystem, clip: Option<Rect>) -> Vec<(Rect, bool)> {
             focus: None,
             tips: None,
         };
-        dropdown::accordion(&mut ctx, ANCHOR, ITEM_H, &names, 1.0, &AccordionStyle::default())
+        // A fresh, untouched offset: nine elements fit their frame, so
+        // the frame's own cut never fires here and every cut this file
+        // measures is the foreign clip's.
+        dropdown::accordion(
+            &mut ctx,
+            ANCHOR,
+            ITEM_H,
+            &names,
+            1.0,
+            &AccordionStyle::default(),
+            &mut ScrollView::new(),
+        )
     };
     // The list is a guest under this clip: it pushed its horizon and
     // popped it, and the stack it was called under still stands.

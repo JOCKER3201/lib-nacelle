@@ -4371,6 +4371,15 @@ anchor_gap = @space.1               # the air between a control that unfolds and
 # The gap does not scale with the unfold: it is a distance between two
 # finished objects, not a share of an animation.
 anchor_width = anchor               # whether the menu takes its anchor's width or its own minimum · - · enum: anchor | min_w · -; context menus always size to content over the min_w floor
+# THE FRAME of an unfolded body. A drop-down grows one pitch per element,
+# and a list of forty themes or four hundred font families used to hang
+# past the desktop's edge — pressable where it could not be seen. Past
+# this share of the viewport's height the blind stops and the body
+# SCROLLS inside its frame instead: the wheel moves it, the toolkit's
+# scrollbar stands in the inset lane beside the slats, and an element
+# outside the frame neither draws nor answers the mouse.
+max_h_frac = 40%                    # the tallest unfolded body, from the anchor's underside down · - · % of the viewport height · 432 px @1080p ≈ 13 elements; a longer list scrolls (M8, 2026-08-16)
+max_h_min_px = 96px                 # absolute floor for max_h_frac's result · - · device px · companion of menu.max_h_frac (3.2); a tiny window still shows a few elements
 rule = @stroke.hair                 # the separator between menu groups · - · str | none · @stroke.hair
 hint_role = caption                 # type role of the shortcut hint at a row's right edge · - · role · type.caption
 hint_gap = @space.4                 # gap between the label column and the hint column · - · len (u) · @space.4 = 2u = 10.8 px

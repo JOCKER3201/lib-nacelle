@@ -31,6 +31,7 @@ use nacelle::font::FontSystem;
 use nacelle::object::button::{self, ButtonState};
 use nacelle::object::dropdown::{self, AccordionStyle};
 use nacelle::theme;
+use nacelle::view::ScrollView;
 use nacelle::{Ctx, Rect};
 
 const W: f32 = 1920.0;
@@ -103,6 +104,8 @@ fn shoot(
     let mut dl = DrawList::recording();
     let rects = {
         let mut c = ctx(&mut dl, fonts, mouse);
+        // A fresh, untouched offset: three elements fit their frame, so
+        // the scroll is a passenger in every stage of this file.
         dropdown::accordion(
             &mut c,
             ANCHOR,
@@ -110,6 +113,7 @@ fn shoot(
             &names,
             p,
             &AccordionStyle { current, ..AccordionStyle::default() },
+            &mut ScrollView::new(),
         )
     };
     (dl, rects)
@@ -477,7 +481,15 @@ fn an_element_hangs_off_the_anchors_bottom_edge(fonts: &mut FontSystem) {
         let mut dl = DrawList::recording();
         {
             let mut c = ctx(&mut dl, fonts, AWAY);
-            dropdown::accordion(&mut c, narrow, ITEM_H, &names, 1.0, &AccordionStyle::default());
+            dropdown::accordion(
+                &mut c,
+                narrow,
+                ITEM_H,
+                &names,
+                1.0,
+                &AccordionStyle::default(),
+                &mut ScrollView::new(),
+            );
         }
         slat(&dl, 0).w
     };
