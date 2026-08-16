@@ -2697,6 +2697,12 @@ being told what to change.
 `custom` exists because an author will eventually want a specific overshoot, and it is
 deliberately the awkward one so it is not the default.
 
+The shared motion resolver these words run through is `src/motion.rs` (`Easing`,
+`Effect`, `Crossfade`) — the resolver `deco.rs` used to promise. It is where `easing_p`
+has its reader, where the word is compared as a WORD on every ask (an enum-index cache
+does not survive a theme swap), and where a one-shot that writes `sine` is warned once
+and run linear.
+
 **Six prohibitions, enforced by the grammar** (there is no token for them), each with
 its reason:
 

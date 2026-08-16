@@ -451,45 +451,15 @@ pub fn figures(fonts: &mut FontSystem, font: u8, px: f32, tabular: bool) -> Figu
 // reduced motion (`motion.scale = 0`) or when the effect is disabled.
 
 /// The 0..1 factor of the cyclic motion effect `motion.<id>` at time `t`.
+///
+/// A door into the shared resolver: [`crate::motion::Effect::cyclic`]
+/// carries the whole contract now — the memoised token lookup, the
+/// warn-once on an id outside the catalogue, the freeze at fully visible
+/// (reduced motion, a disabled effect, a zero period: a separator that
+/// never returns is a content change), and the step curve the cyclic
+/// sources run on.
 pub fn blink_factor(id: &str, t: f64) -> f32 {
-    thread_local! {
-        static MOTION: RefCell<HashMap<String, (TokenId, TokenId, TokenId, TokenId)>> =
-            RefCell::new(HashMap::new());
-    }
-    static SCALE: OnceLock<TokenId> = OnceLock::new();
-    let (period, duty, floor, enabled) = MOTION.with(|m| {
-        *m.borrow_mut().entry(id.to_string()).or_insert_with(|| {
-            let g = |member: &str| {
-                theme::id(&format!("motion.{id}.{member}")).unwrap_or(TokenId::MISSING)
-            };
-            if theme::id(&format!("motion.{id}.period_ms")).is_none() {
-                warn_once(
-                    &format!("blink:{id}"),
-                    &format!("unknown motion effect \"{id}\" — the run stays visible"),
-                );
-            }
-            (g("period_ms"), g("duty"), g("floor"), g("enabled"))
-        })
-    });
-    let th = theme::resolved();
-    let scale = th.px(tok(&SCALE, "motion.scale"));
-    // Reduced motion and a disabled effect both FREEZE the run at fully
-    // visible: a separator that never returns is a content change.
-    if scale <= 0.0 || !th.flag(enabled) {
-        return 1.0;
-    }
-    let p = th.px(period) * scale;
-    if p <= 0.0 {
-        return 1.0;
-    }
-    // The cyclic sources are step-eased (`t < duty ? 1 : floor`); the other
-    // easings belong to one-shot transitions and no run carries those.
-    let phase = ((t * 1000.0) % p as f64) / p as f64;
-    if (phase as f32) < th.px(duty) {
-        1.0
-    } else {
-        th.px(floor).clamp(0.0, 1.0)
-    }
+    crate::motion::Effect::of(id).cyclic(t)
 }
 
 // `role_px` stood here: one `type.<name>.size` read by NAME, with the

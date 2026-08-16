@@ -92,50 +92,18 @@ pub fn fixture_glass(dl: &mut DrawList, w: f32, h: f32, wash_scale: f32) {
 /// The board ride's clock: seconds for the full move, after the
 /// theme's global motion scale. Zero — disabled, scale 0, or no
 /// token — is a hard cut, which is exactly what reduced motion asks
-/// for.
+/// for. A thin shell over [`crate::motion::Effect::one_shot_secs`],
+/// kept because the desktop calls it by this name.
 pub fn ride_secs() -> f32 {
-    static ENABLED: OnceLock<TokenId> = OnceLock::new();
-    static DUR: OnceLock<TokenId> = OnceLock::new();
-    static SCALE: OnceLock<TokenId> = OnceLock::new();
-    let t = theme::resolved();
-    if !t.flag(tok(&ENABLED, "motion.board_ride.enabled")) {
-        return 0.0;
-    }
-    t.px(tok(&DUR, "motion.board_ride.duration_ms")) * t.px(tok(&SCALE, "motion.scale"))
-        / 1000.0
+    crate::motion::Effect::of("board_ride").one_shot_secs()
 }
 
-/// The ride's easing, picked by the motion token's word. `custom`'s
-/// cubic-bezier control points wait on a shared motion resolver; until
-/// it exists an unrecognised word runs linear, the enum's own
-/// fallback.
+/// The ride's easing, picked by the motion token's word. The "shared
+/// motion resolver" this header used to promise exists now
+/// (`crate::motion`), and this is its board-ride door: the curve is
+/// chosen by the live theme's WORD — the enum-index cache that froze it
+/// across a theme swap is gone — and `custom`'s cubic-bezier control
+/// points finally have their reader.
 pub fn ride_ease(t01: f32) -> f32 {
-    static EASING: OnceLock<TokenId> = OnceLock::new();
-    static DUTY: OnceLock<TokenId> = OnceLock::new();
-    static FLOOR: OnceLock<TokenId> = OnceLock::new();
-    static WORDS: OnceLock<[Option<u16>; 5]> = OnceLock::new();
-    let t = theme::resolved();
-    let id = tok(&EASING, "motion.board_ride.easing");
-    let w = WORDS.get_or_init(|| {
-        ["ease_out", "ease_in", "ease_in_out", "sine", "step"]
-            .map(|word| theme::enum_index(id, word))
-    });
-    let e = Some(t.enum_of(id));
-    if e == w[0] {
-        1.0 - (1.0 - t01) * (1.0 - t01)
-    } else if e == w[1] {
-        t01 * t01
-    } else if e == w[2] {
-        t01 * t01 * (3.0 - 2.0 * t01)
-    } else if e == w[3] {
-        0.5 - 0.5 * (std::f32::consts::PI * t01).cos()
-    } else if e == w[4] {
-        if t01 >= t.px(tok(&DUTY, "motion.board_ride.duty")) {
-            1.0
-        } else {
-            t.px(tok(&FLOOR, "motion.board_ride.floor"))
-        }
-    } else {
-        t01
-    }
+    crate::motion::Effect::of("board_ride").ease(t01)
 }

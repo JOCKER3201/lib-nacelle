@@ -847,24 +847,14 @@ fn shown(s: &str, mask: Option<char>) -> String {
 /// visible when the effect is off or under reduced motion (the
 /// freeze-at-visible rule).
 fn caret_on(model: &mut InputModel, t_now: f64) -> bool {
-    static PERIOD: OnceLock<TokenId> = OnceLock::new();
-    static DUTY: OnceLock<TokenId> = OnceLock::new();
-    static ENABLED: OnceLock<TokenId> = OnceLock::new();
-    static SCALE: OnceLock<TokenId> = OnceLock::new();
     if model.blink.0 != model.edit_seq {
         model.blink = (model.edit_seq, t_now);
     }
-    let t = theme::resolved();
-    let scale = t.px(tok(&SCALE, "motion.scale"));
-    if scale <= 0.0 || !t.flag(tok(&ENABLED, "motion.caret_blink.enabled")) {
-        return true;
-    }
-    let period = (t.px(tok(&PERIOD, "motion.caret_blink.period_ms")) * scale) as f64;
-    if period <= 0.0 {
-        return true;
-    }
-    let phase = ((t_now - model.blink.1) * 1000.0 % period) / period;
-    (phase as f32) < t.px(tok(&DUTY, "motion.caret_blink.duty"))
+    // The shared resolver, fed the FIELD's clock: `cyclic` takes "time"
+    // and this field's time starts at its last accepted edit, which is
+    // what keeps a typing caret always visible. Fully visible — 1.0,
+    // the freeze answer included — is the caret being ON.
+    crate::motion::Effect::of("caret_blink").cyclic(t_now - model.blink.1) >= 1.0
 }
 
 /// The `field.caret_style` word, resolved to a shape.

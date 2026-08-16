@@ -55,6 +55,7 @@ pub mod layout;
 pub use layout::flex;
 pub mod focus;
 pub mod font;
+pub mod motion;
 pub mod object;
 pub mod plugin;
 pub mod pointer;
@@ -70,4 +71,5 @@ pub mod view;
 pub mod widget;
 
 pub use base::*;
+pub use motion::{Crossfade, Easing, Effect};
 pub use widget::*;
