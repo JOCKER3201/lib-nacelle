@@ -400,7 +400,7 @@ impl FontSystem {
             cur_y: 2,
             row_h: 0,
             reset_pending: false,
-            faces_epoch: crate::theme::epoch(),
+            faces_epoch: crate::theme::content_epoch(),
             choice: FaceChoice::default(),
         };
         // White pixel (0,0..2x2) for solid fills.
@@ -428,7 +428,7 @@ impl FontSystem {
         self.fonts = fonts;
         self.synthetic = synthetic;
         self.choice = ov.clone();
-        self.faces_epoch = crate::theme::epoch();
+        self.faces_epoch = crate::theme::content_epoch();
         self.reset_atlas();
     }
 
@@ -505,7 +505,16 @@ impl FontSystem {
         // BOUNDARY, never mid-frame, for the same reason the atlas reset
         // waits here: glyphs already in a draw list have to keep their
         // UVs. One atomic load per frame when nothing has changed.
-        let epoch = crate::theme::epoch();
+        // The CONTENT epoch, never `theme::epoch()`. That one answers which
+        // BAKE is published, and a desktop whose monitors are unequal heights
+        // has two of them — one per unit size — published in turn as each
+        // screen draws. Against a single remembered value it reads as a
+        // change on every frame, and this guard stands in front of a walk of
+        // the font directories and a re-parse of every face file. It was
+        // written here, and it was `--desktop` at 100 % CPU on two monitors
+        // and 5 % on one. Which families the slots name is a property of the
+        // theme's text, not of the height it was baked for.
+        let epoch = crate::theme::content_epoch();
         if epoch != self.faces_epoch {
             let choice = self.choice.clone();
             self.reload_faces(&choice);

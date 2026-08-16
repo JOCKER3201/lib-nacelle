@@ -194,6 +194,9 @@ static ENGINE: OnceLock<Mutex<Engine>> = OnceLock::new();
 static ACTIVE: AtomicPtr<ResolvedTheme> = AtomicPtr::new(std::ptr::null_mut());
 static EPOCH: AtomicU32 = AtomicU32::new(0);
 static RESOLVES: AtomicU32 = AtomicU32::new(0);
+/// Bumped when the theme's CONTENT changes — a load, a mood, a variant — and
+/// never when the viewport does. See [`content_epoch`].
+static CONTENT_EPOCH: AtomicU32 = AtomicU32::new(0);
 static DIAGS: OnceLock<Mutex<Arc<ThemeDiagnostics>>> = OnceLock::new();
 
 fn diags_slot() -> &'static Mutex<Arc<ThemeDiagnostics>> {
@@ -240,6 +243,27 @@ fn empty_theme() -> &'static ResolvedTheme {
 /// resize, format change (§7.4).
 pub fn epoch() -> u32 {
     EPOCH.load(Ordering::Acquire)
+}
+
+/// Moves when the theme's CONTENT changes: a load, a mood, a variant. It does
+/// NOT move when the viewport does.
+///
+/// [`epoch`] answers a different question — WHICH BAKE is published — and on a
+/// desktop whose monitors are unequal heights there are two live bakes, one
+/// per unit size, published in turn as each screen draws. Its value therefore
+/// alternates every frame, forever, by design.
+///
+/// That makes [`epoch`] a correct cache key and a ruinous change-detector. A
+/// consumer holding ONE remembered epoch and asking "has anything changed?"
+/// gets `true` on every frame of a mixed-height desktop. Anything asking
+/// whether the theme has changed under it — which families the face slots
+/// name, which colours a palette holds — wants this counter instead.
+///
+/// (Written after the font system, guarding its face reload with [`epoch`],
+/// walked the font directories and re-parsed every face file sixty times a
+/// second and put `--desktop` at 100 % CPU.)
+pub fn content_epoch() -> u32 {
+    CONTENT_EPOCH.load(Ordering::Acquire)
 }
 
 /// How many times the engine has resolved the theme in this process.
@@ -656,6 +680,9 @@ pub fn load_with(req: LoadRequest) -> Arc<ThemeDiagnostics> {
     let diags = Arc::new(meta);
     engine.diagnostics = diags.clone();
     publish(theme);
+    // A load replaces the file the slots are named in, so everything derived
+    // from the theme's CONTENT — the face slots above all — is now stale.
+    CONTENT_EPOCH.fetch_add(1, Ordering::Release);
     *diags_slot().lock().unwrap() = diags.clone();
 
     match ENGINE.get() {
@@ -795,6 +822,10 @@ pub fn set_sibling(i: usize) -> bool {
     let mut out = Vec::new();
     let t = g.bake_active(&mut out);
     publish(t);
+    // A sibling is a different mood or variant, so its `[face]` block may
+    // name other families than the one standing — a content change, unlike
+    // the viewport swaps that pass through `set_viewport`.
+    CONTENT_EPOCH.fetch_add(1, Ordering::Release);
     true
 }
 
