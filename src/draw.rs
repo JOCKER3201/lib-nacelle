@@ -121,6 +121,37 @@ impl Shape {
     pub const KIND_SHIFT: u32 = 8;
 }
 
+/// The closed family of silhouettes the vector core draws (f3 §2.1).
+/// K2 emits Box alone; the other kinds are declared now so the record's
+/// bits 8-11 have their meaning pinned before K3 fills them in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum ShapeKind {
+    Box = 0,
+    Ring = 1,
+    Hex = 2,
+    Chevron = 3,
+    Capsule = 4,
+}
+
+/// One shape as the caller means it (f3 §2.11, K2's slice: bed and
+/// edge; glow and shadow join in K3). Bed and edge SHARE the record
+/// when both are present, because they share a silhouette — as two
+/// records their antialiased outer edges would blend twice on the same
+/// pixels and a translucent panel over glass would grow a dark rim
+/// (§2.10).
+#[derive(Clone, Copy, Debug)]
+pub struct ShapeSpec {
+    pub rect: Rect,
+    /// tl, tr, br, bl — [`ring_points`]' order.
+    pub corners: [Corner; 4],
+    pub kind: ShapeKind,
+    /// Interior colour; rides the vertices, like every fill before it.
+    pub fill: Option<Color>,
+    /// Width and colour of the inward band; rides the record.
+    pub stroke: Option<(f32, Color)>,
+}
+
 /// Treatment of one rect corner — the vocabulary of the one tessellated
 /// ring generator (r1 §3). There is no arc primitive and no mask-based
 /// corner: nothing in this pipeline is antialiased except text, and a
@@ -383,6 +414,17 @@ pub enum DrawCmd {
     ChamferFill { r: [f32; 4], cut: f32, color: Color },
     Ring { r: [f32; 4], corners: [Corner; 4], stroke: f32, color: Color },
     RingFill { r: [f32; 4], corners: [Corner; 4], color: Color },
+    /// [`DrawList::shape`] — the vector family's own entry. `ring` and
+    /// `ring_fill` keep their names in the register even when the
+    /// vector lane draws them: which lane tessellated is exactly the
+    /// knob the register must not see.
+    Shape {
+        r: [f32; 4],
+        corners: [Corner; 4],
+        kind: ShapeKind,
+        fill: Option<Color>,
+        stroke: Option<(f32, Color)>,
+    },
     GlassFill { r: [f32; 4], corners: [Corner; 4], depth: f32, tint: Color },
     RectGrad { r: [f32; 4], stops: Vec<(f32, Color)>, angle: f32 },
     FanC { centre: [f32; 2], c_centre: Color, rim: Vec<([f32; 2], Color)> },
@@ -628,6 +670,27 @@ impl fmt::Display for DrawCmd {
                 corners(f, c)?;
                 rgba(f, *color)
             }
+            DrawCmd::Shape { r, corners: c, kind, fill, stroke } => {
+                f.write_str("shape at")?;
+                nums(f, r, PX)?;
+                corners(f, c)?;
+                f.write_str(match kind {
+                    ShapeKind::Box => " kind box",
+                    ShapeKind::Ring => " kind ring",
+                    ShapeKind::Hex => " kind hex",
+                    ShapeKind::Chevron => " kind chevron",
+                    ShapeKind::Capsule => " kind capsule",
+                })?;
+                if let Some(col) = fill {
+                    f.write_str(" fill")?;
+                    rgba(f, *col)?;
+                }
+                if let Some((w, col)) = stroke {
+                    field(f, "stroke", *w, PX)?;
+                    rgba(f, *col)?;
+                }
+                Ok(())
+            }
             DrawCmd::RectGrad { r, stops, angle } => {
                 f.write_str("rect_grad at")?;
                 nums(f, r, PX)?;
@@ -776,6 +839,18 @@ pub fn arm_cmds() {
 pub struct DrawList {
     pub verts: Vec<Vertex>,
     pub runs: Vec<DrawRun>,
+    /// The frame's shape records (f3 §2.5): what runs tagged [`SHAPE`]
+    /// index into through [`Vertex::shape`]. Uploaded beside the
+    /// vertices, cleared with them.
+    shapes: Vec<Shape>,
+    /// Whether ring/ring_fill take the vector lane. The application
+    /// sets it from the theme's `render.vector`; false is the shipping
+    /// default and the tessellated path bit for bit.
+    vector: bool,
+    /// §2.3's ride subdivision: shape quads emit as warp×warp grids
+    /// while a post-emission transform is in flight. 1 = one quad, and
+    /// only there does §2.7's edge snap apply.
+    warp: u8,
     /// The clip stack: pushes intersect, pops restore. The TOP is stamped
     /// onto every run the moment it is opened.
     clips: Vec<[f32; 4]>,
@@ -796,6 +871,9 @@ impl DrawList {
         DrawList {
             verts: Vec::with_capacity(1 << 16),
             runs: Vec::new(),
+            shapes: Vec::new(),
+            vector: false,
+            warp: 1,
             clips: Vec::new(),
             scratch_a: Vec::new(),
             scratch_b: Vec::new(),
@@ -813,6 +891,11 @@ impl DrawList {
     pub fn clear(&mut self) {
         self.verts.clear();
         self.runs.clear();
+        self.shapes.clear();
+        // The warp is FRAME state — a ride that forgot to lower it must
+        // not thicken every later frame — while `vector` is a mode, set
+        // once from the theme, and survives like the register does.
+        self.warp = 1;
         self.clips.clear();
         match &mut self.cmds {
             Some(cmds) => cmds.clear(),
@@ -1179,6 +1262,22 @@ impl DrawList {
             stroke,
             color,
         });
+        if self.vector {
+            // The vector lane (f3 K2): the same intent as one record —
+            // STROKE alone, the band inward as ever; the bed under a
+            // border stays ring_fill's own record. Merging the pair
+            // into one FILL|STROKE record is K3's, and R4 (the shared
+            // antialiased edge blending twice) is why the token ships
+            // false until then.
+            self.shape_verts(&ShapeSpec {
+                rect: r,
+                corners: *c,
+                kind: ShapeKind::Box,
+                fill: None,
+                stroke: Some((stroke, color)),
+            });
+            return;
+        }
         self.ring_verts(r, c, segments, stroke, color);
     }
 
@@ -1231,6 +1330,19 @@ impl DrawList {
             corners: *c,
             color,
         });
+        if self.vector {
+            // The vector lane: FILL alone, the colour on the vertices
+            // as every fill before it, still on the ORIGINAL rect —
+            // the fill must reach the rect edge under the border.
+            self.shape_verts(&ShapeSpec {
+                rect: r,
+                corners: *c,
+                kind: ShapeKind::Box,
+                fill: Some(color),
+                stroke: None,
+            });
+            return;
+        }
         if r.w <= 0.0 || r.h <= 0.0 {
             return;
         }
@@ -1260,6 +1372,189 @@ impl DrawList {
             }
         }
         self.scratch_a = pts;
+    }
+
+    /// One shape of the vector family (f3 §2.11), K2's slice: bed
+    /// and/or edge over a Box silhouette, one record and one quad
+    /// (6 vertices) whatever the corners — where the ring generator
+    /// spends up to 168. Kinds beyond Box are recorded faithfully but
+    /// the K2 fragment shader draws every record as its Box distance;
+    /// the remaining kinds, glow and shadow arrive with K3.
+    pub fn shape(&mut self, s: &ShapeSpec) {
+        self.cmd(|| DrawCmd::Shape {
+            r: [s.rect.x, s.rect.y, s.rect.w, s.rect.h],
+            corners: s.corners,
+            kind: s.kind,
+            fill: s.fill,
+            stroke: s.stroke,
+        });
+        self.shape_verts(s);
+    }
+
+    /// The record and quads of [`DrawList::shape`] without the command —
+    /// ring/ring_fill's vector lane comes in here having recorded its
+    /// own name, because the register holds intent and their intent is
+    /// Ring/RingFill whatever tessellates them.
+    fn shape_verts(&mut self, s: &ShapeSpec) {
+        let mut r = s.rect;
+        if r.w <= 0.0 || r.h <= 0.0 {
+            return;
+        }
+        let stroke = s.stroke.filter(|&(w, _)| w > 0.0);
+        if s.fill.is_none() && stroke.is_none() {
+            return;
+        }
+        let snap = self.warp <= 1;
+        if snap {
+            // §2.7: an axis-aligned shape snaps its OUTER edges to the
+            // device pixel grid on the CPU, before the record is
+            // written — the vector lane must never smear a hard
+            // interface edge across two half-lit pixels. Off during a
+            // warp ride, where the screen grid does not correspond to
+            // the shape's anyway.
+            let x1 = (r.x + r.w).round();
+            let y1 = (r.y + r.h).round();
+            r.x = r.x.round();
+            r.y = r.y.round();
+            r.w = x1 - r.x;
+            r.h = y1 - r.y;
+            if r.w <= 0.0 || r.h <= 0.0 {
+                return;
+            }
+        }
+        // R9: sentinels resolve HERE — the buffer never sees a negative
+        // corner. `pill` is half the short side (corner_radius's one
+        // rule, sized like ring_points' own cap); `same_as_parent`
+        // takes the FIRST corner as its parent — the base every
+        // `[Corner { .. }; 4]` builder repeats — until K6 reads the
+        // per-corner tokens and a real cascade parent exists.
+        let cap = (r.w.min(r.h) * 0.5).max(0.0);
+        let same = crate::theme::expr::sentinel("same_as_parent").unwrap_or(-3.0);
+        let base = crate::theme::corner_radius(s.corners[0].size, r.w, r.h);
+        let resolve = |c: &Corner| -> f32 {
+            let sz = if c.size == same {
+                base
+            } else {
+                crate::theme::corner_radius(c.size, r.w, r.h)
+            };
+            debug_assert!(sz >= 0.0, "a sentinel reached the record: {sz}");
+            sz.min(cap)
+        };
+        // Corner radii are NOT snapped (§2.7): the curve does not lie
+        // on the grid to begin with.
+        let corner = [
+            resolve(&s.corners[0]),
+            resolve(&s.corners[1]),
+            resolve(&s.corners[2]),
+            resolve(&s.corners[3]),
+        ];
+        let (stroke_w, stroke_c) = match stroke {
+            // The baker's own hairline rule — `stroke.*` bakes as
+            // max(1, round(x·u)) — applied at the same moment as the
+            // edge snap, and skipped with it.
+            Some((w, c)) => (if snap { w.round().max(1.0) } else { w }, c.to_array()),
+            None => (0.0, [0.0; 4]),
+        };
+        let mut flags = 0u32;
+        for (i, c) in s.corners.iter().enumerate() {
+            flags |= (c.style as u32) << (2 * i as u32);
+        }
+        flags |= (s.kind as u32) << Shape::KIND_SHIFT;
+        if s.fill.is_some() {
+            flags |= Shape::FILL;
+        }
+        if stroke.is_some() {
+            flags |= Shape::STROKE;
+        }
+        let half = [r.w * 0.5, r.h * 0.5];
+        let centre = [r.x + half[0], r.y + half[1]];
+        let idx = self.shapes.len() as u32;
+        self.shapes.push(Shape {
+            half,
+            stroke: stroke_w,
+            feather: 0.0,
+            corner,
+            stroke_c,
+            flags,
+            arc_half: 0.0,
+            arc_dir: 0.0,
+            _pad: 0.0,
+        });
+        // The quad reaches one pixel past the silhouette so the AA ramp
+        // has somewhere to land (feather joins this margin in K3). The
+        // vertex colour is the fill's — or the stroke's when there is
+        // no fill, so §2.10's mix starts from the band's own colour and
+        // the band's inner AA edge cannot pick up a foreign tint.
+        const AA_PAD: f32 = 1.0;
+        let colour = s
+            .fill
+            .or(stroke.map(|(_, c)| c))
+            .unwrap_or(Color::WHITE)
+            .to_array();
+        let ext = [half[0] + AA_PAD, half[1] + AA_PAD];
+        let n = self.warp.max(1) as u32;
+        self.run_for(Some(SHAPE));
+        let step = [ext[0] * 2.0 / n as f32, ext[1] * 2.0 / n as f32];
+        let (x0, y0) = (centre[0] - ext[0], centre[1] - ext[1]);
+        for j in 0..n {
+            for i in 0..n {
+                let xa = x0 + step[0] * i as f32;
+                let xb = x0 + step[0] * (i + 1) as f32;
+                let ya = y0 + step[1] * j as f32;
+                let yb = y0 + step[1] * (j + 1) as f32;
+                let v = |x: f32, y: f32| Vertex {
+                    pos: [x, y],
+                    uv: [x - centre[0], y - centre[1]],
+                    color: colour,
+                    shape: idx,
+                };
+                self.verts.extend_from_slice(&[
+                    v(xa, ya),
+                    v(xb, ya),
+                    v(xb, yb),
+                    v(xa, ya),
+                    v(xb, yb),
+                    v(xa, yb),
+                ]);
+            }
+        }
+        self.seal();
+    }
+
+    /// How many shape records the list has written — the host's marker
+    /// for a post-emission transform, the twin of `verts.len()`
+    /// (f3 §2.9).
+    pub fn shape_len(&self) -> usize {
+        self.shapes.len()
+    }
+
+    /// The frame's shape records, in emission order — what the renderer
+    /// uploads beside the vertices.
+    pub fn shapes(&self) -> &[Shape] {
+        &self.shapes
+    }
+
+    /// The records from `range` on, mutably: a board ride dims
+    /// `stroke_c` here exactly as it dims vertex colours, or the two
+    /// fall out of step mid-flight (f3 §2.9, R8).
+    pub fn shapes_mut(&mut self, range: std::ops::RangeFrom<usize>) -> &mut [Shape] {
+        &mut self.shapes[range]
+    }
+
+    /// Splits every following shape quad into an n×n grid for the
+    /// duration of a post-emission transform (f3 §2.3): the affine
+    /// interpolation error of a perspective ride falls as 1/n². 1 = one
+    /// quad, and §2.7's edge snap applies only there. Nothing outside
+    /// shapes is affected. Reset to 1 by [`DrawList::clear`].
+    pub fn set_warp(&mut self, n: u8) {
+        self.warp = n.max(1);
+    }
+
+    /// Arms the vector lane: ring/ring_fill emit one SDF record and one
+    /// quad instead of tessellating. The application sets this from the
+    /// theme's `render.vector`; the list itself reads no tokens.
+    pub fn set_vector(&mut self, on: bool) {
+        self.vector = on;
     }
 
     /// The blurred scene behind a SHAPE — [`DrawList::blur`]'s corner-aware
@@ -2572,6 +2867,148 @@ mod tests {
             assert!(px + (y + h - py) >= x + cut - e, "bottom-left corner leaks");
             assert!((x + w - px) + (y + h - py) >= cut - e, "bottom-right corner leaks");
         }
+    }
+
+    // -----------------------------------------------------------------
+    // The vector lane (f3 K2).
+
+    /// Level A survives the switch: the register holds intent, and the
+    /// intent of ring/ring_fill does not move when their tessellation
+    /// becomes one record and one quad each. The vertices move, the
+    /// dump does not — and the SHAPE run exists only on the new lane.
+    #[test]
+    fn the_vector_switch_moves_the_vertices_and_not_the_register() {
+        let scene = |vector: bool| {
+            let mut dl = DrawList::recording();
+            dl.set_vector(vector);
+            let r = Rect::new(10.0, 20.0, 200.0, 100.0);
+            dl.ring(r, &[Corner::round(8.0); 4], 6, 2.0, ink());
+            dl.ring_fill(r, &[Corner::round(8.0); 4], 6, wash());
+            dl
+        };
+        let (old, new) = (scene(false), scene(true));
+        assert_eq!(dump(&old), dump(&new));
+        assert_ne!(old.verts.len(), new.verts.len());
+        assert_eq!(old.shape_len(), 0);
+        assert_eq!(new.shape_len(), 2);
+        assert!(old.runs.iter().all(|r| r.image != Some(SHAPE)));
+        assert!(new.runs.iter().any(|r| r.image == Some(SHAPE)));
+        // And the lane is opt-in: a fresh list tessellates.
+        let mut dl = DrawList::new();
+        dl.ring_fill(Rect::new(0.0, 0.0, 10.0, 10.0), &[Corner::SQUARE; 4], 6, ink());
+        assert_eq!(dl.shape_len(), 0);
+    }
+
+    /// R3's control: one quad at warp 1, a 4×4 grid at warp 4 — 6 and
+    /// 96 vertices — every one carrying the same record index, so a
+    /// ride's transform bends the grid and the record stays one.
+    #[test]
+    fn a_shape_quad_splits_into_the_warp_grid() {
+        let spec = ShapeSpec {
+            rect: Rect::new(0.0, 0.0, 100.0, 50.0),
+            corners: [Corner::round(6.0); 4],
+            kind: ShapeKind::Box,
+            fill: Some(ink()),
+            stroke: None,
+        };
+        let mut dl = DrawList::new();
+        dl.shape(&spec);
+        assert_eq!(dl.verts.len(), 6);
+        assert_eq!(dl.shape_len(), 1);
+        let mut dl = DrawList::new();
+        dl.set_warp(4);
+        dl.shape(&spec);
+        assert_eq!(dl.verts.len(), 96);
+        assert_eq!(dl.shape_len(), 1, "a grid is one shape, not sixteen");
+        assert!(dl.verts.iter().all(|v| v.shape == 0));
+    }
+
+    /// Level D in its K2 form (§2.7): an axis-aligned INTEGER rect with
+    /// a 1 px stroke passes the snap untouched — same edges, same
+    /// stroke — and a fractional one lands on the grid: edges rounded,
+    /// the stroke on the baker's own max(1, round) rule, corner radii
+    /// never rounded. The centre is recoverable from any vertex as
+    /// pos − uv, which is also the uv contract itself.
+    #[test]
+    fn an_integer_rect_survives_the_snap_and_a_fractional_one_lands_on_it() {
+        let shape_of = |r: Rect, w: f32| {
+            let mut dl = DrawList::new();
+            dl.set_vector(true);
+            dl.ring(r, &[Corner::round(4.3); 4], 6, w, ink());
+            (dl.shapes()[0], dl.verts.clone())
+        };
+        let (s, verts) = shape_of(Rect::new(10.0, 20.0, 200.0, 100.0), 1.0);
+        assert_eq!(s.half, [100.0, 50.0]);
+        assert_eq!(s.stroke, 1.0);
+        assert_eq!(s.corner, [4.3; 4], "radii are never snapped");
+        for v in &verts {
+            assert_eq!([v.pos[0] - v.uv[0], v.pos[1] - v.uv[1]], [110.0, 70.0]);
+        }
+        let (s, verts) = shape_of(Rect::new(10.4, 19.6, 200.2, 100.1), 0.4);
+        assert_eq!(s.half, [100.5, 50.0], "10..211 by 20..120");
+        assert_eq!(s.stroke, 1.0, "a hairline never drops under one device px");
+        for v in &verts {
+            assert_eq!([v.pos[0] - v.uv[0], v.pos[1] - v.uv[1]], [110.5, 70.0]);
+        }
+    }
+
+    /// R9: sentinels resolve on the CPU and the record never holds a
+    /// negative corner — pill is half the short side, same_as_parent
+    /// the first corner's own resolved size, and any other absence is
+    /// zero, exactly corner_radius's rule.
+    #[test]
+    fn sentinels_resolve_before_the_record() {
+        let pill = crate::theme::expr::sentinel("pill").unwrap();
+        let same = crate::theme::expr::sentinel("same_as_parent").unwrap();
+        let auto = crate::theme::expr::sentinel("auto").unwrap();
+        let mut dl = DrawList::new();
+        dl.shape(&ShapeSpec {
+            rect: Rect::new(0.0, 0.0, 200.0, 8.0),
+            corners: [
+                Corner::round(pill),
+                Corner::round(same),
+                Corner::round(3.0),
+                Corner::round(auto),
+            ],
+            kind: ShapeKind::Box,
+            fill: Some(ink()),
+            stroke: None,
+        });
+        assert_eq!(dl.shapes()[0].corner, [4.0, 4.0, 3.0, 0.0]);
+    }
+
+    /// The record carries what the call meant: ring is STROKE alone
+    /// with its colour in stroke_c, ring_fill FILL alone with the
+    /// colour on the vertex; the corner styles pack two bits each in
+    /// ring_points' order; Box contributes no kind bits. clear() drops
+    /// the records and rests the warp back to one — while the vector
+    /// switch, a mode rather than frame state, survives it.
+    #[test]
+    fn the_record_carries_the_flags_and_clear_resets_the_frame() {
+        let r = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let c = [
+            Corner::SQUARE,
+            Corner::round(4.0),
+            Corner::chamfer(6.0),
+            Corner::round(2.0),
+        ];
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.set_warp(4);
+        dl.ring(r, &c, 6, 2.0, ink());
+        dl.ring_fill(r, &c, 6, wash());
+        let (ring, fill) = (dl.shapes()[0], dl.shapes()[1]);
+        let styles = (1u32 << 2) | (2 << 4) | (1 << 6);
+        assert_eq!(ring.flags, styles | Shape::STROKE);
+        assert_eq!(ring.stroke_c, ink().to_array());
+        assert_eq!(ring.stroke, 2.0);
+        assert_eq!(fill.flags, styles | Shape::FILL);
+        assert_eq!(fill.stroke, 0.0);
+        dl.clear();
+        assert_eq!(dl.shape_len(), 0);
+        dl.ring_fill(r, &c, 6, wash());
+        assert_eq!(dl.verts.len(), 6, "the warp did not reset to one");
+        assert_eq!(dl.shape_len(), 1, "the vector switch must survive clear()");
     }
 
     // -----------------------------------------------------------------

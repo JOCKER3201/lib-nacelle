@@ -5,6 +5,9 @@
 //!
 //! * [`draw`], [`font`], [`theme`] — the drawing primitives, the glyph
 //!   atlas and colours.
+//! * [`sdf`] — the CPU reference of the vector core's distance field:
+//!   the formulas the renderer's `fs_shape` computes, provable without
+//!   a GPU.
 //! * [`base`] — geometry, the drawing context, the panel model and the
 //!   widget registry. Re-exported at the root, so `nacelle::Rect` works.
 //! * [`flex`] — the responsive layout engine (the algorithm web pages
@@ -60,6 +63,7 @@ pub mod plugin;
 pub mod pointer;
 pub mod runtime;
 pub mod script;
+pub mod sdf;
 pub mod sound;
 pub mod stage;
 pub mod telemetry;
