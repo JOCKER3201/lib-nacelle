@@ -18,6 +18,9 @@
 //! * [`channel`] — what one widget tells another: named values the host
 //!   holds, so two compiled widgets in two `.so` files can agree on a
 //!   fact without sharing memory.
+//! * [`settings`] — what an addon's user asked of it: the host reads
+//!   the RON file and the addon parses it into its own type, so a
+//!   compiled widget never opens a file and never holds a path.
 //! * [`pointer`] — where the pointer is and who may see it: the rule
 //!   that a control with something drawn over it is not the control
 //!   under the hand.
@@ -60,6 +63,7 @@ pub mod plugin;
 pub mod pointer;
 pub mod runtime;
 pub mod script;
+pub mod settings;
 pub mod sound;
 pub mod stage;
 pub mod telemetry;
