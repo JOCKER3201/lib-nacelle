@@ -53,6 +53,7 @@
 pub mod bake;
 pub mod cascade;
 pub mod color;
+pub mod edit;
 pub mod expr;
 pub mod mood;
 pub mod parse;
@@ -187,6 +188,16 @@ struct Engine {
     /// a viewport bakes to cannot change while the schema and the siblings
     /// stand, so the viewport itself is a sound key.
     by_viewport: HashMap<(usize, u32, u32), &'static ResolvedTheme>,
+    /// Values the theme editor is trying out, laid over the active sibling.
+    /// Empty whenever nobody is editing, which is every run of the program
+    /// that never opens the editor.
+    ///
+    /// A preview is NOT a theme change: the file on disk still says what it
+    /// said, and switching mood or variant must keep working underneath. So
+    /// these sit beside the siblings rather than becoming one, and
+    /// [`content_epoch`] does not move for them — the font slots are named by
+    /// the file, and a colour being tried out cannot rename them.
+    preview: Vec<(TokenId, expr::Expr)>,
     diagnostics: Arc<ThemeDiagnostics>,
 }
 
@@ -667,6 +678,7 @@ pub fn load_with(req: LoadRequest) -> Arc<ThemeDiagnostics> {
         viewport,
         cache: HashMap::new(),
         by_viewport: HashMap::new(),
+        preview: Vec::new(),
         diagnostics: Arc::new(ThemeDiagnostics::default()),
     };
 
@@ -731,6 +743,31 @@ impl Engine {
         // heights never are. Without this the program resolved every token
         // twice a frame, for as long as it ran, on any desktop whose
         // screens are not the same height.
+        // A preview bypasses BOTH caches, in each direction. Reading one would
+        // answer with the file's colours while the editor is showing other
+        // ones; writing one would leave a tried-out value in a map that
+        // outlives the editing session and hand it back long after the person
+        // pressed CANCEL. So a preview is always baked fresh and never kept —
+        // which is affordable exactly because it is bounded: see `set_preview`.
+        if !self.preview.is_empty() {
+            let (mut spec, explicit_density) = {
+                let s = &self.siblings[i];
+                (s.spec.clone(), s.explicit_density)
+            };
+            for (id, e) in &self.preview {
+                if let Some(slot) = spec.exprs.get_mut(id.index()) {
+                    *slot = e.clone();
+                }
+            }
+            let r = resolve::resolve(&self.schema, &spec, out);
+            let input = BakeInput {
+                viewport: self.viewport,
+                epoch: EPOCH.load(Ordering::Acquire).wrapping_add(1),
+                explicit_density,
+            };
+            RESOLVES.fetch_add(1, Ordering::Relaxed);
+            return Box::leak(Box::new(bake::bake(&self.schema, &r, &input, out)));
+        }
         let vk = (
             i,
             self.viewport.screen_h.to_bits(),
@@ -796,6 +833,98 @@ pub fn set_viewport(screen_h: f32, ui_scale: f32) {
     if cur != t as *const _ as *mut ResolvedTheme {
         publish(t);
     }
+}
+
+/// Lays a set of values over the theme, so the editor can be SEEN rather than
+/// described. Returns what it refused, empty when it took everything.
+///
+/// Each entry is a token name and the text a person just produced — the same
+/// text that would be written into the file — read by the file's own parser
+/// (`parse::parse_value`), so nothing can be previewed that could not be
+/// saved. An unknown token or a value the parser rejects is refused by name
+/// and the rest still applies.
+///
+/// # Not a theme change
+///
+/// [`content_epoch`] does not move. A preview cannot rename a font slot: the
+/// face names come from the file, and the file has not changed. Moving it
+/// would wake the whole face reload — a walk of the font directories and an
+/// atlas reset — behind every slider.
+///
+/// # WHY THIS IS FOR SETTLED VALUES AND NOT FOR EVERY TICK
+///
+/// A bake is 76 031 bytes, measured, and nothing ever frees one: they are
+/// handed out as `&'static` so that reading the theme costs one atomic load
+/// with no lifetime to thread through a draw call. At sixty frames a second a
+/// dragged slider would leak 4.5 MB per second — about 22 MB across a
+/// five-second drag — and none of it would come back.
+///
+/// So the caller applies a value when it has SETTLED, not on every motion
+/// event. That is a handful of bakes per drag instead of hundreds. The slider
+/// itself moves at whatever rate the hand does; what is bounded here is how
+/// often the whole desktop is re-baked to show it.
+///
+/// If a preview on every tick is ever wanted, the thing to change is not this
+/// function: it is that bakes are leaked. Retiring them means the lock-free
+/// `&'static` read path everything draws through has to grow a lifetime or a
+/// refcount, which is a change to the engine's shape rather than an addition.
+pub fn set_preview(values: &[(&str, &str)]) -> Vec<String> {
+    let Some(slot) = ENGINE.get() else {
+        return values.iter().map(|(n, _)| format!("{n}: no theme loaded")).collect();
+    };
+    let Ok(mut g) = slot.lock() else {
+        return values.iter().map(|(n, _)| format!("{n}: the theme engine is poisoned")).collect();
+    };
+    let mut refused = Vec::new();
+    let mut taken = Vec::with_capacity(values.len());
+    for (name, text) in values {
+        let Some(id) = g.schema.id(name) else {
+            refused.push(format!("{name}: no such token"));
+            continue;
+        };
+        let mut out = Vec::new();
+        let e = parse::parse_value(text, Span::default(), &mut out);
+        // The parser reports trailing text as a warning rather than an error,
+        // and for a file that is right — a person can see the line. Here the
+        // text came from a control, so anything left over means the control
+        // produced something it did not mean to, and it is refused.
+        if let Some(d) = out.first() {
+            refused.push(format!("{name}: {}", d.message));
+            continue;
+        }
+        taken.push((id, e));
+    }
+    g.preview = taken;
+    let mut out = Vec::new();
+    let t = g.bake_active(&mut out);
+    publish(t);
+    refused
+}
+
+/// Puts the theme back the way the file has it. What CANCEL is made of.
+///
+/// Cheap and total: the preview never touched the siblings, so there is
+/// nothing to undo — the overrides are dropped and the next bake comes from
+/// the cache the preview was bypassing.
+pub fn clear_preview() {
+    let Some(slot) = ENGINE.get() else { return };
+    let Ok(mut g) = slot.lock() else { return };
+    if g.preview.is_empty() {
+        return;
+    }
+    g.preview.clear();
+    let mut out = Vec::new();
+    let t = g.bake_active(&mut out);
+    publish(t);
+}
+
+/// Whether values are currently laid over the file's own.
+pub fn previewing() -> bool {
+    ENGINE
+        .get()
+        .and_then(|s| s.lock().ok())
+        .map(|g| !g.preview.is_empty())
+        .unwrap_or(false)
 }
 
 /// Every resolved sibling, in selection order. Index 0 is the plain theme.

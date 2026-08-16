@@ -74,9 +74,20 @@ Where a second number appears it is 2560×1440 (`u` = 7.2 px).
    benefit.)
 4. **No live re-resolve, no partial invalidation.** A reload re-runs the whole load
    path and swaps one `Arc`.
-5. **The engine never writes a theme file.** Settings-UI tweaks persist to a separate
-   overlay (`theme.local`) applied last, so authored files and their comments stay
-   byte-identical.
+5. **The engine writes a theme file only through the editor, and never loses a
+   comment doing it.** *(Amended 2026-08-16 — see question 12, now decided.)*
+   This rule used to read "the engine never writes a theme file", with overlay-only
+   edits. The owner decided the other way: SAVE writes the theme being edited, and
+   a built-in theme is materialised into the user's theme directory on its first
+   save. What the old rule was really protecting — authored files and their
+   comments staying byte-identical — survives as the constraint on HOW: a write
+   patches the bytes of the value spans it changes and touches nothing else. The
+   AST cannot be used to regenerate a file, because `strip_comment` removes
+   comments before parsing and `Document` has nowhere to keep them.
+   The pattern to follow already exists for `.layaut` files in
+   `src/layout/store.rs`: `save_full` / `save_overrides`, materialisation on first
+   write, a backup before overwriting, and `preserved_base` keeping the user's own
+   text.
 6. **No general-purpose styling language.** Tokens name *meanings*, never
    construction. A theme may address `panel.border.color`; it may not address the
    vertex layout of a panel. If a theme can reach a rendering internal, the renderer
@@ -4321,7 +4332,16 @@ die with the old engine and the installer must follow.
 6. **Decoration** — `none / static / all`, with the plate memory cost shown
    (33 MB at 1440p, 66 MB at 4K) so the trade is visible.
 7. **Reload theme** — re-runs the load path and swaps the `Arc`.
-8. Everything the UI changes writes to `theme.local`, **never** to the theme file.
+8. The settings toggles above write to `theme.local`. The THEME EDITOR does not:
+   its SAVE writes the theme being edited, SAVE AS writes a new one.
+   *(Amended 2026-08-16 with rule 5 and question 12.)*
+   The split is deliberate. A toggle like reduced-motion is a property of the
+   PERSON and should follow them across themes, which is what an overlay does.
+   A border colour is a property of the THEME, and an overlay would carry it
+   onto every other theme the owner switched to — including one it was never
+   designed for. The overlay also lands after the variant layer, so a colour
+   written there would quietly defeat `[variant.hc]` and switch high contrast
+   off as a side effect of picking a colour.
 
 The existing per-widget settings (`UIFontSize`, `TermFontSize`, `GridPadding`, grid
 snap/columns/rows) stay exactly where they are and keep their current meaning.
@@ -4494,11 +4514,29 @@ not hear otherwise takes the recommendation; none of them blocks the work.
     than a documented narrow one.
 
 12. **Should the settings UI be able to edit a theme, or only override it?**
-    The engine never writes a theme file, so edits land in `theme.local`.
-    *Recommended:* **override only, plus an "export as a new theme" button** that
-    writes `theme.local`'s contents as a fresh `<name>.theme` with generated comments.
-    That keeps authored files pristine and still gives the owner a way out of the
-    settings panel into a real file.
+    **DECIDED 2026-08-16 by the owner: edit it.** SAVE writes the theme being
+    edited; SAVE AS writes a new one; a built-in theme is materialised into the
+    user's theme directory on its first save, so the shipped one is never touched.
+    This overrides the recommendation that used to stand here ("override only,
+    plus an export button"), and rules 5 and 8 above were amended with it.
+
+    What the recommendation was protecting is kept as a constraint on the write
+    rather than a ban on writing: a save patches the bytes of the value spans it
+    changes and leaves every comment and every other byte alone. Regenerating a
+    file from the AST is forbidden — `strip_comment` (`parse.rs`) drops comments
+    before parsing and `Document` has nowhere to hold them, so a round-trip
+    through the AST would silently delete the reasoning this project keeps in its
+    theme files.
+
+    Two things this decision leaves open, and they are not small:
+    - **Values that span more than one line** would break span patching, because
+      `value_span.len` measures the joined text while `.line` remembers only the
+      first. None of the nine shipped `.theme` files has one today. A save must
+      refuse rather than corrupt.
+    - **Where a theme lives is not answerable from outside the engine.**
+      `FsThemes` is private and `available_themes()` returns names only, so the
+      editor cannot ask which file backs a theme or where it may write. That API
+      has to exist before SAVE can.
 
 13. **`rhythm.label_col = auto` is the only per-frame measurement pass in the spec.**
     *Recommended:* **ship it as `auto`.** It is a few dozen `measure()` calls per panel
