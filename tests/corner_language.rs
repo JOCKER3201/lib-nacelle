@@ -25,6 +25,7 @@ use nacelle::object::menu::{MenuEntry, MenuItem, MenuState};
 use nacelle::object::segmented::{self, StripState};
 use nacelle::object::text_input::{self, InputModel, InputStyle};
 use nacelle::object::tooltip::{key, Tooltips};
+use nacelle::pointer::Pointer;
 use nacelle::theme;
 use nacelle::{Ctx, Rect};
 
@@ -38,7 +39,7 @@ fn ctx<'a>(dl: &'a mut DrawList, fonts: &'a mut FontSystem, t: f64) -> Ctx<'a> {
         w: W,
         h: H,
         t,
-        mouse: (150.0, 110.0),
+        mouse: Pointer::new(150.0, 110.0),
         term_font_scale: 1.0,
         ui_font_scale: 1.0,
         panel_scale: 1.0,
@@ -149,29 +150,44 @@ fn the_four_boxes_take_the_cut_the_theme_names_and_change_when_it_changes() {
     let mut fonts = FontSystem::new();
 
     // ---- the delivered look -------------------------------------------
-    // The master's own corner language: floating chrome is chamfered
-    // (`menu.corner_mode = @winframe.corner_mode`, and the tooltip
-    // follows the menu), controls are round (`field`/`segmented`
-    // corner_style follow the button, which follows the panel).
+    // ONE root, and four boxes that repeat it. Twelve presets used to state
+    // the cut for themselves, and the shipped file said `chamfer` in four of
+    // them and `round` in the rest — a window frame, a context menu, a
+    // tooltip and a modal cut, everything hanging off the panel rounded. It
+    // was defended as a language ("floating chrome is chamfered, controls
+    // are round") and read on screen as a program that had not decided.
+    //
+    // So the question this asks is no longer "is it chamfer". A remembered
+    // word is exactly what let the two halves drift apart while every
+    // assertion about them passed. The question is whether all four say what
+    // the ROOT says, whatever the root happens to say.
+    let root = theme::enum_word_of(theme::id("corner.mode").expect("@corner.mode must exist"));
+    assert!(root.is_some(), "the root names no word at all");
     let shipped = corners(&mut fonts);
     assert_eq!(
         shipped,
-        [
-            Some("chamfer".into()),
-            Some("chamfer".into()),
-            Some("round".into()),
-            Some("round".into()),
-        ],
-        "the master's corner language did not reach the four boxes"
+        [root.clone(), root.clone(), root.clone(), root.clone()],
+        "the four boxes did not all take the cut @corner.mode names"
     );
 
-    // The context menu now speaks the window menu's language, which is
-    // the finding this whole exercise came from.
-    assert_eq!(
-        theme::enum_word_of(theme::id("winframe.corner_mode").unwrap()),
-        theme::enum_word_of(theme::id("menu.corner_mode").unwrap()),
-        "the window's menu and the context menu disagree in the master"
-    );
+    // Every preset that used to hold a literal now derives, so none of them
+    // can disagree with the root while this passes.
+    for name in [
+        "panel.corner_mode",
+        "winframe.corner_mode",
+        "modal.corner_mode",
+        "menu.corner_mode",
+        "tooltip.corner_mode",
+        "scrollbar.corner_style",
+        "elev.popover.corner",
+        "elev.overlay.corner",
+    ] {
+        assert_eq!(
+            theme::enum_word_of(theme::id(name).unwrap_or_else(|| panic!("{name} must exist"))),
+            root,
+            "{name} states a cut of its own instead of deriving from @corner.mode"
+        );
+    }
 
     // One field that OUTLIVES the theme swap, so its measure cache is
     // the stale one: the widths in it were measured through the old
@@ -182,17 +198,16 @@ fn the_four_boxes_take_the_cut_the_theme_names_and_change_when_it_changes() {
     let before = caret_of(&mut kept, &mut fonts);
 
     // ---- and now a theme that says otherwise --------------------------
-    // Every one of the four flipped to the OTHER cut, so a token that
-    // reached nothing would show up as a box that did not move.
+    // ONE line. The fixture states the cut once and touches none of the
+    // four objects by name, so anything that kept its shape is an object
+    // the root does not reach — which is the whole failure this file was
+    // written to catch, moved up to where the decision now lives.
     let path = std::env::temp_dir()
         .join(format!("nacelle-corner-fixture-{}.theme", std::process::id()));
     std::fs::write(
         &path,
         "[meta]\nschema = 1\nname = \"Fixture\"\nbase = \"default\"\n\n\
-         [menu]\ncorner_mode = round\n\n\
-         [tooltip]\ncorner_mode = round\n\n\
-         [field]\ncorner_style = chamfer\n\n\
-         [segmented]\ncorner_style = chamfer\n\n\
+         [corner]\nmode = chamfer\n\n\
          [type]\nfield.tracking = 0.30em\n",
     )
     .expect("the fixture theme must be writable");
@@ -206,13 +221,65 @@ fn the_four_boxes_take_the_cut_the_theme_names_and_change_when_it_changes() {
     assert_eq!(
         flipped,
         [
+            Some("chamfer".into()),
+            Some("chamfer".into()),
+            Some("chamfer".into()),
+            Some("chamfer".into()),
+        ],
+        "one line named the cut and some box did not follow it"
+    );
+
+    // ---- and a theme that pins ONE object against the root ------------
+    // The master promises the twelve presets keep their sibling keys, so a
+    // theme may still cut one object differently. A promise written in the
+    // master and checked nowhere is the next thing to drift apart, so it is
+    // checked here: root chamfer, menu pinned round.
+    //
+    // The tooltip moves WITH the menu and that is not a leak — it derives
+    // from `@menu.corner_mode` on purpose (a tip and the menu it rises from
+    // are one surface), and a chain under the root is exactly what the root
+    // is for. The field and the segmented strip hang off the panel instead,
+    // so they must stay where the root put them.
+    let pin = std::env::temp_dir()
+        .join(format!("nacelle-corner-pin-{}.theme", std::process::id()));
+    std::fs::write(
+        &pin,
+        "[meta]\nschema = 1\nname = \"Pin\"\nbase = \"default\"\n\n\
+         [corner]\nmode = chamfer\n\n\
+         [menu]\ncorner_mode = round\n",
+    )
+    .expect("the pin fixture must be writable");
+    let _ = theme::load_with(theme::LoadRequest {
+        path: Some(pin.clone()),
+        ..Default::default()
+    });
+    let _ = std::fs::remove_file(&pin);
+
+    let pinned = corners(&mut fonts);
+    assert_eq!(
+        pinned,
+        [
             Some("round".into()),
             Some("round".into()),
             Some("chamfer".into()),
             Some("chamfer".into()),
         ],
-        "a theme edited the four corner tokens and the boxes kept their shape"
+        "pinning the menu either did not take, or reached past its own chain"
     );
+
+    // Back to the fixture the caret assertion below was measured against.
+    std::fs::write(
+        &path,
+        "[meta]\nschema = 1\nname = \"Fixture\"\nbase = \"default\"\n\n\
+         [corner]\nmode = chamfer\n\n\
+         [type]\nfield.tracking = 0.30em\n",
+    )
+    .expect("the fixture theme must be writable");
+    let _ = theme::load_with(theme::LoadRequest {
+        path: Some(path.clone()),
+        ..Default::default()
+    });
+    let _ = std::fs::remove_file(&path);
 
     // ---- the inverse trap ---------------------------------------------
     // The fixture widens `type.field.tracking` and touches neither the

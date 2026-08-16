@@ -32,9 +32,26 @@ pub(crate) fn corner_style(
     mode: TokenId,
     idx: &'static OnceLock<(Option<u16>, Option<u16>)>,
 ) -> CornerStyle {
-    let (round, chamfer) = *idx.get_or_init(|| {
-        (theme::enum_index(mode, "round"), theme::enum_index(mode, "chamfer"))
-    });
+    cut_of(t, mode, *idx.get_or_init(|| vocabulary(mode)))
+}
+
+/// The `(round, chamfer)` indices in one corner-mode token's vocabulary.
+///
+/// Taken apart from [`corner_style`] because a caller that reads a WHOLE
+/// dictionary at once — [`super::elev::Level`], which memoises every key
+/// of one `[elev.*]` level in a single struct — has nowhere to hang a
+/// `static` per token and no reason to: the vocabulary is the master's,
+/// so it is settled once with the ids beside it.
+pub(crate) fn vocabulary(mode: TokenId) -> (Option<u16>, Option<u16>) {
+    (theme::enum_index(mode, "round"), theme::enum_index(mode, "chamfer"))
+}
+
+/// [`corner_style`] with the vocabulary already in hand.
+pub(crate) fn cut_of(
+    t: &theme::ResolvedTheme,
+    mode: TokenId,
+    (round, chamfer): (Option<u16>, Option<u16>),
+) -> CornerStyle {
     let cur = Some(t.enum_of(mode));
     if cur == round {
         CornerStyle::Round
@@ -96,9 +113,15 @@ pub(crate) fn panel_edge_glow(
 /// how far the desktop darkens, so three call sites cannot carry three
 /// designs. The caller's historical alpha is ignored for that reason; the
 /// parameter stays only so existing embedders keep compiling.
+///
+/// It also claims the whole screen for the pointer ([`crate::pointer`]),
+/// which is what MODAL means said in the one place it is drawn: nothing
+/// behind the scrim is under the hand, including the parts of the desktop
+/// the window itself does not stand on.
 pub fn backdrop(ctx: &mut Ctx, _alpha: f32) {
     static SCRIM: OnceLock<TokenId> = OnceLock::new();
     static STRENGTH: OnceLock<TokenId> = OnceLock::new();
+    ctx.mouse.cover(Rect::new(0.0, 0.0, ctx.w, ctx.h));
     let t = theme::resolved();
     let scrim = col(t.bed(tok(&SCRIM, "component.modal.scrim")));
     let strength = t.px(tok(&STRENGTH, "modal.scrim_alpha")).clamp(0.0, 1.0);
@@ -112,6 +135,14 @@ pub fn backdrop(ctx: &mut Ctx, _alpha: f32) {
 /// wants square corners sets it to `0u` and one that wants a deep cut sets it
 /// large; `panel.corner_mode` says HOW that length is cut — a tessellated arc
 /// or a 45° chamfer — and `panel.border` is the stroke.
+///
+/// The box is claimed for the pointer ([`crate::pointer`]) before anything
+/// is drawn into it: an OPAQUE frame is exactly the statement "what was
+/// under this rectangle can no longer be seen", and a control that cannot
+/// be seen is not the one the hand is on. Claimed here rather than by each
+/// caller so that every window in every application gets it — including
+/// the ones written after this line — and claimed FIRST so the window's
+/// own contents, drawn into it afterwards, keep the pointer.
 pub fn frame(ctx: &mut Ctx, r: Rect) {
     static FILL: OnceLock<TokenId> = OnceLock::new();
     static LINE: OnceLock<TokenId> = OnceLock::new();
@@ -120,6 +151,7 @@ pub fn frame(ctx: &mut Ctx, r: Rect) {
     static MODE: OnceLock<TokenId> = OnceLock::new();
     static MODE_IDX: OnceLock<(Option<u16>, Option<u16>)> = OnceLock::new();
     static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
+    ctx.mouse.cover(r);
     let t = theme::resolved();
     let fill = col(t.bed(tok(&FILL, "component.panel.fill")));
     let line = col(t.color(tok(&LINE, "component.panel.border")));
@@ -134,7 +166,26 @@ pub fn frame(ctx: &mut Ctx, r: Rect) {
     let width = t.px(tok(&WIDTH, "panel.border")).max(0.0);
     let c = [corner; 4];
     let seg = corner_segments(t, &SEGMENTS, corner.size);
-    ctx.dl.ring_fill(r, &c, seg, fill);
+    // The same glass trio the panel rung reads, BY DESIGN and not by
+    // accident: the owner's scope for a background is "windows and
+    // widgets", one decision for both, so a frame asks the same three
+    // tokens `elev::Level` does instead of growing a private copy of them
+    // the way it once did for the fill (the drift `elev.rs`'s header
+    // already names). Glass replaces the fill; the ring and its glow stand
+    // on top either way.
+    static G_RANK: OnceLock<TokenId> = OnceLock::new();
+    static G_TINT: OnceLock<TokenId> = OnceLock::new();
+    static G_WASH: OnceLock<TokenId> = OnceLock::new();
+    let rank = t.px(tok(&G_RANK, "elev.panel.glass.rank")).clamp(0.0, 3.0);
+    if rank > 0.0 {
+        ctx.dl.glass_fill(r, &c, seg, rank, col(t.color(tok(&G_TINT, "elev.panel.glass.tint"))));
+        let wash = col(t.color(tok(&G_WASH, "elev.panel.glass.wash")));
+        if wash.a > 0.0 {
+            ctx.dl.ring_fill(r, &c, seg, wash);
+        }
+    } else {
+        ctx.dl.ring_fill(r, &c, seg, fill);
+    }
     ctx.dl.ring(r, &c, seg, width, line);
     panel_edge_glow(ctx.dl, t, r, &c, seg, line);
 }

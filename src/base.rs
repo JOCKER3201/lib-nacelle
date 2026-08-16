@@ -684,11 +684,34 @@ pub struct Ctx<'a> {
     pub h: f32,
     /// Time since application start, in seconds.
     pub t: f64,
-    /// Mouse cursor position.
-    pub mouse: (f32, f32),
+    /// The pointer — and who is allowed to see it ([`crate::pointer`]).
+    ///
+    /// It was a bare `(f32, f32)`, and that was the fault: a position on
+    /// its own answers every control the same way, so a keyboard cap
+    /// under an open window lit up exactly as readily as the window's own
+    /// row over it. A control asks [`Pointer::at`] (or, better,
+    /// [`Pointer::over`]) and is answered against what has been drawn
+    /// over it; a caller PLACING something at the cursor — a tooltip
+    /// choosing a side, a menu opening where the click landed — asks
+    /// [`Pointer::raw`].
+    ///
+    /// Owned by the frame and handed back to the application afterwards:
+    /// what covered the pointer is the one thing about a frame the next
+    /// frame needs.
+    pub mouse: crate::pointer::Pointer,
     /// Terminal font size multiplier (TermFontSize= in nacelle-desktop.conf).
     pub term_font_scale: f32,
     /// Interface font size multiplier (UIFontSize= in nacelle-desktop.conf).
+    ///
+    /// **Already applied to every theme length.** The host hands this same
+    /// number to [`crate::theme::set_viewport`] as `metric.ui_scale`, which
+    /// multiplies u — and u is what every size, gap and row height in the
+    /// master is written in. So a token, a role's `px` or anything derived
+    /// from either must NOT be multiplied by it again; doing so squares the
+    /// user's setting, and 125 % draws at 156 %.
+    ///
+    /// It survives on the context for [`Ctx::font_px`] alone — the vh-based
+    /// size the plugin ABI offers a script, which no bake can reach.
     pub ui_font_scale: f32,
     /// Font scale of the panel being drawn (container-query style):
     /// narrow columns shrink their text. Panels set it on entry and
@@ -719,6 +742,11 @@ impl<'a> Ctx<'a> {
     }
     /// Interface font size: scaled by UIFontSize= (text only) and by the
     /// width of the panel being drawn, min 8 px.
+    ///
+    /// The one place `ui_font_scale` is still a factor by hand, and the
+    /// reason it is: this size is a fraction of the WINDOW, not a multiple
+    /// of u, so it rides past the bake that carries the user's scale to
+    /// everything else. Anything reading a token instead must leave it out.
     pub fn font_px(&self, v: f32) -> f32 {
         (self.vh(v) * UI_FONT_BASE * self.ui_font_scale * self.panel_scale).max(8.0)
     }

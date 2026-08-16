@@ -407,7 +407,7 @@ extern "C" fn h_ring(p: *mut c_void, r: RectC, style: u32, radius: f32, w: f32, 
 extern "C" fn h_tooltip(p: *mut c_void, id: u64, anchor: RectC, text: *const u8, len: u32) {
     let Some(ctx) = (unsafe { ctx_of(p) }) else { return };
     let r = Rect::new(anchor.x, anchor.y, anchor.w, anchor.h);
-    if !r.contains(ctx.mouse.0, ctx.mouse.1) {
+    if !ctx.mouse.over(r) {
         return;
     }
     let s = text_in(text, len);
@@ -542,14 +542,24 @@ extern "C" fn h_font_px(p: *mut c_void, v: f32) -> f32 {
     with_ctx!(p, ctx, ctx.font_px(v))
 }
 
+/// The pointer AS THIS PLUGIN MAY SEE IT ([`crate::pointer`]).
+///
+/// The routing has to happen on this side of the boundary, and this line
+/// is why the routing exists as a value rather than as advice: a plugin
+/// tests the two numbers it is handed against a rectangle it has just
+/// drawn (`krect.contains(mx, my)`), and there is no version of the ABI
+/// in which it could know that a window is standing over it. Handed the
+/// covered position, every plugin already compiled answers "not me"
+/// without a line of its own changing.
 extern "C" fn h_mouse(p: *mut c_void, x: *mut f32, y: *mut f32) {
     let Some(ctx) = (unsafe { ctx_of(p) }) else { return };
+    let at = ctx.mouse.at();
     unsafe {
         if !x.is_null() {
-            *x = ctx.mouse.0;
+            *x = at.0;
         }
         if !y.is_null() {
-            *y = ctx.mouse.1;
+            *y = at.1;
         }
     }
 }
@@ -1331,10 +1341,14 @@ mod tests {
     /// is a read past the end of an array, from a typo in a widget.
     #[test]
     fn out_of_range_numbers_from_a_plugin_are_clamped() {
-        assert_eq!(font_in(0), 0);
-        assert_eq!(font_in(1), 1);
+        // Every slot the master numbers is passed through untouched —
+        // eight of them since §5.16's face blocks reached the atlas, and
+        // a plugin naming `ui_medium` (2) must not be clamped to `mono`.
+        for slot in 0..FONT_COUNT {
+            assert_eq!(font_in(slot as u32), slot, "face slot {slot}");
+        }
         // Past the end, and absurd, and wrapped: all land inside.
-        assert_eq!(font_in(2), FONT_COUNT - 1);
+        assert_eq!(font_in(FONT_COUNT as u32), FONT_COUNT - 1);
         assert_eq!(font_in(9999), FONT_COUNT - 1);
         assert_eq!(font_in(u32::MAX), FONT_COUNT - 1);
 

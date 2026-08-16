@@ -22,12 +22,90 @@ pub const MASK_BAND_Y: usize = ATLAS_H - MASK_BAND_H;
 /// sprite serves every glow, shadow and soft box in the program.
 pub const MASK_SOFT: (usize, usize, usize, usize) = (0, MASK_BAND_Y, 64, 64);
 
+// ---------------------------------------------------------------- faces
+//
+// The master's eight `[face.*]` blocks, at the ids it numbers them with.
+// The first two keep the engine ids they have always had, so no plugin
+// and no `CellC.font` changes meaning; the other six were declared with a
+// family, a weight and a fallback chain and had nowhere to land.
+//
+// Two slots was why `type.value.face = ui_medium`, `type.title.panel.face
+// = ui_medium` and `type.display.clock.face = display` all came out as
+// the one interface Regular: the reader mapped every word that did not
+// begin `mono` onto slot 0, so the master's five distinct declarations
+// arrived at the atlas as two. WEIGHT in particular had no way through at
+// all — 400, 500, 600 and 700 are four requests and there were two boxes.
+
 pub const FONT_UI: u8 = 0;
 pub const FONT_MONO: u8 = 1;
+pub const FACE_UI_MEDIUM: u8 = 2;
+pub const FACE_UI_BOLD: u8 = 3;
+pub const FACE_DISPLAY: u8 = 4;
+pub const FACE_MONO_BOLD: u8 = 5;
+pub const FACE_ICON: u8 = 6;
+pub const FACE_RESERVED: u8 = 7;
 /// How many fonts there are. A font id arriving from outside this crate
 /// — from a plugin, say — is an index into a fixed array, so it has to
 /// be checked against this rather than trusted.
-pub const FONT_COUNT: u8 = 2;
+pub const FONT_COUNT: u8 = 8;
+
+/// The master's face ids, in slot order. The ORDER is the master's own —
+/// it spells the numbering out above `[face.ui]` — and this array is what
+/// makes it one list instead of a rule written in three files.
+pub const FACE_IDS: [&str; FONT_COUNT as usize] = [
+    "ui",
+    "mono",
+    "ui_medium",
+    "ui_bold",
+    "display",
+    "mono_bold",
+    "icon",
+    "reserved",
+];
+
+/// The slot a `type.<role>.face` word names.
+///
+/// Compared as a WORD against the master's own list, and never read as an
+/// index: an index would turn `display` into monospace on the day a theme
+/// reordered its face blocks. A word outside the list is a defect in the
+/// theme, so it is said once and lands where an undesigned run has always
+/// landed — the monospace slot for a word that begins `mono`, since that
+/// prefix is the one thing a reader can honestly infer, and the interface
+/// slot otherwise.
+///
+/// The ONE answer to "which family is this role set in": [`crate::ui`]
+/// asks it for the objects that draw against `Ctx`, [`crate::view::paint`]
+/// for every view and for the whole plugin side. Two answers is how one
+/// role came to be monospace in a widget's own drawing and the interface
+/// face in the toolkit's.
+pub fn face_slot(word: &str) -> u8 {
+    if let Some(i) = FACE_IDS.iter().position(|f| *f == word) {
+        return i as u8;
+    }
+    if word.is_empty() {
+        // A role whose master states no `face` at all. Said once, like
+        // every other missing half of a role, and drawn in the slot an
+        // undesigned run has always been drawn in.
+        crate::ui::warn_once(
+            "face:<none>",
+            "a type role states no `face` — it is set in the interface slot",
+        );
+        return FONT_UI;
+    }
+    crate::ui::warn_once(
+        &format!("face:{word}"),
+        &format!(
+            "\"{word}\" is not one of the master's eight faces \
+             ({}) — the nearest slot is used",
+            FACE_IDS.join(", ")
+        ),
+    );
+    if word.starts_with("mono") {
+        FONT_MONO
+    } else {
+        FONT_UI
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct Glyph {
@@ -44,8 +122,236 @@ pub struct Glyph {
     pub advance: f32,
 }
 
+// ------------------------------------------------------------ tabular figures
+//
+// `fontdue` exposes no OpenType features, so there is no `tnum` to ask the
+// face for. §5.17 therefore puts tabular figures in the TOOLKIT: the box is
+// the widest advance among the characters of `num.tabular_set` at one
+// (face, px), every member of the set is stepped by that box and centred
+// inside it, and every other character keeps the advance the face gave it.
+//
+// Two consequences, both the reason the token exists: a value stops
+// changing width when its content changes — `21:57:30` does not shiver on
+// the tick, an IP address does not drag its column about — and the width of
+// an all-figure string is `len x advance`, which [`Figures::advance_of`]
+// answers without touching the atlas at all.
+
+/// The punctuation `num.tabular_punct` pins into the figure box.
+///
+/// These seven characters are the token's DEFINITION, not a look this file
+/// chose: the master spells them out in the comment beside the token, as
+/// `. , : + - space %`, and offers the bool as the switch. A theme that
+/// wants other characters in the box widens `num.tabular_set`, which is the
+/// token carrying the set — this constant can never grow past the bool.
+pub const TABULAR_PUNCT: [char; 7] = ['.', ',', ':', '+', '-', ' ', '%'];
+
+/// The one member of [`TABULAR_PUNCT`] that is also a WORD SEPARATOR.
+///
+/// Every other mark in the list attaches to the number it touches — the
+/// dots of an address, the colons of a clock, a leading sign, a trailing
+/// `%` — so being next to a figure is enough to say it belongs to one.
+/// The space has a second job that has nothing to do with numbers, and
+/// pinning it into a figure box while it is doing that job stretches
+/// PROSE: with `type.value.tabular` on, `AMD RYZEN 7` grew by half a
+/// figure per gap, because every value in a `rows` line is set in the one
+/// `value` role whether it holds a reading or the name of a machine.
+///
+/// So the space is boxed only where it stands INSIDE a number — a figure
+/// on both sides, which is the grouping space of `1 234 567` — and keeps
+/// the face's own advance between two words. [`Figures::advance_of`] is
+/// where the rule is spent.
+const TABULAR_WORD_SEP: char = ' ';
+
+/// One role's figure box: how wide it is at this (face, px), and which
+/// characters are stepped by it.
+///
+/// Resolved once per draw and carried into the row loop wherever a caller
+/// CAN carry it — every object drawing against `Ctx` does, and that is
+/// where the row loops are. The [`crate::view::Surface`] path cannot: the
+/// trait carries the role's `tabular` BOOL and nothing else, because a
+/// `Figures` is a host-side value with no way across the plugin ABI, so
+/// `text_tab` and `measure_tab` re-resolve it per call. That costs one FNV
+/// over ten bytes and two hash hits per cell per frame, against a box
+/// that is already cached per (face, px); it is stated here rather than
+/// glossed, because the cheap version of this comment used to claim the
+/// row loop never repeated the work and one of the two paths did.
+///
+/// [`Figures::NONE`] is a run that is not tabular, and every accessor
+/// below answers "the face's own advance" for it — a role without the
+/// token draws exactly as it drew before.
+#[derive(Clone, Copy, Debug)]
+pub struct Figures {
+    /// The shared advance, in px. Zero means the run is not tabular; it is
+    /// the discriminant rather than an `Option` so that the per-glyph test
+    /// on the draw path is one compare.
+    advance: f32,
+    /// Membership for U+0000..U+007F as a bitmap. The test runs once per
+    /// glyph on a draw path; the alternative is re-scanning the theme's
+    /// string for every character of every number on screen.
+    ascii: u128,
+    /// Members outside ASCII — a theme may well put U+2212 MINUS SIGN or a
+    /// thin space in the set. Inline rather than boxed because a `Figures`
+    /// is copied into every text call and the draw path allocates nothing.
+    extra: [char; Figures::EXTRA],
+    n_extra: u8,
+    /// `num.tabular_punct`: whether [`TABULAR_PUNCT`] may join the box.
+    ///
+    /// A flag rather than seven more bits in `ascii`, because the marks
+    /// join CONDITIONALLY — only where they are part of a number — and
+    /// the two bitmaps have to stay tellable apart to decide that. The
+    /// set proper is what "part of a number" is measured against.
+    punct: bool,
+}
+
+impl Figures {
+    /// How many non-ASCII members a set may carry. Past this the extras
+    /// are dropped with a warning rather than silently ignored: a set the
+    /// toolkit cannot hold whole would align some of a column and not the
+    /// rest, which reads as a rendering bug rather than as a theme defect.
+    pub const EXTRA: usize = 8;
+
+    /// A run that is not tabular. Every character keeps the face's advance,
+    /// which is the behaviour of every text path that predates the token.
+    pub const NONE: Figures = Figures {
+        advance: 0.0,
+        ascii: 0,
+        extra: ['\0'; Self::EXTRA],
+        n_extra: 0,
+        punct: false,
+    };
+
+    /// Whether this run has a figure box at all.
+    pub fn is_on(&self) -> bool {
+        self.advance > 0.0
+    }
+
+    /// The box width, or 0.0 when the run is not tabular. For a caller
+    /// sizing a numeric column ahead of the text: `digits x advance` is the
+    /// width of any string of that many figures, whatever they turn out to
+    /// be — the property that makes a right-aligned numeric column free.
+    pub fn advance(&self) -> f32 {
+        self.advance
+    }
+
+    /// Whether `ch` is a member of the SET PROPER — `num.tabular_set`,
+    /// the characters the box exists for. The punctuation of
+    /// [`TABULAR_PUNCT`] is deliberately not counted here: "is this
+    /// character part of a number" is the question the marks are judged
+    /// by, and a question cannot be its own answer.
+    fn in_set(&self, ch: char) -> bool {
+        if (ch as u32) < 128 {
+            (self.ascii >> (ch as u32)) & 1 == 1
+        } else {
+            self.extra[..self.n_extra as usize].contains(&ch)
+        }
+    }
+
+    /// The advance `ch` is stepped by where it stands between `prev` and
+    /// `next`, or `None` when the face's own advance stands.
+    ///
+    /// Answered WITHOUT touching the atlas, which is the whole performance
+    /// argument of §5.17: measuring `192.168.000.101` costs fifteen bitmap
+    /// tests and no rasterisation.
+    ///
+    /// The neighbours are what keeps the box on NUMBERS. A member of the
+    /// set proper is boxed wherever it stands — that is what the set is.
+    /// A `tabular_punct` mark is boxed where it is part of a number, and a
+    /// mark is part of a number when a figure stands beside it: the dots
+    /// of `192.168.1.1`, the colons of `21:57:30`, the sign of `-40`, the
+    /// `%` of `74%`. The word space is the exception, and it is the reason
+    /// the rule reads neighbours at all — see [`TABULAR_WORD_SEP`].
+    pub fn advance_of(&self, prev: Option<char>, ch: char, next: Option<char>) -> Option<f32> {
+        if !self.is_on() {
+            return None;
+        }
+        if self.in_set(ch) {
+            return Some(self.advance);
+        }
+        if !self.punct || !TABULAR_PUNCT.contains(&ch) {
+            return None;
+        }
+        let left = prev.is_some_and(|c| self.in_set(c));
+        let right = next.is_some_and(|c| self.in_set(c));
+        let part_of_a_number = if ch == TABULAR_WORD_SEP {
+            left && right
+        } else {
+            left || right
+        };
+        part_of_a_number.then_some(self.advance)
+    }
+
+    /// Where a glyph sits inside a box of `box_advance`: centred, so a
+    /// narrow '1' keeps the optical rhythm of a wide '8' instead of
+    /// hugging the box's left edge.
+    ///
+    /// Takes the box the caller already resolved rather than looking the
+    /// character up a second time: [`Figures::advance_of`] now reads
+    /// neighbours, so a second lookup would be a second walk of the same
+    /// question — and the only way for the offset to disagree with the
+    /// step it belongs to.
+    pub fn centre_in(box_advance: f32, glyph_advance: f32) -> f32 {
+        (box_advance - glyph_advance) / 2.0
+    }
+
+    fn add(&mut self, ch: char) -> bool {
+        if (ch as u32) < 128 {
+            self.ascii |= 1u128 << (ch as u32);
+            return true;
+        }
+        if self.extra[..self.n_extra as usize].contains(&ch) {
+            return true;
+        }
+        if (self.n_extra as usize) < Self::EXTRA {
+            self.extra[self.n_extra as usize] = ch;
+            self.n_extra += 1;
+            return true;
+        }
+        false
+    }
+}
+
+/// A run's characters with each one's neighbours, so a caller can ask
+/// [`Figures::advance_of`] without collecting the string first.
+///
+/// The draw path allocates nothing, which rules out `Vec<char>`; the
+/// three-character window is what the rule needs and all it needs.
+pub fn with_neighbours(text: &str) -> impl Iterator<Item = (Option<char>, char, Option<char>)> + '_ {
+    let mut prev: Option<char> = None;
+    let mut it = text.chars().peekable();
+    std::iter::from_fn(move || {
+        let ch = it.next()?;
+        let next = it.peek().copied();
+        let out = (prev, ch, next);
+        prev = Some(ch);
+        Some(out)
+    })
+}
+
+/// FNV-1a over the tabular set, so the cache key does not own a `String`.
+/// There is one set per theme, so this hash is asked a handful of distinct
+/// questions in the life of the process.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 pub struct FontSystem {
-    fonts: [Font; 2],
+    fonts: [Font; FONT_COUNT as usize],
+    /// Per slot, the x-offset of the second draw pass that FAKES weight,
+    /// in em — `face.<id>.synthetic_bold`, and zero on every slot that got
+    /// the weight it asked for.
+    ///
+    /// Kept beside the faces because it is a property of what the load
+    /// SETTLED ON, not of the theme alone: the token says how wide the
+    /// fake would be, and only the loader knows whether a >=600 request
+    /// really did come back with a Regular file. It never touches an
+    /// advance, so a bolded run measures exactly like the run it bolds and
+    /// a tabular column cannot be widened by weight.
+    synthetic: [f32; FONT_COUNT as usize],
     pub atlas: Vec<u8>,
     /// The rows touched since the last take_dirty_rows(): (lo, hi exclusive).
     /// Uploading only these is what keeps a glyph-churn frame at microseconds
@@ -53,6 +359,11 @@ pub struct FontSystem {
     dirty_rows: Option<(usize, usize)>,
     pub atlas_dirty: bool,
     cache: HashMap<(u8, u32, char), Option<Glyph>>,
+    /// The figure box per (face, px, set, punct). §5.17 says "ten glyph
+    /// lookups once, cached beside the glyph cache" — this is that cache,
+    /// and it lives here rather than beside the role because the box is a
+    /// property of the FACE at a size, which is what this type owns.
+    fig_cache: HashMap<(u8, u32, u64, bool), Figures>,
     // simple shelf packer
     cur_x: usize,
     cur_y: usize,
@@ -60,21 +371,37 @@ pub struct FontSystem {
     /// The atlas filled up mid-frame; reset it at the next frame start so
     /// glyphs already emitted into the current draw list keep valid UVs.
     reset_pending: bool,
+    /// The theme epoch the faces above were resolved at, and the user's
+    /// settings they were resolved with.
+    ///
+    /// A face is a THEME value — `face.<id>.family` is a list the master
+    /// writes and a theme may replace — so a theme swap has to re-resolve
+    /// the slots or the new file's typography never reaches the atlas.
+    /// Watching the epoch here rather than asking every host to remember
+    /// to call [`FontSystem::reload_faces`] is the same ruling the rest of
+    /// the toolkit makes about the theme: the value has ONE reader, and it
+    /// is the one that owns the thing being read.
+    faces_epoch: u32,
+    choice: FaceChoice,
 }
 
 impl FontSystem {
     pub fn new() -> Self {
-        let (ui, mono) = load_fonts();
+        let (fonts, synthetic) = load_faces();
         let mut fs = FontSystem {
-            fonts: [ui, mono],
+            fonts,
+            synthetic,
             atlas: vec![0u8; ATLAS_W * ATLAS_H],
             dirty_rows: Some((0, ATLAS_H)),
             atlas_dirty: true,
             cache: HashMap::new(),
+            fig_cache: HashMap::new(),
             cur_x: 2,
             cur_y: 2,
             row_h: 0,
             reset_pending: false,
+            faces_epoch: crate::theme::content_epoch(),
+            choice: FaceChoice::default(),
         };
         // White pixel (0,0..2x2) for solid fills.
         for y in 0..2 {
@@ -86,16 +413,30 @@ impl FontSystem {
         fs
     }
 
-    /// Replaces the terminal font (settings change); resets the atlas.
-    pub fn set_mono(&mut self, font: Font) {
-        self.fonts[FONT_MONO as usize] = font;
+    /// Re-resolves every face slot with the user's settings folded in, and
+    /// resets the atlas once for all eight.
+    ///
+    /// This replaced a pair of `set_ui`/`set_mono` calls that each took a
+    /// ready-made [`Font`] and dropped it into one slot. With eight slots
+    /// that shape cannot work: the family the user picked has to reach
+    /// every slot of its kind, and each of those slots has its own WEIGHT
+    /// to ask for — which is precisely what a single loaded `Font` cannot
+    /// carry. The loader is the only place that knows how to turn
+    /// (family, weight) into a file, so the settings go to the loader.
+    pub fn reload_faces(&mut self, ov: &FaceChoice) {
+        let (fonts, synthetic) = load_faces_with(ov);
+        self.fonts = fonts;
+        self.synthetic = synthetic;
+        self.choice = ov.clone();
+        self.faces_epoch = crate::theme::content_epoch();
         self.reset_atlas();
     }
 
-    /// Replaces the interface font (settings change); resets the atlas.
-    pub fn set_ui(&mut self, font: Font) {
-        self.fonts[FONT_UI as usize] = font;
-        self.reset_atlas();
+    /// The em x-offset of the fake-bold second pass for this slot, or zero
+    /// where the slot got the weight it asked for. Read by the draw list,
+    /// which is the only place a second pass can happen.
+    pub fn synthetic_bold(&self, font: u8) -> f32 {
+        self.synthetic.get(font as usize).copied().unwrap_or(0.0)
     }
 
     /// UV of the white pixel — used by solid shapes.
@@ -159,6 +500,27 @@ impl FontSystem {
     }
 
     pub fn begin_frame(&mut self) {
+        // A theme swap changes which families and weights the eight slots
+        // are meant to be, so the slots are resolved again — at a frame
+        // BOUNDARY, never mid-frame, for the same reason the atlas reset
+        // waits here: glyphs already in a draw list have to keep their
+        // UVs. One atomic load per frame when nothing has changed.
+        // The CONTENT epoch, never `theme::epoch()`. That one answers which
+        // BAKE is published, and a desktop whose monitors are unequal heights
+        // has two of them — one per unit size — published in turn as each
+        // screen draws. Against a single remembered value it reads as a
+        // change on every frame, and this guard stands in front of a walk of
+        // the font directories and a re-parse of every face file. It was
+        // written here, and it was `--desktop` at 100 % CPU on two monitors
+        // and 5 % on one. Which families the slots name is a property of the
+        // theme's text, not of the height it was baked for.
+        let epoch = crate::theme::content_epoch();
+        if epoch != self.faces_epoch {
+            let choice = self.choice.clone();
+            self.reload_faces(&choice);
+            self.reset_pending = false;
+            return;
+        }
         if self.reset_pending {
             self.reset_atlas();
             self.reset_pending = false;
@@ -175,6 +537,11 @@ impl FontSystem {
             }
         }
         self.cache.clear();
+        // The figure box is measured from the FACE, so a reset that follows
+        // set_ui()/set_mono() invalidates it as surely as it invalidates the
+        // glyphs. Clearing on the atlas-full path too costs one re-measure
+        // per (face, px) and keeps the invalidation rule to one line.
+        self.fig_cache.clear();
         self.cur_x = 2;
         self.cur_y = 2;
         self.row_h = 0;
@@ -254,10 +621,84 @@ impl FontSystem {
         self.glyph(FONT_MONO, px, 'M').map(|g| g.advance).unwrap_or(px * 0.6)
     }
 
+    /// The figure box of a tabular role at this (face, px): `set` is
+    /// `num.tabular_set` and `punct` is `num.tabular_punct`, both read from
+    /// the theme by the caller — this type owns faces, not tokens.
+    ///
+    /// An empty set answers [`Figures::NONE`]: a theme that empties the set
+    /// has said which characters get the box, and the answer was "none".
+    pub fn figures(&mut self, font: u8, px: f32, set: &str, punct: bool) -> Figures {
+        if set.is_empty() || font >= FONT_COUNT {
+            return Figures::NONE;
+        }
+        let key = (font, (px * 4.0).round() as u32, fnv1a(set.as_bytes()), punct);
+        if let Some(f) = self.fig_cache.get(&key) {
+            return *f;
+        }
+        let mut fig = Figures::NONE;
+        let mut advance = 0.0f32;
+        let mut complete = true;
+        let mut overflow = false;
+        for ch in set.chars() {
+            // The box is the widest advance among the SET's own characters.
+            match self.glyph(font, px, ch) {
+                Some(g) => advance = advance.max(g.advance),
+                // The atlas filled up mid-frame. A box measured from a
+                // partial set is NARROWER than a figure, which draws the
+                // column as overlapping glyphs — worse than no box at all
+                // — so this frame draws proportionally and the next one,
+                // after begin_frame()'s reset, measures it properly.
+                None => complete = false,
+            }
+            overflow |= !fig.add(ch);
+        }
+        // `tabular_punct` pins punctuation INTO the box; it must never
+        // widen it. '%' is wider than any digit in most faces, and letting
+        // the punctuation into the max would grow every number on screen
+        // the moment the flag went on. The marks are carried as the flag
+        // rather than folded into the bitmap because they join the box
+        // only where they are part of a number, which is a question about
+        // their NEIGHBOURS and so cannot be settled here.
+        fig.punct = punct;
+        if overflow {
+            crate::ui::warn_once(
+                "num.tabular_set",
+                &format!(
+                    "num.tabular_set carries more than {} characters outside ASCII \
+                     — the extras keep the face's advance",
+                    Figures::EXTRA
+                ),
+            );
+        }
+        if !complete || advance <= 0.0 {
+            return Figures::NONE;
+        }
+        fig.advance = advance;
+        self.fig_cache.insert(key, fig);
+        fig
+    }
+
     pub fn measure(&mut self, font: u8, px: f32, text: &str, letter_spacing: f32) -> f32 {
+        self.measure_fig(font, px, text, letter_spacing, &Figures::NONE)
+    }
+
+    /// [`FontSystem::measure`] under a figure box. A member of the box is
+    /// counted at the box's width without rasterising anything, so an
+    /// all-figure string measures `len x (advance + letter_spacing)` with
+    /// no atlas traffic — §5.17's reason for doing this in the toolkit.
+    pub fn measure_fig(
+        &mut self,
+        font: u8,
+        px: f32,
+        text: &str,
+        letter_spacing: f32,
+        fig: &Figures,
+    ) -> f32 {
         let mut w = 0.0;
-        for ch in text.chars() {
-            if let Some(g) = self.glyph(font, px, ch) {
+        for (prev, ch, next) in with_neighbours(text) {
+            if let Some(a) = fig.advance_of(prev, ch, next) {
+                w += a + letter_spacing;
+            } else if let Some(g) = self.glyph(font, px, ch) {
                 w += g.advance + letter_spacing;
             }
         }
@@ -481,6 +922,313 @@ pub fn load_default_ui() -> Font {
     })
 }
 
-fn load_fonts() -> (Font, Font) {
-    (load_default_ui(), load_default_mono())
+// -------------------------------------------------------- face resolution
+//
+// §5.16's eight slots, resolved once at load. Until now this file loaded
+// two files and every `face` the master declared — five distinct words
+// across the twenty-four roles, four distinct WEIGHTS across the eight
+// slots — arrived at the atlas as one of those two. The theme said 400,
+// 500, 600 and 700; the screen said Regular, and said it silently.
+//
+// The order below is the master's own, written above `[face.ui]`:
+// requested weight -> Regular (+ synthetic bold if >=600) -> the fallback
+// chain (cycles broken at depth 8) -> FACE_UI (FACE_MONO for mono*) -> if
+// FACE_MONO itself is unresolvable the load fails. Every substitution
+// warns; silent substitution is forbidden, which is why every arm here
+// that settles for less than it asked for says so.
+
+/// The user's font settings — the two families and two weights the
+/// settings panel offers. Not a theme value: the master says what the
+/// interface is SET IN, this says what this user asked to read it in.
+#[derive(Default, Clone, Debug)]
+pub struct FaceChoice {
+    pub ui_family: Option<String>,
+    pub ui_weight: Option<String>,
+    pub mono_family: Option<String>,
+    pub mono_weight: Option<String>,
+}
+
+/// The filename word a numeric weight is looked for under. The master
+/// spells five of these out beside `face.<id>.weight`; the other four are
+/// the same scale continued, because a theme may write any of 100..900 and
+/// a number the table did not hold would silently become Regular.
+fn weight_word(w: u32) -> &'static str {
+    match w {
+        0..=149 => "Thin",
+        150..=249 => "ExtraLight",
+        250..=349 => "Light",
+        350..=449 => "Regular",
+        450..=549 => "Medium",
+        550..=649 => "SemiBold",
+        650..=749 => "Bold",
+        750..=849 => "ExtraBold",
+        _ => "Black",
+    }
+}
+
+/// The filename pattern a family DISPLAY name is searched under.
+///
+/// The curated tables answer for the families the settings panel offers;
+/// anything else is normalised the way [`find_font`] normalises the files
+/// it compares against. Without that second half a theme could name only
+/// the twenty families this file happens to know, which would make the
+/// engine — not the master — the authority on which fonts exist.
+fn family_pattern(display: &str) -> String {
+    if let Some(p) = pattern_for(display) {
+        return p.to_string();
+    }
+    display.to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+}
+
+/// One slot as the master declares it.
+struct FaceSpec {
+    families: Vec<String>,
+    weight: u32,
+    /// `face.<id>.file` — a theme-shipped binary, the one path allowed to
+    /// escape the system font directories.
+    file: String,
+    /// `face.<id>.fallback`: another face id, `builtin`, or `none`.
+    fallback: String,
+}
+
+/// Reads `[face.<id>]` out of the live theme.
+fn face_spec(id: &str) -> FaceSpec {
+    let t = crate::theme::resolved();
+    let d = crate::theme::diagnostics();
+    // A family list is an indexed family in the cascade — `family[0]`,
+    // `family[1]`, ... — so it is walked until the master stops declaring
+    // one, rather than asked for a length the schema does not publish.
+    let mut families = Vec::new();
+    for i in 0.. {
+        match d.text(&format!("face.{id}.family[{i}]")) {
+            Some(f) if !f.is_empty() => families.push(f.to_string()),
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let weight = crate::theme::id(&format!("face.{id}.weight"))
+        .map(|k| t.px(k))
+        .filter(|w| *w > 0.0)
+        .unwrap_or(400.0) as u32;
+    let fallback = crate::theme::id(&format!("face.{id}.fallback"))
+        .and_then(crate::theme::enum_word_of)
+        .unwrap_or_default();
+    FaceSpec {
+        families,
+        weight,
+        file: d.text(&format!("face.{id}.file")).unwrap_or_default().to_string(),
+        fallback,
+    }
+}
+
+/// A slot's answer: the file it settled on, and the em offset of the
+/// fake-bold pass it needs to look like the weight it could not find.
+struct Resolved {
+    path: PathBuf,
+    synthetic: f32,
+}
+
+/// Tries one slot's OWN families at one weight. `exact` asks for the
+/// weight the master wrote; otherwise Regular, which is the rung §5.16
+/// drops to before it leaves the slot.
+fn try_families(spec: &FaceSpec, dirs: &[PathBuf], exact: bool) -> Option<PathBuf> {
+    let w = if exact { weight_word(spec.weight) } else { "Regular" };
+    let w = w.to_lowercase();
+    for fam in &spec.families {
+        let pat = family_pattern(fam);
+        let mut names = vec![format!("{pat}{w}")];
+        if !exact {
+            // A family shipped as one file carries no weight word at all.
+            names.push(pat.clone());
+        }
+        for n in &names {
+            if let Some(p) = find_font(dirs, &[n.as_str()]) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// One slot, resolved down §5.16's ladder. `depth` is the fallback chain's
+/// cycle brake — the master states the cap, so it is spent here and not
+/// invented per call.
+fn resolve_face(id: &str, dirs: &[PathBuf], ov: &FaceChoice, depth: u32) -> Option<Resolved> {
+    if depth > FONT_COUNT as u32 {
+        crate::ui::warn_once(
+            &format!("face.chain:{id}"),
+            &format!("face.{id}.fallback chains more than {FONT_COUNT} deep — the chain is cut"),
+        );
+        return None;
+    }
+    let mut spec = face_spec(id);
+    // The user's family goes in FRONT of the master's list rather than
+    // replacing it: a family the user picked and the system has since lost
+    // must fall through to the theme's, not to nothing. The weight moves
+    // as a DELTA so the ladder survives — asking for Bold makes `ui_bold`
+    // heavier than `ui_medium` still, where pinning every slot at 700
+    // would flatten the master's four weights into one.
+    let (fam, wgt) = if id.starts_with("mono") {
+        (&ov.mono_family, &ov.mono_weight)
+    } else {
+        (&ov.ui_family, &ov.ui_weight)
+    };
+    if let Some(f) = fam {
+        if !f.is_empty() {
+            spec.families.insert(0, f.clone());
+        }
+    }
+    if let Some(w) = wgt.as_deref().filter(|w| !w.is_empty()) {
+        let base = face_spec(if id.starts_with("mono") { "mono" } else { "ui" }).weight as i32;
+        let asked = weight_number(w);
+        spec.weight = (spec.weight as i32 + (asked - base)).clamp(100, 900) as u32;
+    }
+
+    // A theme-shipped binary outranks every search: the master calls it
+    // the only path allowed out of the system font directories.
+    if !spec.file.is_empty() {
+        if let Some(dir) = crate::theme::diagnostics().path.as_ref().and_then(|p| p.parent()) {
+            let p = dir.join(&spec.file);
+            if p.is_file() {
+                return Some(Resolved { path: p, synthetic: 0.0 });
+            }
+            crate::ui::warn_once(
+                &format!("face.file:{id}"),
+                &format!("face.{id}.file names \"{}\", which is not there", spec.file),
+            );
+        }
+    }
+    if let Some(path) = try_families(&spec, dirs, true) {
+        return Some(Resolved { path, synthetic: 0.0 });
+    }
+    if let Some(path) = try_families(&spec, dirs, false) {
+        // §5.16: a >=600 request that came back with a Regular file is
+        // faked, and the fake is announced. Below 600 there is nothing to
+        // fake — Light drawn as Regular is a substitution, not a weight.
+        let synthetic = if spec.weight >= 600 {
+            crate::theme::id(&format!("face.{id}.synthetic_bold"))
+                .map(|k| crate::theme::resolved().px(k))
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        // A slot that asked for Regular and got Regular substituted
+        // nothing: the two passes above are the same request written two
+        // ways (`<family>regular` and the bare family), and announcing
+        // that as a substitution would put six lines of noise on every
+        // start for a theme in which nothing at all went wrong.
+        if weight_word(spec.weight) != "Regular" {
+            crate::ui::warn_once(
+                &format!("face.weight:{id}"),
+                &format!(
+                    "face.{id} asked for {} ({}) and the system has only Regular — {}",
+                    spec.weight,
+                    weight_word(spec.weight),
+                    if synthetic > 0.0 { "the weight is faked" } else { "Regular is used" }
+                ),
+            );
+        }
+        return Some(Resolved { path, synthetic });
+    }
+    match spec.fallback.as_str() {
+        // `builtin` is the icon slot's answer: the compiled-in vector set
+        // draws those names, and no file is wanted. `none` ends the chain.
+        "" | "none" | "builtin" => None,
+        next => {
+            crate::ui::warn_once(
+                &format!("face.fallback:{id}"),
+                &format!("face.{id} resolved to no file — falling back to face.{next}"),
+            );
+            resolve_face(next, dirs, ov, depth + 1)
+        }
+    }
+}
+
+/// The number a weight WORD stands for, for folding the user's choice into
+/// the master's ladder. The inverse of [`weight_word`] over the five names
+/// the settings panel offers.
+fn weight_number(word: &str) -> i32 {
+    match word.to_lowercase().replace(' ', "").as_str() {
+        "thin" => 100,
+        "extralight" => 200,
+        "light" => 300,
+        "medium" => 500,
+        "semibold" => 600,
+        "bold" => 700,
+        "extrabold" => 800,
+        "black" => 900,
+        _ => 400,
+    }
+}
+
+/// Every slot, at the theme's own settings.
+fn load_faces() -> ([Font; FONT_COUNT as usize], [f32; FONT_COUNT as usize]) {
+    load_faces_with(&FaceChoice::default())
+}
+
+/// Every slot, with the user's settings folded in.
+///
+/// The two engine slots keep the environment overrides they have always
+/// had (`NACELLE_FONT_UI`, `NACELLE_FONT_MONO`), because those are how a
+/// machine with no matching family in its font directories starts at all —
+/// including the one this suite runs on.
+fn load_faces_with(ov: &FaceChoice) -> ([Font; FONT_COUNT as usize], [f32; FONT_COUNT as usize]) {
+    let dirs = font_dirs();
+    let mut paths: [Option<Resolved>; FONT_COUNT as usize] = Default::default();
+    for (i, id) in FACE_IDS.iter().enumerate() {
+        paths[i] = resolve_face(id, &dirs, ov, 0);
+    }
+    // The two ends of every chain, per §5.16's step 5. `load_default_*`
+    // carries the environment override and the historical search order, so
+    // a slot that found nothing lands exactly where the two-slot engine
+    // put every one of them — which is the behaviour this replaces, kept
+    // as the floor under it rather than as the rule above it.
+    let ui = match &paths[FONT_UI as usize] {
+        Some(r) => try_load(&r.path).unwrap_or_else(load_default_ui),
+        None => load_default_ui(),
+    };
+    let mono = match &paths[FONT_MONO as usize] {
+        Some(r) => try_load(&r.path).unwrap_or_else(load_default_mono),
+        None => load_default_mono(),
+    };
+    // One parse per FILE, not per slot: six of the eight slots commonly
+    // resolve onto two or three files, and a `Font` is a parsed table.
+    let mut by_path: HashMap<PathBuf, Font> = HashMap::new();
+    let fonts: [Font; FONT_COUNT as usize] = std::array::from_fn(|i| {
+        // The two engine slots are already loaded above, because every
+        // other slot's last resort is one of them.
+        if i == FONT_UI as usize {
+            return ui.clone();
+        }
+        if i == FONT_MONO as usize {
+            return mono.clone();
+        }
+        match &paths[i] {
+            Some(r) => match by_path.get(&r.path) {
+                Some(f) => f.clone(),
+                None => match try_load(&r.path) {
+                    Some(f) => {
+                        by_path.insert(r.path.clone(), f.clone());
+                        f
+                    }
+                    None => alias_of(FACE_IDS[i], &ui, &mono),
+                },
+            },
+            None => alias_of(FACE_IDS[i], &ui, &mono),
+        }
+    });
+    let synthetic = std::array::from_fn(|i| paths[i].as_ref().map_or(0.0, |r| r.synthetic));
+    (fonts, synthetic)
+}
+
+/// Where a slot with no file of its own lands: the monospace slot when its
+/// name says monospace, the interface slot otherwise. The same rule
+/// [`face_slot`] applies to an unknown WORD, so the two ways of failing to
+/// name a face agree.
+fn alias_of(id: &str, ui: &Font, mono: &Font) -> Font {
+    if id.starts_with("mono") {
+        mono.clone()
+    } else {
+        ui.clone()
+    }
 }

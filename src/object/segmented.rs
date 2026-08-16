@@ -90,7 +90,7 @@ fn natural_widths(sf: &mut impl Surface, labels: &[&str], look: &Look) -> Vec<f3
     labels
         .iter()
         .map(|l| {
-            (sf.measure(look.label.px, l, look.label.track) + 2.0 * look.pad_x)
+            (sf.measure(look.label.face, look.label.px, l, look.label.track) + 2.0 * look.pad_x)
                 .max(look.min_cell_w)
         })
         .collect()
@@ -153,7 +153,8 @@ pub fn control<S: Surface>(
             sf.ring(*cell, look.corner_style, cut, bw, ink.edge);
         }
         let inner = (cell.w - 2.0 * look.pad_x).max(0.0);
-        let text = paint::fit_end(sf, look.label.px, labels[i], inner, look.label.track);
+        let text =
+            paint::fit_end(sf, look.label.face, look.label.px, labels[i], inner, look.label.track);
         // The tab strip's rule, for the same reason (F2 §8.1): a choice
         // whose word did not fit is a choice the user cannot read.
         paint::explain_trim(sf, super::tooltip::key(labels[i]), *cell, &text, labels[i]);
@@ -164,6 +165,7 @@ pub fn control<S: Surface>(
             ty,
             cell.w,
             Align::Center,
+            look.label.face,
             look.label.px,
             &text,
             ink.text,
@@ -178,7 +180,10 @@ pub fn control<S: Surface>(
 
 /// [`control`] on the host's own surface.
 pub fn draw(ctx: &mut Ctx, r: Rect, labels: &[&str], st: &StripState) -> Vec<Rect> {
-    let style = StripStyle { text_scale: ctx.ui_font_scale };
+    // `text_scale` is the strip's own shrink, not the user's interface
+    // scale: that one rides in `metric.ui_scale` and is already in every
+    // baked size. Feeding it here as well drew 125 % at 156 %.
+    let style = StripStyle::default();
     control(&mut CtxSurface::new(ctx), r, labels, st, &style, None)
 }
 

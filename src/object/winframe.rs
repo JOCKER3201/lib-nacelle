@@ -30,11 +30,11 @@
 //! [`Action`]: crate::widget::Action
 
 use super::window::{corner_segments, corner_style, panel_edge_glow};
-use crate::draw::{fit_tail, Corner, CornerStyle};
-use crate::font::FONT_UI;
+use crate::draw::{Corner, CornerStyle};
 use crate::theme::parse::State;
 use crate::theme::{self, Color, TokenId};
 use crate::ui;
+use crate::view::paint;
 use crate::view::surface::{CtxSurface, Surface};
 use crate::{Ctx, Rect};
 use std::sync::OnceLock;
@@ -474,7 +474,7 @@ impl Frame {
         // the window_control roles for the glyph — the close button is
         // the one destructive control and hovers in its own colour.
         let plate = |ctx: &mut Ctx, r: Rect, close: bool| -> Color {
-            let hot = r.contains(ctx.mouse.0, ctx.mouse.1);
+            let hot = ctx.mouse.over(r);
             let st = class_state(
                 t,
                 &ICON_BUTTON,
@@ -615,6 +615,12 @@ impl Frame {
         let px = role.px(ctx, 1.0);
         let spacing = role.tracking_px(px);
         let leading = role.leading();
+        // The face is the role's, like the size beside it. `FONT_UI` stood
+        // here, so `type.title.window.face = ui_medium` — a 500 weight the
+        // master states for every window in the program — arrived at the
+        // atlas as the interface Regular, and no theme could move it.
+        let face = role.font();
+        let tabular = role.tabular();
         let room_pad = t.px(tok(&ROOM_PAD, "winframe.title.room_pad")).max(0.0);
         let ink = col(t.color(tok(&TEXT, "component.titlebar.text")));
         let ink = ink.alpha(ink.a * dim);
@@ -625,20 +631,22 @@ impl Frame {
             _ => title.to_uppercase(),
         };
         let y = outer.y + m.border + (m.title_h - px * leading) / 2.0;
+        let fig = role.figures(ctx.fonts, face, px);
         let align = tok(&ALIGN, "winframe.title.align");
         let left = *ALIGN_LEFT.get_or_init(|| theme::enum_index(align, "left"));
         if Some(t.enum_of(align)) == left {
             let x0 = mb.x + mb.w + room_pad;
             let room = bound.x - room_pad - x0;
-            let shown = fit_tail(ctx.fonts, FONT_UI, px, &shown, spacing, room);
-            ctx.dl.text(ctx.fonts, FONT_UI, px, x0, y, &shown, ink, spacing);
+            let shown = fit_title(ctx, face, px, &shown, spacing, room, tabular);
+            ctx.dl.text_fig(ctx.fonts, face, px, x0, y, &shown, ink, spacing, &fig);
         } else {
             // Centred on the window; the room is symmetric so the
             // centre holds.
             let cx = outer.x + outer.w / 2.0;
             let room = 2.0 * (cx - (mb.x + mb.w)).min(bound.x - cx) - room_pad;
-            let shown = fit_tail(ctx.fonts, FONT_UI, px, &shown, spacing, room);
-            ctx.dl.text_center(ctx.fonts, FONT_UI, px, cx, y, &shown, ink, spacing);
+            let shown = fit_title(ctx, face, px, &shown, spacing, room, tabular);
+            ctx.dl
+                .text_center_fig(ctx.fonts, face, px, cx, y, &shown, ink, spacing, &fig);
         }
     }
 
@@ -685,13 +693,21 @@ impl Frame {
         // one object drawn twice, so a theme that repoints the role must
         // move both or the same list is two lists.
         let role = ui::bound_role(&ITEM_ROLE, "menu.item.role");
-        let ipx = role.px(ctx, ctx.ui_font_scale);
+        // No `ui_font_scale`: the viewport carries the user's scale into u,
+        // and the role's size is written in u — applying it here too squares it.
+        let ipx = role.px(ctx, 1.0);
         let spacing = role.tracking_px(ipx);
         let leading = role.leading();
+        // Same role, same face: the window menu and the context menu are
+        // one object drawn twice, and menu.rs reads its rows' face from
+        // the role now. A `FONT_UI` left here is how the two copies come
+        // to be set differently the moment a theme moves `menu.item.role`.
+        let iface = role.font();
+        let ifig = role.figures(ctx.fonts, iface, ipx);
         let inset = t.px(tok(&ITEM_INSET, "menu.item_inset")).max(0.0);
         for (i, (_, label)) in MENU.iter().enumerate() {
             let row = menu_row(mr, i);
-            let hot = row.contains(ctx.mouse.0, ctx.mouse.1);
+            let hot = ctx.mouse.over(row);
             let st = class_state(
                 t,
                 &MENU_ITEM,
@@ -701,18 +717,47 @@ impl Frame {
             if hot {
                 ctx.dl.rect(row.x, row.y, row.w, row.h, col(st.fill));
             }
-            ctx.dl.text(
+            ctx.dl.text_fig(
                 ctx.fonts,
-                FONT_UI,
+                iface,
                 ipx,
                 row.x + inset,
                 row.y + (row.h - ipx * leading) / 2.0,
                 label,
                 col(st.text),
                 spacing,
+                &ifig,
             );
         }
     }
+}
+
+/// A title trimmed to `room` with a trailing ellipsis, measured in the
+/// SAME face, at the same tracking and under the same figure box the
+/// caller is about to draw it with — [`paint::fit_end_tab`]'s rule, which
+/// every view already obeys, rather than a second copy of it here.
+///
+/// `crate::draw::fit_tail` stood here and measured proportionally: under a
+/// role whose master sets `tabular`, the title trimmed against one width
+/// and drew at another, and which way it went — a character lost with room
+/// to spare, or a title running into the controls — depended on the theme.
+///
+/// A title bar squeezed shut by its own controls draws nothing, which is
+/// what `fit_tail` answered here before and what every trimmer in the
+/// toolkit answers now: the guard that said so lived in this function for
+/// as long as [`paint::fit_end_tab`] disagreed with the other two, and
+/// went into that one rule when it stopped.
+#[allow(clippy::too_many_arguments)]
+fn fit_title(
+    ctx: &mut Ctx,
+    face: u8,
+    px: f32,
+    text: &str,
+    spacing: f32,
+    room: f32,
+    tabular: bool,
+) -> String {
+    paint::fit_end_tab(&mut CtxSurface::new(ctx), face, px, text, room, spacing, tabular)
 }
 
 #[cfg(test)]
@@ -826,5 +871,73 @@ mod tests {
         f.close_menu();
         assert!(!f.menu_open());
         assert_eq!(f.hit(outer, &m, px, py), Part::Content);
+    }
+
+    // ---- face -----------------------------------------------------------
+    //
+    // The frame draws text under TWO bindings — `winframe.title.role` for
+    // the title and `menu.item.role` for the window menu, which is the
+    // context menu's binding too — so each is measured on its own. The
+    // harness is the panel container's: what counts as proof that a run
+    // followed its role is one rule for the whole batch.
+
+    use crate::object::panel::tests::{
+        all_in, drawn_text, face_follows_the_theme, report, role_word,
+    };
+
+    /// The window title is set in the face `winframe.title.role` names,
+    /// and follows a theme that moves it.
+    #[test]
+    fn the_window_title_is_set_in_the_face_its_role_names() {
+        face_follows_the_theme("winframe-title", "object::winframe::tests::child_title_face");
+    }
+
+    /// The window menu's rows are set in the face `menu.item.role` names
+    /// — the same binding the context menu reads, so the one object the
+    /// program draws twice cannot come out in two faces.
+    #[test]
+    fn the_window_menu_is_set_in_the_face_the_menu_role_names() {
+        face_follows_the_theme("winframe-menu", "object::winframe::tests::child_menu_face");
+    }
+
+    /// A frame wide enough for a title bar with room to spare, at the
+    /// master's own metrics — the geometry the title is placed by is not
+    /// what is under test here, so it is the shipped one.
+    fn frame_box() -> (Frame, Metrics, Rect) {
+        (Frame::new(), Metrics::new(1080.0), Rect::new(120.0, 90.0, 900.0, 600.0))
+    }
+
+    #[test]
+    #[ignore = "measured in a process of its own by the test above"]
+    fn child_title_face() {
+        static PROBE: OnceLock<TokenId> = OnceLock::new();
+        let want = ui::bound_role(&PROBE, "winframe.title.role").font();
+        let (f, m, outer) = frame_box();
+        let drawn = drawn_text(|ctx| f.draw(ctx, &m, outer, "NACELLE — USTAWIENIA", true));
+        assert_eq!(drawn.len(), 1, "a closed frame draws its title and nothing else");
+        all_in(&drawn, want);
+        report(&role_word("winframe.title.role"), want, &drawn);
+    }
+
+    #[test]
+    #[ignore = "measured in a process of its own by the test above"]
+    fn child_menu_face() {
+        static PROBE: OnceLock<TokenId> = OnceLock::new();
+        let want = ui::bound_role(&PROBE, "menu.item.role").font();
+        let title_face = {
+            static T: OnceLock<TokenId> = OnceLock::new();
+            ui::bound_role(&T, "winframe.title.role").font()
+        };
+        let (mut f, m, outer) = frame_box();
+        f.toggle_menu();
+        let all = drawn_text(|ctx| f.draw(ctx, &m, outer, "NACELLE", true));
+        // The title is drawn under its own binding and is not this
+        // claim's business; the five rows of `MENU` are.
+        let rows: Vec<(u8, String)> =
+            all.iter().filter(|(_, s)| s != "NACELLE").cloned().collect();
+        assert_eq!(rows.len(), MENU.len(), "every menu row draws its label: {all:?}");
+        all_in(&rows, want);
+        println!("title slot {title_face}");
+        report(&role_word("menu.item.role"), want, &rows);
     }
 }

@@ -23,6 +23,7 @@
 
 use nacelle::draw::{DrawCmd, DrawList};
 use nacelle::font::FontSystem;
+use nacelle::pointer::Pointer;
 use nacelle::script::{Script, ScriptWidget};
 use nacelle::telemetry::Snapshot;
 use nacelle::theme::{self, LoadRequest};
@@ -69,7 +70,7 @@ fn frame(src: &str) -> Vec<DrawCmd> {
             w: W,
             h: H,
             t: 0.0,
-            mouse: (0.0, 0.0),
+            mouse: Pointer::new(0.0, 0.0),
             term_font_scale: 1.0,
             ui_font_scale: 1.0,
             panel_scale: 1.0,

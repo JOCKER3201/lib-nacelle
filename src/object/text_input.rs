@@ -28,7 +28,7 @@
 use super::focus_ring;
 use crate::draw::Corner;
 use crate::focus::{Caps, FocusId, Key, KeyEv, Mods};
-use crate::font::FONT_UI;
+use crate::font::{with_neighbours, Figures, FontSystem};
 use crate::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
 use crate::{ui, Ctx, Rect};
 use std::sync::OnceLock;
@@ -684,6 +684,63 @@ fn is_word_grapheme(s: &str) -> bool {
 // View
 // ---------------------------------------------------------------------
 
+/// The advance one character of a run is stepped by, in the face and
+/// under the figure box the field's role named: the box where the
+/// character stands in one, the face's own advance otherwise, plus the
+/// role's tracking — and NOTHING at all for a glyph the atlas could not
+/// take this frame, which is the step [`crate::draw::DrawList::text_fig`]
+/// takes for it.
+///
+/// This is [`FontSystem::measure_fig`]'s rule, said again here because
+/// the field needs it stopped PART WAY through a run (see [`pen_to`])
+/// and `measure_fig` only answers for a whole one. The two agreeing is
+/// not left to inspection: `the_pen_walk_is_the_font_layers_ruler`
+/// measures both, boxed and unboxed, and fails if they ever part.
+fn step(
+    fonts: &mut FontSystem,
+    face: u8,
+    px: f32,
+    (prev, ch, next): (Option<char>, char, Option<char>),
+    track: f32,
+    fig: &Figures,
+) -> f32 {
+    match fig.advance_of(prev, ch, next) {
+        Some(a) => a + track,
+        None => fonts.glyph(face, px, ch).map_or(0.0, |g| g.advance + track),
+    }
+}
+
+/// Where the pen stands `upto` bytes into `s` — the x the glyph at that
+/// offset is drawn at, measured over the WHOLE of `s`.
+///
+/// The whole of it is the point. A figure box reads a character's
+/// NEIGHBOURS ([`Figures::advance_of`]): the full stop inside `1.5` is
+/// boxed and the one ending the prefix `1.` is not, so measuring a
+/// prefix as a string of its own answers a width the line was never
+/// drawn at. Every x in this view — the caret, the ends of a selection,
+/// the composition's underline — is measured with this, over exactly
+/// the run it is drawn in.
+fn pen_to(
+    fonts: &mut FontSystem,
+    face: u8,
+    px: f32,
+    s: &str,
+    upto: usize,
+    track: f32,
+    fig: &Figures,
+) -> f32 {
+    let mut pen = 0.0;
+    let mut at = 0;
+    for c in with_neighbours(s) {
+        if at >= upto {
+            break;
+        }
+        at += c.1.len_utf8();
+        pen += step(fonts, face, px, c, track, fig);
+    }
+    pen
+}
+
 /// The measure cache: caret/selection x positions are re-measured only
 /// when the value, caret, selection or resolved size changed — a frame
 /// that merely redraws re-uses last frame's numbers (§3.7: measure per
@@ -694,9 +751,28 @@ struct ViewCache {
     /// and the widths cached here are text measured through the theme:
     /// tracking, leading and the bound role all move without the value,
     /// the caret or the resolved size moving with them.
-    key: (u32, u32, usize, Option<usize>, u32),
+    ///
+    /// The figure box is NOT a restatement of the epoch:
+    /// [`crate::ui::Role::figures`] answers [`Figures::NONE`] for a
+    /// frame whose atlas filled up before the box could be measured, so
+    /// the same theme at the same size draws one frame boxed and the
+    /// next one not. A cache keyed on the theme alone would hand the
+    /// boxed frame's caret to the proportional one.
+    ///
+    /// The FOCUS closes the list, and it is not a restatement of
+    /// anything either: an unfocused field draws neither its selection
+    /// nor a composition, so where the line is CUT — which is where the
+    /// runs below are placed from — changes when the focus leaves, and
+    /// leaving it does not touch the value, the caret or the anchor.
+    /// Without it here, tabbing out of a field with a selection redrew
+    /// the whole line at the selection's old offset.
+    key: (u32, u32, usize, Option<usize>, u32, u32, bool),
     caret_x: f32,
-    sel_x: Option<(f32, f32)>,
+    /// The x of the two offsets the display string is CUT at for
+    /// drawing — a selection's ends, or the composition's. Widths of
+    /// the runs, added up in the order they are drawn, never a measure
+    /// of the prefix: see [`pen_to`].
+    split_x: (f32, f32),
     text_w: f32,
 }
 
@@ -904,11 +980,22 @@ pub fn draw(
     // ---- type metrics -----------------------------------------------
     // The bound role (`field.role`, an open word set). Role::px carries
     // the theme's size and the panel's container query; the user's
-    // UIFontSize= multiplies through the shrink slot, exactly the
-    // object-layer arithmetic (button.rs).
+    // UIFontSize= does NOT go through the shrink slot — it is
+    // `metric.ui_scale`, the bake already applied it, and a second
+    // multiply squares it. The same arithmetic as every other object
+    // (button.rs).
     let role = ui::bound_role(&ROLE, "field.role");
-    let px = role.px(ctx, ctx.ui_font_scale);
+    let px = role.px(ctx, 1.0);
     let track = role.tracking_px(px);
+    // The role's own FACE, and the figure box it asks for, read once for
+    // the whole draw. Both reach every measure and every draw below: the
+    // caret is the width of the text before it, so a field that measures
+    // in the interface face and draws in the monospace one puts its
+    // caret somewhere in the middle of a word — and does it only under
+    // the theme that moved `type.field.face`, which is the hardest kind
+    // of defect to trace back to its cause.
+    let face = role.font();
+    let fig = role.figures(ctx.fonts, face, px);
     let leading = role.leading();
     let line_h = px * leading;
     let ty = r.y + (r.h - line_h) / 2.0;
@@ -962,22 +1049,48 @@ pub fn draw(
         None
     };
     let caret_disp = before.len() + pre_cursor;
+    // The two offsets the display string is CUT at, which is the one
+    // shape the drawing below has: three runs, the middle one washed
+    // (a selection) or underlined (a composition) or neither. A live
+    // preedit hides the selection, so there is never both.
+    let (cut_a, cut_b) = sel_disp
+        .or_else(|| (!pre_disp.is_empty()).then(|| (before.len(), before.len() + pre_disp.len())))
+        .unwrap_or((0, disp.len()));
 
     // ---- measures (cached per edit, §3.7) ---------------------------
-    let key =
-        (theme::epoch(), model.edit_seq, model.cursor, model.sel_anchor, px.to_bits());
+    let key = (
+        theme::epoch(),
+        model.edit_seq,
+        model.cursor,
+        model.sel_anchor,
+        px.to_bits(),
+        fig.advance().to_bits(),
+        focused,
+    );
     if model.cache.key != key {
-        let caret_x = ctx.fonts.measure(FONT_UI, px, &disp[..caret_disp], track);
-        let sel_x = sel_disp.map(|(a, b)| {
-            (
-                ctx.fonts.measure(FONT_UI, px, &disp[..a], track),
-                ctx.fonts.measure(FONT_UI, px, &disp[..b], track),
-            )
-        });
-        let text_w = ctx.fonts.measure(FONT_UI, px, &disp, track);
-        model.cache = ViewCache { key, caret_x, sel_x, text_w };
+        // The runs are measured ONE BY ONE and added up, in the order
+        // they are drawn, rather than by measuring the prefix: under a
+        // figure box those are two different numbers (see `pen_to`),
+        // and the one the glyphs land on is this one.
+        let w0 = pen_to(ctx.fonts, face, px, &disp[..cut_a], cut_a, track, &fig);
+        let mid = &disp[cut_a..cut_b];
+        let w1 = pen_to(ctx.fonts, face, px, mid, mid.len(), track, &fig);
+        let tail = &disp[cut_b..];
+        let w2 = pen_to(ctx.fonts, face, px, tail, tail.len(), track, &fig);
+        let split_x = (w0, w0 + w1);
+        // The caret stands in whichever run holds it: at a cut when a
+        // selection is up, and INSIDE the middle run while an IME is
+        // composing — the platform puts it there.
+        let caret_x = if caret_disp <= cut_a {
+            pen_to(ctx.fonts, face, px, &disp[..cut_a], caret_disp, track, &fig)
+        } else if caret_disp <= cut_b {
+            split_x.0 + pen_to(ctx.fonts, face, px, mid, caret_disp - cut_a, track, &fig)
+        } else {
+            split_x.1 + pen_to(ctx.fonts, face, px, tail, caret_disp - cut_b, track, &fig)
+        };
+        model.cache = ViewCache { key, caret_x, split_x, text_w: w0 + w1 + w2 };
     }
-    let ViewCache { caret_x, sel_x, text_w, .. } = model.cache;
+    let ViewCache { caret_x, split_x, text_w, .. } = model.cache;
 
     // ---- horizontal scroll ------------------------------------------
     // Keep the caret `field.scroll_margin` clear of either edge; a
@@ -1001,55 +1114,57 @@ pub fn draw(
     if empty {
         model.scroll_px = 0.0;
         if !style.placeholder.is_empty() {
-            ctx.dl.text(
+            ctx.dl.text_fig(
                 ctx.fonts,
-                FONT_UI,
+                face,
                 px,
                 area.x,
                 ty,
                 style.placeholder,
                 col(t.color(tok(&PLACEHOLDER_C, "component.field.placeholder"))),
                 track,
+                &fig,
             );
         }
     } else {
         let ink = col(t.color(tok(&TEXT_C, "component.field.text")));
         let sel_fill = col(t.color(tok(&SEL_C, "component.field.selection")));
         let sel_ink = col(t.color(tok(&SEL_TEXT_C, "component.field.selection_text")));
-        // The selection wash first, under its own ink.
-        if let (Some(_), Some((xa, xb))) = (sel_disp, sel_x) {
-            ctx.dl.rect(x0 + xa, ty, xb - xa, line_h, sel_fill);
+        // The selection wash first, under its own ink. Its ends are the
+        // cuts, which is where the runs below start and stop — one set
+        // of numbers for the wash and the glyphs it sits under.
+        if sel_disp.is_some() {
+            ctx.dl.rect(x0 + split_x.0, ty, split_x.1 - split_x.0, line_h, sel_fill);
         }
-        // The runs: plain / selected / plain, or around the preedit.
-        let mut runs: Vec<(usize, usize, Color, bool)> = Vec::new();
-        if let Some((a, b)) = sel_disp {
-            runs.push((0, a, ink, false));
-            runs.push((a, b, sel_ink, false));
-            runs.push((b, disp.len(), ink, false));
+        // The runs: plain / selected / plain, or around the preedit, or
+        // — when there is neither — the whole line as the middle one.
+        // Each starts where the last one ENDED, at the widths measured
+        // above; re-measuring the prefix here is what would let the
+        // drawn line and the measured line part company under a box.
+        let mut runs = [
+            (0, cut_a, 0.0, ink, false),
+            (cut_a, cut_b, split_x.0, ink, false),
+            (cut_b, disp.len(), split_x.1, ink, false),
+        ];
+        if sel_disp.is_some() {
+            runs[1].3 = sel_ink;
         } else if !pre_disp.is_empty() {
-            let p0 = before.len();
-            let p1 = p0 + pre_disp.len();
-            let pre_ink = col(t.color(tok(&PRE_C, "component.field.preedit")));
-            runs.push((0, p0, ink, false));
-            runs.push((p0, p1, pre_ink, true));
-            runs.push((p1, disp.len(), ink, false));
-        } else {
-            runs.push((0, disp.len(), ink, false));
+            runs[1].3 = col(t.color(tok(&PRE_C, "component.field.preedit")));
+            runs[1].4 = true;
         }
-        for (a, b, run_ink, is_pre) in runs {
+        for (a, b, at, run_ink, is_pre) in runs {
             if a >= b {
                 continue;
             }
-            let rx = x0 + ctx.fonts.measure(FONT_UI, px, &disp[..a], track);
-            ctx.dl.text(ctx.fonts, FONT_UI, px, rx, ty, &disp[a..b], run_ink, track);
+            let rx = x0 + at;
+            ctx.dl.text_fig(ctx.fonts, face, px, rx, ty, &disp[a..b], run_ink, track, &fig);
             if is_pre {
                 // The composition underline, `field.preedit_underline`
-                // thick, in the composition's own ink.
+                // thick, in the composition's own ink and exactly as
+                // wide as the run it belongs to — the two cuts again.
                 let ul = t.px(tok(&PRE_UL, "field.preedit_underline")).max(0.0);
                 if ul > 0.0 {
-                    let w = ctx.fonts.measure(FONT_UI, px, &disp[a..b], track);
-                    let pre_ink = col(t.color(tok(&PRE_C, "component.field.preedit")));
-                    ctx.dl.rect(rx, ty + line_h - ul, w, ul, pre_ink);
+                    ctx.dl.rect(rx, ty + line_h - ul, split_x.1 - split_x.0, ul, run_ink);
                 }
             }
         }
@@ -1068,10 +1183,14 @@ pub fn draw(
             let gw = match caret_shape() {
                 CaretShape::Bar => cw,
                 _ => {
-                    let g = disp[caret_disp.min(disp.len())..].graphemes(true).next();
-                    match g {
-                        Some(g) => ctx.fonts.measure(FONT_UI, px, g, track),
-                        None => ctx.fonts.measure(FONT_UI, px, " ", track),
+                    // Measured from the caret ONWARDS rather than from
+                    // the grapheme alone: a boxed character is boxed by
+                    // what stands beside it, and the block sits over
+                    // the glyph as the line drew it.
+                    let rest = &disp[caret_disp.min(disp.len())..];
+                    match rest.graphemes(true).next() {
+                        Some(g) => pen_to(ctx.fonts, face, px, rest, g.len(), track, &fig),
+                        None => pen_to(ctx.fonts, face, px, " ", 1, track, &fig),
                     }
                 }
             };
@@ -1114,20 +1233,39 @@ pub fn hit(ctx: &mut Ctx, r: Rect, model: &InputModel, x: f32) -> usize {
     static ROLE: OnceLock<TokenId> = OnceLock::new();
     let t = theme::resolved();
     let role = ui::bound_role(&ROLE, "field.role");
-    let px = role.px(ctx, ctx.ui_font_scale);
+    // The measuring twin of the draw above, so the same 1.0 — and the
+    // same face and the same figure box, because this walk has to land
+    // on the glyphs that walk drew. A click measured in one family and
+    // answered against a line drawn in another puts the caret a word
+    // away from the pointer.
+    let px = role.px(ctx, 1.0);
     let track = role.tracking_px(px);
+    let face = role.font();
+    let fig = role.figures(ctx.fonts, face, px);
     let pad = t.px(tok(&PAD_X, "field.pad_x")).max(0.0);
     let pos = x - (r.x + pad) + model.scroll_px;
     let mask = model.mask.then(mask_char);
+    // The DISPLAY string, walked with its neighbours: a masked field is
+    // a row of one glyph, and a boxed character is boxed by what stands
+    // beside it, which a grapheme measured on its own cannot know.
+    let disp = shown(model.value(), mask);
+    let mut walk = with_neighbours(&disp);
     let mut acc = 0.0;
     for (i, g) in model.value().grapheme_indices(true) {
-        let w = match mask {
-            Some(c) => {
-                let mut buf = [0u8; 4];
-                ctx.fonts.measure(FONT_UI, px, c.encode_utf8(&mut buf), track)
-            }
-            None => ctx.fonts.measure(FONT_UI, px, g, track),
+        // One display char per grapheme under a mask, the grapheme's
+        // own otherwise — the two strings agree grapheme for grapheme
+        // by construction (`shown`).
+        let n = match mask {
+            Some(_) => 1,
+            None => g.chars().count(),
         };
+        let mut w = 0.0;
+        for _ in 0..n {
+            match walk.next() {
+                Some(c) => w += step(ctx.fonts, face, px, c, track, &fig),
+                None => break,
+            }
+        }
         if pos < acc + w * 0.5 {
             return i;
         }
@@ -1139,8 +1277,195 @@ pub fn hit(ctx: &mut Ctx, r: Rect, model: &InputModel, x: f32) -> usize {
 // ---------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::draw::{DrawCmd, DrawList};
+    use crate::font::FONT_MONO;
+    use crate::pointer::Pointer;
+    use std::path::{Path, PathBuf};
+
+    // -------------------------------------------------------- face probe
+    //
+    // The three objects of this batch — the field, the toaster and the
+    // tooltip — all have to answer one question: did the run reach the
+    // draw list in the face its ROLE names, and does it move when a
+    // theme moves the role? The question is answered the same way in
+    // each, so the harness is written ONCE, here, and used by the other
+    // two: a second copy is a second definition of what counts as proof.
+
+    /// Every text command `f` sent to the draw list — the whole command,
+    /// so the FACE SLOT and the FIGURE ADVANCE a run was made under are
+    /// read from the register rather than guessed at from the vertices.
+    /// The register holds what the call asked for, which is the claim
+    /// under test, and holds it even where the atlas rasterised nothing.
+    pub(crate) fn drawn_runs(f: impl FnOnce(&mut Ctx)) -> Vec<DrawCmd> {
+        crate::draw::arm_cmds();
+        let mut dl = DrawList::new();
+        let mut fonts = crate::font::FontSystem::new();
+        {
+            let mut ctx = Ctx {
+                dl: &mut dl,
+                fonts: &mut fonts,
+                w: 1920.0,
+                h: 1080.0,
+                // Well past every delay and unfold in the master, so an
+                // object is measured at rest rather than mid-open.
+                t: 1000.0,
+                mouse: Pointer::new(-1.0, -1.0),
+                term_font_scale: 1.0,
+                ui_font_scale: 1.0,
+                panel_scale: 1.0,
+                focus: None,
+                tips: None,
+            };
+            f(&mut ctx);
+        }
+        dl.cmds().iter().filter(|c| matches!(c, DrawCmd::Text { .. })).cloned().collect()
+    }
+
+    // A `drawn_text` — [`drawn_runs`] narrowed to (slot, string) pairs —
+    // stood here for the one caller that wanted the face alone. Every
+    // child of this harness now reads the whole command (the tooltip was
+    // the last to, for the figure advance its lines were broken under),
+    // and a convenience with no callers is a claim nobody makes. The
+    // panel container's copy of the harness keeps its own, which has
+    // three.
+
+    /// What one child run reported.
+    pub(crate) struct Measured {
+        /// The slot the run under test was drawn in.
+        pub face: u8,
+        /// The role word the binding stood at in that run.
+        pub role: String,
+        /// The whole child output, for a failure message worth reading.
+        pub log: String,
+    }
+
+    impl Measured {
+        /// Any other `KEY=value` the child chose to print — the figure
+        /// advance, the caret's x. Read out of the log rather than
+        /// added to this struct, so one more measurement is one more
+        /// `println` in one child and not a change every child follows.
+        pub(crate) fn field(&self, key: &str) -> String {
+            read_field(&self.log, key, "the child")
+        }
+    }
+
+    /// One `KEY=value` out of a child's output. Anywhere in the line and
+    /// not only at its head: the test harness writes `test <name> ... `
+    /// without a newline, so a child's first `println` lands on the tail
+    /// of the harness's own line.
+    fn read_field(log: &str, key: &str, who: &str) -> String {
+        log.lines()
+            .find_map(|l| l.split_once(key).map(|(_, v)| v))
+            .unwrap_or_else(|| panic!("{who} printed no {key} line:\n{log}"))
+            .trim()
+            .to_string()
+    }
+
+    /// The role word a `*_role` binding stands at — the name whose
+    /// `type.<name>.face` a fixture has to move. READ rather than
+    /// written down, so these tests keep measuring the right role when
+    /// the master repoints a binding.
+    pub(crate) fn role_word(binding: &str) -> String {
+        crate::ui::theme_word(theme::id(binding).unwrap_or(TokenId::MISSING))
+    }
+
+    /// The lines a child prints so its parent can read the run back.
+    pub(crate) fn report(role: &str, face: u8, drawn: &[(u8, String)]) {
+        println!("ROLE={role}");
+        println!("FACE={face}");
+        for (f, s) in drawn {
+            println!("drew {f} \"{s}\"");
+        }
+    }
+
+    /// Asserts every text of a run reached the draw list in `want`.
+    pub(crate) fn all_in(drawn: &[(u8, String)], want: u8) {
+        assert!(!drawn.is_empty(), "nothing was drawn at all — the run proves nothing");
+        for (face, text) in drawn {
+            assert_eq!(
+                *face, want,
+                "\"{text}\" reached the draw list in slot {face}; its role names {want}"
+            );
+        }
+    }
+
+    /// Runs one `#[ignore]`d child test in a PROCESS of its own, under
+    /// `theme`, and reads back what it drew.
+    ///
+    /// A process of its own because the resolved theme is process-wide
+    /// (`theme::ACTIVE`) and `cargo test` runs a binary's tests in
+    /// parallel threads: a test that swapped the theme in-process would
+    /// decide what every other test in the suite was measuring. The
+    /// child is this same test binary re-exec'd — no fixture crate and
+    /// no second target directory for anybody else's build to trip over
+    /// — with `NACELLE_THEME_PATH` pointing at the theme under test.
+    pub(crate) fn measure_in_child(test: &str, theme_path: Option<&Path>) -> Measured {
+        let exe = std::env::current_exe().expect("the test binary must be locatable");
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args(["--exact", test, "--ignored", "--nocapture", "--test-threads=1"]);
+        match theme_path {
+            Some(p) => cmd.env("NACELLE_THEME_PATH", p),
+            None => cmd.env_remove("NACELLE_THEME_PATH"),
+        };
+        let out = cmd.output().expect("the child measuring process must start");
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{test} failed in its own process:\n{log}");
+        Measured {
+            face: read_field(&log, "FACE=", test).parse().expect("FACE= is a slot number"),
+            role: read_field(&log, "ROLE=", test),
+            log,
+        }
+    }
+
+    /// A theme that inherits the shipped master and moves ONE role's
+    /// face to `mono` — the whole fixture, so nothing else can explain a
+    /// change of slot.
+    pub(crate) fn mono_theme(tag: &str, role: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("nacelle-face-{tag}-{}.theme", std::process::id()));
+        std::fs::write(
+            &path,
+            format!(
+                "[meta]\nschema = 1\nname = \"face {tag}\"\nbase = \"default\"\n\n\
+                 [type]\n{role}.face = mono\n"
+            ),
+        )
+        .expect("the fixture theme must be writable");
+        path
+    }
+
+    /// The whole claim for one object: the run went to the face its role
+    /// names under the MASTER, a theme that moves that role's face to
+    /// mono moves the run with it, and the two runs are not the same
+    /// slot — which is the part that a `FONT_UI` written at the call
+    /// site cannot satisfy however the master happens to be wired.
+    pub(crate) fn face_follows_the_theme(tag: &str, child: &str) {
+        let master = measure_in_child(child, None);
+        let fixture = mono_theme(tag, &master.role);
+        let moved = measure_in_child(child, Some(&fixture));
+        let _ = std::fs::remove_file(&fixture);
+        assert_eq!(
+            moved.role, master.role,
+            "the fixture changed which ROLE is bound, not which face it is set in"
+        );
+        assert_eq!(
+            moved.face, FONT_MONO,
+            "a theme put `type.{}.face = mono` and {tag} drew slot {} instead:\n{}",
+            master.role, moved.face, moved.log
+        );
+        assert_ne!(
+            master.face, moved.face,
+            "{tag} drew the same slot under both themes ({}), so nothing was proved: \
+             the face is still being chosen at the call site",
+            master.face
+        );
+    }
 
     fn ev(key: Key, mods: Mods) -> KeyEv {
         KeyEv { key, mods, repeat: false, text: None }
@@ -1563,5 +1888,256 @@ mod tests {
         let mut c = ev(Key::Char('c'), Mods::CTRL);
         c.text = Some("\u{3}".to_string());
         assert_eq!(key_msg(&c), Some(InputMsg::Copy));
+    }
+
+    // ---- the type ladder reaches the field ---------------------------
+    //
+    // A field is the one object where the face is not only what the text
+    // LOOKS like: every x in it — the caret, the ends of a selection,
+    // the byte a click means — is the width of the text before it. Draw
+    // in one family and measure in another and the caret stands in the
+    // middle of a word; do it only under a theme that moved
+    // `type.field.face` and nobody can tell why.
+    //
+    // Two claims, measured apart: the run reaches the draw list in the
+    // face its role names, and the caret stands where the FIGURE BOX
+    // that role asked for puts it. The harness for both is at the head
+    // of this module.
+
+    /// A value that is nothing but figures and their punctuation: the
+    /// string §5.17's box moves and a proportional run leaves alone.
+    const VALUE: &str = "192.168.000.101";
+
+    /// The box the field is drawn in, wide enough that the value never
+    /// scrolls — a scrolled field would put the caret's x under
+    /// `scroll_px` as well, which is a second claim.
+    fn field_box() -> Rect {
+        Rect::new(40.0, 40.0, 480.0, 40.0)
+    }
+
+    /// A theme that inherits the master and turns the field role's
+    /// figure box on. [`mono_theme`] is its twin for the face; a
+    /// fixture states ONE thing at a time, so that one thing is what a
+    /// failure blames.
+    fn boxed_theme(role: &str) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("nacelle-box-field-{}.theme", std::process::id()));
+        std::fs::write(
+            &path,
+            format!(
+                "[meta]\nschema = 1\nname = \"box field\"\nbase = \"default\"\n\n\
+                 [type]\n{role}.tabular = true\n"
+            ),
+        )
+        .expect("the fixture theme must be writable");
+        path
+    }
+
+    /// The typed text is set in the face `field.role` names, and follows
+    /// a theme that moves it.
+    #[test]
+    fn the_typed_text_is_set_in_the_face_its_role_names() {
+        face_follows_the_theme("field", "object::text_input::tests::child_field_face");
+    }
+
+    /// The caret is measured with what the text is DRAWN with. The
+    /// master ships the field's role proportional, so the box is off and
+    /// the caret stands at the proportional width; a theme that turns
+    /// `tabular` on has to move it, and the child checks it lands on the
+    /// boxed measure exactly.
+    #[test]
+    fn the_caret_stands_where_the_box_its_role_asked_for_puts_it() {
+        const CHILD: &str = "object::text_input::tests::child_field_face";
+        let master = measure_in_child(CHILD, None);
+        let plain_advance: f32 = master.field("ADVANCE=").parse().expect("a number");
+        let plain_caret: f32 = master.field("CARET=").parse().expect("a number");
+        assert_eq!(
+            plain_advance, 0.0,
+            "the master ships `type.{}.tabular = false` and the run was boxed anyway",
+            master.role
+        );
+        let fixture = boxed_theme(&master.role);
+        let boxed = measure_in_child(CHILD, Some(&fixture));
+        let _ = std::fs::remove_file(&fixture);
+        let advance: f32 = boxed.field("ADVANCE=").parse().expect("a number");
+        let caret: f32 = boxed.field("CARET=").parse().expect("a number");
+        assert!(
+            advance > 0.0,
+            "a theme put `type.{}.tabular = true` and the field drew proportionally \
+             anyway:\n{}",
+            master.role,
+            boxed.log
+        );
+        assert!(
+            (caret - plain_caret).abs() > 0.01,
+            "the box the theme turned on did not move the caret ({caret} either way): \
+             the field is measuring something other than what it draws"
+        );
+    }
+
+    /// Both tests' child: one focused field holding [`VALUE`], drawn for
+    /// real, reporting the slot its run went to, the figure advance it
+    /// was stepped by, and where the caret landed.
+    #[test]
+    #[ignore = "measured in a process of its own by the tests above"]
+    fn child_field_face() {
+        static PROBE: OnceLock<TokenId> = OnceLock::new();
+        let mut model = InputModel::new();
+        model.set_value(VALUE);
+        let mut caret = f32::NAN;
+        let mut boxed = f32::NAN;
+        let mut plain = f32::NAN;
+        let cmds = drawn_runs(|ctx| {
+            let style = InputStyle { focused_fallback: true, ..InputStyle::default() };
+            let out = draw(ctx, field_box(), &mut model, FocusId::of("probe"), &style);
+            // What the drawing resolved, resolved again beside it: the
+            // caret is claimed to be the width of the whole value in
+            // the role's face UNDER the role's box, and `plain` is the
+            // same width without one — the negative control, which is
+            // what makes the equality above worth asserting.
+            let role = ui::bound_role(&PROBE, "field.role");
+            let px = role.px(ctx, 1.0);
+            let track = role.tracking_px(px);
+            let face = role.font();
+            let fig = role.figures(ctx.fonts, face, px);
+            boxed = ctx.fonts.measure_fig(face, px, VALUE, track, &fig);
+            plain = ctx.fonts.measure(face, px, VALUE, track);
+            let pad = theme::resolved().px(theme::id("field.pad_x").unwrap_or(TokenId::MISSING));
+            let left = field_box().x + pad;
+            caret = out.caret.expect("a focused field carries its caret").x - left;
+            // The CLICK path walks the same line: a pointer a hair past
+            // a grapheme's left edge means that grapheme's offset. The
+            // edges are `pen_to`'s, which is what the glyphs were laid
+            // out by, so a `hit` that measured in another face or
+            // without the role's box would answer the wrong byte here —
+            // and would answer it only under the theme that turns one
+            // on, which is the failure nobody could trace.
+            for (i, _) in VALUE.grapheme_indices(true) {
+                let at = left + pen_to(ctx.fonts, face, px, VALUE, i, track, &fig) + 0.1;
+                assert_eq!(
+                    hit(ctx, field_box(), &model, at),
+                    i,
+                    "a click at the left edge of byte {i} of {VALUE:?} landed elsewhere"
+                );
+            }
+        });
+        let (font, advance, text) = match cmds.first() {
+            Some(DrawCmd::Text { font, tabular, text, .. }) => (*font, *tabular, text.clone()),
+            _ => panic!("the field drew no text at all: {cmds:?}"),
+        };
+        assert_eq!(text, VALUE, "the field drew something other than its value");
+        let drawn = [(font, text)];
+        let role = role_word("field.role");
+        all_in(&drawn, ui::role(&role).font());
+        assert!(
+            (caret - boxed).abs() < 0.01,
+            "the caret stands at {caret} and the text it follows is {boxed} wide in the \
+             face and box the role named: the field measures one line and draws another"
+        );
+        if advance > 0.0 {
+            assert!(
+                (boxed - plain).abs() > 0.01,
+                "the box is on and measures the same as no box at all, so \"{VALUE}\" \
+                 cannot witness this claim"
+            );
+        }
+        println!("ADVANCE={advance}");
+        println!("CARET={caret}");
+        report(&role, font, &drawn);
+    }
+
+    /// A field that loses the focus puts its line back where an
+    /// unfocused line stands. The runs are placed from the CUTS, the
+    /// cuts are where the selection (or a composition) divides the
+    /// line, and an unfocused field draws neither — so the focus is
+    /// part of what the measure cache is keyed on. Left out of the key,
+    /// tabbing away from a field with a selection redrew the whole line
+    /// at the offset the selection used to start at, and it did it
+    /// without a single edit to blame.
+    #[test]
+    fn a_field_that_loses_the_focus_puts_its_line_back() {
+        let mut model = InputModel::new();
+        model.set_value(VALUE);
+        model.apply(InputMsg::Move(Motion::Home, false));
+        // A selection that starts INSIDE the line: one starting at its
+        // head cuts at zero, and a stale zero is the same number as a
+        // fresh one — which is exactly the run that would prove nothing.
+        for _ in 0..4 {
+            model.apply(InputMsg::Move(Motion::Right, false));
+        }
+        for _ in 0..4 {
+            model.apply(InputMsg::Move(Motion::Right, true));
+        }
+        assert_eq!(model.selection(), Some((4, 8)), "the field holds a selection to cut on");
+        let starts = |model: &mut InputModel, focused: bool| -> Vec<f32> {
+            let style = InputStyle { focused_fallback: focused, ..InputStyle::default() };
+            drawn_runs(|ctx| {
+                draw(ctx, field_box(), model, FocusId::of("probe"), &style);
+            })
+            .iter()
+            .map(|c| match c {
+                DrawCmd::Text { at, .. } => at[0],
+                _ => unreachable!("drawn_runs answers text commands"),
+            })
+            .collect()
+        };
+        let cut = starts(&mut model, true);
+        assert_eq!(cut.len(), 3, "a selection inside the line is three runs");
+        assert!(cut[1] > cut[0] + 0.01 && cut[2] > cut[1] + 0.01, "the runs stand apart: {cut:?}");
+        // The focus leaves. Nothing was edited, so only the CUT changed.
+        let left = starts(&mut model, false);
+        assert_eq!(left.len(), 1, "an unfocused field draws its line whole");
+        // A field that never had the focus is the reference: same value,
+        // same box, no cut ever taken.
+        let mut fresh = InputModel::new();
+        fresh.set_value(VALUE);
+        let never = starts(&mut fresh, false);
+        assert!(
+            (left[0] - never[0]).abs() < 0.01,
+            "the line starts at {} after losing the focus and at {} without ever having \
+             had it: the run is placed at the cut of a selection that is no longer drawn",
+            left[0],
+            never[0]
+        );
+    }
+
+    /// [`pen_to`] is [`FontSystem::measure_fig`] stopped part way: the
+    /// same rule, so the same answer for a whole run. If these ever
+    /// part, every x in the view is measured by a ruler the glyphs do
+    /// not follow.
+    #[test]
+    fn the_pen_walk_is_the_font_layers_ruler() {
+        let mut fonts = FontSystem::new();
+        let px = 16.0;
+        let track = 0.4;
+        let set = crate::ui::figures(&mut fonts, crate::font::FONT_UI, px, true);
+        assert!(set.is_on(), "the master states `num.tabular_set`, so a box is measurable");
+        for fig in [Figures::NONE, set] {
+            for s in [VALUE, "21:57:30", "abc def", ""] {
+                let want = fonts.measure_fig(crate::font::FONT_UI, px, s, track, &fig);
+                let got = pen_to(&mut fonts, crate::font::FONT_UI, px, s, s.len(), track, &fig);
+                assert!(
+                    (want - got).abs() < 0.001,
+                    "boxed={} {s:?}: the walk says {got}, the font layer says {want}",
+                    fig.is_on()
+                );
+            }
+        }
+        // And it STOPS where it is told: the pen at a cut plus the rest
+        // of the run is the whole run, which is the arithmetic the three
+        // drawn runs rest on.
+        let cut = "192.168.".len();
+        let head = pen_to(&mut fonts, crate::font::FONT_UI, px, VALUE, cut, track, &set);
+        let tail = fonts.measure_fig(crate::font::FONT_UI, px, &VALUE[cut..], track, &set);
+        let whole = fonts.measure_fig(crate::font::FONT_UI, px, VALUE, track, &set);
+        assert!(head > 0.0 && tail > 0.0);
+        // The two halves need NOT add up to the whole — a boxed full
+        // stop is boxed by its neighbours, and the cut takes one away —
+        // and that is exactly why the view measures its runs one by one
+        // instead of measuring the prefix.
+        assert!(
+            head + tail >= whole - 0.001,
+            "cutting a run cannot make it narrower than it was whole"
+        );
     }
 }

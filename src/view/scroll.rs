@@ -1043,7 +1043,9 @@ mod tests {
         assert!(p.glide_halflife_ms > 0.0, "and a theme that turns it on has a half-life");
         assert_eq!(p.settle_easing, Easing::EaseOut);
         let l = ScrollbarLook::from_theme();
-        assert_eq!(l.mode, ScrollbarMode::Overlay);
+        // Inset since 2026-08-16, the owner's ask: the bar stands BESIDE
+        // the content, and a bar over the controls read as a defect.
+        assert_eq!(l.mode, ScrollbarMode::Inset);
         assert_eq!(l.edge, ScrollbarEdge::Right);
         assert!(l.auto_hide);
         assert!(l.fade_ms > 0.0);

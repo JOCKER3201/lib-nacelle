@@ -27,6 +27,26 @@
 //! read a file, open a socket or run a program, because no such function
 //! exists in its world.
 //!
+//! A script does not choose type, either. The ELEMENT KIND chooses the
+//! role, the role carries the size, the face and the weight, and every
+//! one of those bindings is in the master — `script.rows_value_role` and
+//! its neighbours. A call may say WHAT a string is, never how big it is:
+//!
+//! ```text
+//! rows([["IPV4", "10.0.0.4"]])                   // a row is a row
+//! runs([#{ t: "LOAD", role: "label" },           // a label
+//!       #{ t: "0.42", role: "reading" }], "left")// a measured quantity
+//! ```
+//!
+//! `role` there is a KIND from the master's closed `script.kind_*_role`
+//! vocabulary, not a `type.*` role. It used to be the latter, and that is
+//! how four panels of one kind came to show their value at three
+//! different sizes: `rows(…, #{ value_role: "data" })` was the only way
+//! to ask for tabular figures before `type.<role>.tabular` was
+//! implemented, and it bought them at 1.87u against the 3.25u every other
+//! panel used — the value role is 74% taller than the one it settled
+//! for, and no theme file could undo the difference.
+//!
 //! `view` is the second constant in that scope and the answer to a
 //! question the sandbox raises: if a script is a pure function of its
 //! data, where does the sort the user clicked live? Not in the script —
@@ -46,12 +66,12 @@ use crate::ui::{self, Align};
 use crate::view::{self, Hit};
 use crate::widget::{Action, DragPhase, Sizing};
 use crate::{Host, Widget};
-use crate::font::FONT_UI;
 use crate::telemetry::{fmt_bytes, fmt_rate, fmt_uptime};
 use crate::theme::{self, Color, TokenId};
 use crate::{Ctx, Rect};
 use rhai::{Array, Dynamic, Engine, Map, Scope, AST};
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -126,9 +146,14 @@ fn engine() -> Engine {
         m.insert("rows".into(), Dynamic::from_array(rows));
         m
     });
-    // rows(items, #{ label_role, value_role, columns, label_width, align,
-    // density }) — u2 §3.1 #4. An item may be [label, value] or
-    // [label, value, severity].
+    // rows(items, #{ columns, label_width, align, density }) — u2 §3.1
+    // #4. An item may be [label, value] or [label, value, severity].
+    //
+    // No `label_role` and no `value_role`: a row's two halves are set in
+    // whatever `script.rows_label_role` and `script.rows_value_role`
+    // name, on every panel, in every widget. The options are gone rather
+    // than deprecated — an ignored option is a script that still reads as
+    // though it chose something.
     engine.register_fn("rows", move |rows: Array, opts: Map| {
         let mut m = Map::new();
         m.insert("kind".into(), "rows".into());
@@ -153,9 +178,15 @@ fn engine() -> Engine {
         m.insert("size".into(), Dynamic::from_float(size));
         m
     });
-    // text(content, align, #{ role, severity }) — u2 §3.1 #2. The free
-    // size becomes a role name; the deprecated size form is mapped to the
-    // nearest role at draw time.
+    // text(content, align, #{ role, severity }) — u2 §3.1 #2. `role` is
+    // a KIND from the master's `script.kind_*_role` vocabulary — "date",
+    // "reading", "label" — and never a `type.*` role: the theme decides
+    // what a date is set in, here and in every other widget at once.
+    //
+    // The option is spelt `role` and not `kind` because an element map
+    // already carries its own `kind` — "text" — and `merge_opts` keeps
+    // what the element claimed, so a `#{ kind: … }` option would be
+    // dropped in silence.
     engine.register_fn("text", move |content: &str, align: &str, opts: Map| {
         let mut m = Map::new();
         m.insert("kind".into(), "text".into());
@@ -166,10 +197,17 @@ fn engine() -> Engine {
     });
     // runs(items, align) — u2 §3.1 #3, NEW: one line of styled runs
     // sharing a baseline, aligned as a unit. Each item is
-    // #{ t, role, severity, blink, align }; blink names a motion.* effect
-    // and drives the run's ALPHA, never its glyph (I13). An item's
-    // align: "right" pins it to the line's right end — u2 §2.5's
-    // temperature run — while the rest align as one unit.
+    // #{ t, role, severity, blink, align }, where `role` is a KIND from
+    // `script.kind_*_role` — an item says it is a label or a reading and
+    // the theme sets it; blink names a motion.* effect and drives the
+    // run's ALPHA, never its glyph (I13). An item's align: "right" pins
+    // it to the line's right end — u2 §2.5's temperature run — while the
+    // rest align as one unit.
+    //
+    // The gap between two runs is `script.runs_gap`. A script must not
+    // put a run of spaces between two readings to make one: that spends
+    // the theme's gap AND a space of the face's own width, and the width
+    // of a space is not a number a widget is allowed to know.
     engine.register_fn("runs", move |items: Array| {
         let mut m = Map::new();
         m.insert("kind".into(), "runs".into());
@@ -355,8 +393,10 @@ fn engine() -> Engine {
         m.insert("cells".into(), Dynamic::from_array(cells));
         m
     });
-    // columns(cells, #{ label_role, value_role, align, dividers }) — u2
-    // §3.1 #5. A cell may be [label, value] or [label, value, severity].
+    // columns(cells, #{ align, dividers }) — u2 §3.1 #5. A cell may be
+    // [label, value] or [label, value, severity]. Its two halves are set
+    // in `script.columns_label_role` and `script.columns_value_role`, for
+    // the reason `rows` above states.
     engine.register_fn("columns", move |cells: Array, opts: Map| {
         let mut m = Map::new();
         m.insert("kind".into(), "columns".into());
@@ -672,16 +712,146 @@ fn tree_node(v: &Dynamic, depth: usize) -> view::tree::MemNode {
     view::tree::MemNode { row, children }
 }
 
-/// The role an element names for itself, if any. An unknown role name
-/// warns once inside [`ui::role`] and draws NOTHING: there is no spare
-/// role, so a script naming one the theme does not have leaves a hole
-/// rather than a plausible line of `body` nobody asked for.
-fn role_opt(m: &Map, key: &str) -> Option<ui::Role> {
-    let word = str_of(m, key);
-    if word.is_empty() {
-        None
+/// The type role one KIND word stands for, through the master's
+/// `script.kind_<word>_role` binding.
+///
+/// This is the whole of a script's say over type, and it is a say about
+/// CONTENT: a run is a label, a reading, the clock. How big a reading is,
+/// in which face and at which weight, is one line of the master and is
+/// the same line for every widget on the screen.
+///
+/// It used to be [`ui::role`] on the script's own word, which let a call
+/// name any of the twenty-four type roles — and that is how the value
+/// half of four panels of the same kind came to be set at three different
+/// sizes. The vocabulary is CLOSED by the master: a word it does not bind
+/// warns once and draws nothing, because there is no spare role and a
+/// misspelt kind must show as a hole rather than as a plausible line
+/// nobody chose (§5.16).
+fn kind_role(word: &str) -> ui::Role {
+    thread_local! {
+        /// One entry per kind a script has ever named. The token id is
+        /// what is cached and not the role: the id is fixed for the life
+        /// of the process — the schema is stage 1 of the cascade and does
+        /// not move — while the WORD behind it changes when a theme
+        /// re-points the binding, so that is read on every draw, exactly
+        /// as [`ui::bound_role`] reads its own.
+        static IDS: RefCell<HashMap<String, Option<TokenId>>> = RefCell::new(HashMap::new());
+    }
+    let known = IDS.with(|c| c.borrow().get(word).copied());
+    let id = match known {
+        Some(id) => id,
+        None => {
+            let id = theme::id(&format!("script.kind_{word}_role"))
+                // A word that is not a kind may still be a `type.*` ROLE:
+                // that is what every script in this repository said before
+                // the vocabulary closed, and what an addon outside this
+                // repository still says. See [`kind_for_legacy_role`].
+                .or_else(|| kind_for_legacy_role(word));
+            if id.is_none() {
+                // Once per word, on first sight — a broken script draws
+                // sixty times a second and must not say this that often.
+                ui::warn_once(
+                    &format!("script.kind:{word}"),
+                    &format!(
+                        "a script names the kind \"{word}\", which no \
+                         script.kind_{word}_role binds — it is drawn in \
+                         script.text_role. Name what the string IS: {}",
+                        kind_vocabulary()
+                    ),
+                );
+            }
+            IDS.with(|c| c.borrow_mut().insert(word.to_string(), id));
+            id
+        }
+    };
+    match id {
+        Some(id) => ui::role(&ui::theme_word(id)),
+        // The word named neither a kind nor a role the master binds. The
+        // line is still DRAWN, in the role a call naming nothing gets:
+        // this is a repository of addons, third-party files are the point,
+        // and a widget that silently loses its text on the day the
+        // vocabulary closed is a worse answer than one whose text is a
+        // size somebody chose. The rule the deprecated `text(content,
+        // align, size)` form already follows, applied to the other half of
+        // the same migration.
+        None => ui::bound_role(&FALLBACK_TEXT_ROLE, "script.text_role"),
+    }
+}
+
+/// The binding a script's word falls back to when it names no kind.
+static FALLBACK_TEXT_ROLE: OnceLock<TokenId> = OnceLock::new();
+
+/// The KIND whose master binding already points at the `type.*` role
+/// `word` names, if there is one.
+///
+/// The migration path for an addon outside this tree. Every script in this
+/// repository used to name type roles directly — `#{ role: "data" }`,
+/// `rows(…, #{ value_role: "data" })` — and the vocabulary that replaced
+/// them is five kinds. A third-party script still holding the old word
+/// would otherwise resolve to nothing and draw nothing, which is a widget
+/// going blank on an upgrade.
+///
+/// The mapping is DERIVED, never tabulated: the master already says
+/// `kind_reading_role = value`, so a script asking for `value` is asking
+/// for the reading kind and can be told so by name. Nothing here is a
+/// look, and a theme that re-points a binding re-points this with it —
+/// which a table of twenty pairs in this file could not do.
+fn kind_for_legacy_role(word: &str) -> Option<TokenId> {
+    // Not a role name at all: `kind_role`'s own sentinel, and any word
+    // with a space in it, which no `type.*` role has.
+    if word.is_empty() || word.contains(' ') {
+        return None;
+    }
+    for kind in KINDS {
+        let Some(id) = theme::id(&format!("script.kind_{kind}_role")) else { continue };
+        if ui::theme_word(id) == word {
+            ui::warn_once(
+                &format!("script.legacy:{word}"),
+                &format!(
+                    "a script names the type role \"{word}\" where a KIND belongs — \
+                     drawn as \"{kind}\", which is what the master binds to it. \
+                     Write #{{ role: \"{kind}\" }}: a call names what a string IS, \
+                     and the master decides how big it is"
+                ),
+            );
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// The kinds this file knows to ask the master about.
+///
+/// Five words, and they are the master's — `script.kind_<word>_role` is
+/// the binding, so this list is the set of bindings a lookup by kind can
+/// hit. It is spelled out because the schema publishes tokens by NAME and
+/// there is no way to enumerate "every key matching a pattern"; a kind the
+/// master adds and this list does not carry still WORKS (the direct lookup
+/// in [`kind_role`] finds it), it simply cannot be reached by the legacy
+/// role name it replaced, which is the one path this list serves.
+const KINDS: [&str; 5] = ["clock", "date", "label", "reading", "text"];
+
+/// The kinds, for the warning that turns a script author away from role
+/// names. Built on the cold path only — this runs once per bad word.
+fn kind_vocabulary() -> String {
+    KINDS
+        .iter()
+        .filter(|k| theme::id(&format!("script.kind_{k}_role")).is_some())
+        .map(|k| format!("\"{k}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The role one `runs` item — or a `text` element, which is a line of one
+/// run — draws in: the kind it names, or `script.text_role` for a call
+/// that names none.
+fn run_role(m: &Map) -> ui::Role {
+    static TEXT_ROLE: OnceLock<TokenId> = OnceLock::new();
+    let kind = str_of(m, "role");
+    if kind.is_empty() {
+        ui::bound_role(&TEXT_ROLE, "script.text_role")
     } else {
-        Some(ui::role(&word))
+        kind_role(&kind)
     }
 }
 
@@ -702,54 +872,31 @@ fn theme_text_align() -> Align {
     }
 }
 
-/// The role a `text` element draws in. Three forms, in vocabulary order
-/// (u2 §3.1 #2): a named role; the deprecated free size, mapped to the
-/// NEAREST role on the type ladder (warned once); no styling at all,
-/// which defers to the `script.text_role` binding.
-fn text_role_of(ctx: &Ctx, m: &Map) -> ui::Role {
-    static TEXT_ROLE: OnceLock<TokenId> = OnceLock::new();
-    if let Some(role) = role_opt(m, "role") {
-        return role;
-    }
+/// The role a `text` element draws in: the kind it names, or the theme's
+/// `script.text_role` (u2 §3.1 #2).
+///
+/// The third form — `text(content, align, size)`, a raw multiplier on the
+/// panel's font px — used to be honoured by mapping the number to the
+/// nearest role on the type ladder. It is honoured no longer, and the
+/// mapping is gone with it: it was the last path by which a CALL decided
+/// how big something was, it landed wherever the ladder happened to sit
+/// under that theme, and a size chosen by arithmetic is a size no theme
+/// file can account for. The call still draws — in the bound role, warned
+/// once — because a script losing a line of text is worse than a script
+/// showing it at the theme's size.
+fn text_role_of(m: &Map) -> ui::Role {
     // The deprecated form is recognisable by carrying BOTH an alignment
     // and a size: the one-argument form stores only its default size.
-    if m.contains_key("size") && m.contains_key("align") {
+    if str_of(m, "role").is_empty() && m.contains_key("size") && m.contains_key("align") {
         ui::warn_once(
             "text.size",
-            "text(content, align, size) is deprecated — the size maps to the \
-             nearest type role; name a role instead: text(content, align, #{ role: \"…\" })",
+            "text(content, align, size) is deprecated and its size is IGNORED — a call \
+             does not choose a size. Name what the string is instead: \
+             text(content, align, #{ role: \"reading\" }); until then it is drawn in \
+             script.text_role",
         );
-        return nearest_role(ctx, ctx.font_px(1.0) * f32_of(m, "size", 1.0));
     }
-    ui::bound_role(&TEXT_ROLE, "script.text_role")
-}
-
-/// The content role whose resolved px sits closest to a deprecated free
-/// size. The ladder is §5.16's content roles — chrome roles (titles,
-/// buttons, badges) are not candidates: a `text` element is body copy or
-/// a display value, never chrome.
-fn nearest_role(ctx: &Ctx, target: f32) -> ui::Role {
-    const LADDER: [&str; 8] = [
-        "caption",
-        "data",
-        "display.date",
-        "body",
-        "value",
-        "value.large",
-        "display.hero",
-        "display.clock",
-    ];
-    let mut best = ui::role("body");
-    let mut best_d = f32::MAX;
-    for name in LADDER {
-        let r = ui::role(name);
-        let d = (r.px(ctx, 1.0) - target).abs();
-        if d < best_d {
-            best_d = d;
-            best = r;
-        }
-    }
-    best
+    run_role(m)
 }
 
 /// What a script's INTERACTIVE elements keep between frames.
@@ -990,7 +1137,7 @@ impl ScriptWidget {
 impl Widget for ScriptWidget {
     fn draw(&mut self, ctx: &mut Ctx, r: Rect, host: &Host) {
         let Some(elements) = self.elements(host) else { return };
-        self.views.begin(ctx.mouse);
+        self.views.begin(ctx.mouse.at());
         let mut pass = ViewPass {
             state: &mut self.views,
             generation: host.snap.generation,
@@ -1351,18 +1498,18 @@ fn rows_lines(m: &Map) -> usize {
 /// The tallest role on a `runs` line, at shrink 1 — the line's height is
 /// that px under the stack's text leading.
 fn runs_px(ctx: &Ctx, m: &Map) -> f32 {
-    static TEXT_ROLE: OnceLock<TokenId> = OnceLock::new();
     m.get("items")
         .and_then(|v| v.read_lock::<Array>())
         .map(|items| {
             items
                 .iter()
+                // The SAME resolver the draw uses: a line measured through
+                // one path and drawn through another is a line that clips
+                // the day the two disagree.
                 .map(|it| {
-                    let role = it
-                        .read_lock::<Map>()
-                        .and_then(|m| role_opt(&m, "role"))
-                        .unwrap_or_else(|| ui::bound_role(&TEXT_ROLE, "script.text_role"));
-                    role.px(ctx, 1.0)
+                    it.read_lock::<Map>()
+                        .map(|im| run_role(&im).px(ctx, 1.0))
+                        .unwrap_or(0.0)
                 })
                 .fold(0.0, f32::max)
         })
@@ -1434,10 +1581,10 @@ fn measure(ctx: &Ctx, maps: &[Map], met: &Metrics) -> (f32, usize) {
             "title" => {}
             "rows" => fixed += met.rows_line_h(m) * rows_lines(m) as f32,
             "text" => {
-                // The role decides the height; the deprecated free size
-                // reaches the same role the draw will (text_role_of), so
-                // measure and draw cannot disagree.
-                fixed += text_role_of(ctx, m).px(ctx, 1.0) * met.text_leading;
+                // The role decides the height, through the same resolver
+                // the draw uses (text_role_of), so measure and draw
+                // cannot disagree.
+                fixed += text_role_of(m).px(ctx, 1.0) * met.text_leading;
             }
             "runs" => fixed += runs_px(ctx, m) * met.text_leading,
             // A `list` that does not scroll is exactly its rows, the way
@@ -1692,10 +1839,14 @@ fn draw_stack(
                 let row_h = met.rows_line_h(m);
                 let h = row_h * rows_lines(m) as f32;
                 let st = ui::RowsStyle {
-                    label_role: role_opt(m, "label_role")
-                        .unwrap_or_else(|| ui::bound_role(&LABEL_ROLE, "script.rows_label_role")),
-                    value_role: role_opt(m, "value_role")
-                        .unwrap_or_else(|| ui::bound_role(&VALUE_ROLE, "script.rows_value_role")),
+                    // The two halves of a row are the theme's, on every
+                    // panel: a `rows` line is one KIND of thing, so it is
+                    // set at one size, and the call has no say. The
+                    // options that used to overrule these were how the
+                    // same line came to read at 1.77u in one widget and
+                    // 3.25u in the next.
+                    label_role: ui::bound_role(&LABEL_ROLE, "script.rows_label_role"),
+                    value_role: ui::bound_role(&VALUE_ROLE, "script.rows_value_role"),
                     columns: int_of(m, "columns", 1).max(1) as usize,
                     label_width: if str_of(m, "label_width") == "max" {
                         ui::LabelWidth::Max
@@ -1710,9 +1861,19 @@ fn draw_stack(
             }
             "text" => {
                 let content = str_of(m, "content");
-                let role = text_role_of(ctx, m);
+                let role = text_role_of(m);
                 let fpx = role.px(ctx, scale);
                 let spacing = role.tracking_px(fpx);
+                // The face is the ROLE's too (`type.<role>.face`), not
+                // this file's: a widget that wants its readings in a
+                // fixed-width family says so in the theme, on every panel
+                // at once, and never here.
+                let font = role.font();
+                // The role's figure box (§5.17). The clock's date line is
+                // a `text` element in a tabular role, and a date drawn
+                // proportionally moves sideways when the day rolls over
+                // from a 1 to a 2 — the same jitter the clock itself had.
+                let fig = role.figures(ctx.fonts, font, fpx);
                 let color = match sev_opt(m, "severity") {
                     Some(s) => ui::sev_text(s),
                     // A named role writes in its own ink; the older forms
@@ -1732,23 +1893,24 @@ fn draw_stack(
                 };
                 match align {
                     Align::Left => {
-                        ctx.dl.text(ctx.fonts, FONT_UI, fpx, r.x, y, &content, color, spacing);
+                        ctx.dl.text_fig(
+                            ctx.fonts, font, fpx, r.x, y, &content, color, spacing, &fig,
+                        );
                     }
                     Align::Right => {
-                        ctx.dl.text_right(
-                            ctx.fonts, FONT_UI, fpx, r.right(), y, &content, color, spacing,
+                        ctx.dl.text_right_fig(
+                            ctx.fonts, font, fpx, r.right(), y, &content, color, spacing, &fig,
                         );
                     }
                     Align::Center => {
-                        ctx.dl.text_center(
-                            ctx.fonts, FONT_UI, fpx, r.cx(), y, &content, color, spacing,
+                        ctx.dl.text_center_fig(
+                            ctx.fonts, font, fpx, r.cx(), y, &content, color, spacing, &fig,
                         );
                     }
                 }
                 y += role.px(ctx, 1.0) * met.text_leading * scale;
             }
             "runs" => {
-                static TEXT_ROLE: OnceLock<TokenId> = OnceLock::new();
                 let items: Vec<ui::Run> = m
                     .get("items")
                     .and_then(|v| v.read_lock::<Array>())
@@ -1758,9 +1920,7 @@ fn draw_stack(
                                 let im = it.read_lock::<Map>()?;
                                 Some(ui::Run {
                                     text: str_of(&im, "t"),
-                                    role: role_opt(&im, "role").unwrap_or_else(|| {
-                                        ui::bound_role(&TEXT_ROLE, "script.text_role")
-                                    }),
+                                    role: run_role(&im),
                                     sev: sev_opt(&im, "severity"),
                                     blink: Some(str_of(&im, "blink"))
                                         .filter(|b| !b.is_empty()),
@@ -1806,9 +1966,14 @@ fn draw_stack(
                     // cap height of 1.3 here, which was a look no theme
                     // file could account for.
                     let ty = ui::center_line_y(ctx, y, met.row_h, lpx, role.leading());
-                    ctx.dl.text(
-                        ctx.fonts, FONT_UI, lpx, r.x, ty, &label,
-                        col(&LABEL_C, "component.script.label"), lsp,
+                    // The label is the rows label, in the rows label's
+                    // role: the same string on the same line above or
+                    // below a `rows` element must be set the same way,
+                    // figure box included.
+                    let fig = role.figures(ctx.fonts, role.font(), lpx);
+                    ctx.dl.text_fig(
+                        ctx.fonts, role.font(), lpx, r.x, ty, &label,
+                        col(&LABEL_C, "component.script.label"), lsp, &fig,
                     );
                     Align::Right
                 };
@@ -1863,9 +2028,22 @@ fn draw_stack(
                 let vpx = value_role.px(ctx, scale);
                 let lsp = label_role.tracking_px(lpx);
                 let vsp = value_role.tracking_px(vpx);
-                let lw = ctx.fonts.measure(FONT_UI, lpx, &label, lsp)
+                // Each role's figure box, resolved once and used by BOTH
+                // the measuring and the drawing below. A meter's readout
+                // is a live number — SWAP's bytes change while the panel
+                // stands still — so the box is what keeps the bar's right
+                // edge from breathing in and out with the digits; and a
+                // width measured proportionally under a run drawn
+                // tabularly would leave the bar overlapping the number.
+                // The face each role names, for the reason the `text`
+                // element above gives.
+                let lfont = label_role.font();
+                let vfont = value_role.font();
+                let lfig = label_role.figures(ctx.fonts, lfont, lpx);
+                let vfig = value_role.figures(ctx.fonts, vfont, vpx);
+                let lw = ctx.fonts.measure_fig(lfont, lpx, &label, lsp, &lfig)
                     + t.px(tok(&LABEL_GAP, "meter.label_gap")) * scale;
-                let vw = ctx.fonts.measure(FONT_UI, vpx, &value, vsp)
+                let vw = ctx.fonts.measure_fig(vfont, vpx, &value, vsp, &vfig)
                     + t.px(tok(&VALUE_GAP, "meter.value_gap")) * scale;
                 // Each string centres on ITS OWN size and its own line
                 // height: two roles on one line sit on one axis only if
@@ -1874,9 +2052,9 @@ fn draw_stack(
                 // as it reaches every other line in the program.
                 let lty = ui::center_line_y(ctx, y, met.row_h, lpx, label_role.leading());
                 let vty = ui::center_line_y(ctx, y, met.row_h, vpx, value_role.leading());
-                ctx.dl.text(
-                    ctx.fonts, FONT_UI, lpx, r.x, lty, &label,
-                    col(&LABEL, "component.script.label"), lsp,
+                ctx.dl.text_fig(
+                    ctx.fonts, lfont, lpx, r.x, lty, &label,
+                    col(&LABEL, "component.script.label"), lsp, &lfig,
                 );
                 // `meter.bar_align` says where the bar stands in its row.
                 // The offset used to be `script.meter_track_h`, a token
@@ -1897,9 +2075,9 @@ fn draw_stack(
                 // only says where the bar sits, how full it is, and — the
                 // script's judgement — how it stands (u2 §3.1 #6).
                 ui::meter(ctx, bar, f, sev_opt(m, "severity"), bool_of(m, "track", true));
-                ctx.dl.text_right(
-                    ctx.fonts, FONT_UI, vpx, r.right(), vty, &value,
-                    col(&VALUE, "component.script.value"), vsp,
+                ctx.dl.text_right_fig(
+                    ctx.fonts, vfont, vpx, r.right(), vty, &value,
+                    col(&VALUE, "component.script.value"), vsp, &vfig,
                 );
                 y += met.row_h;
             }
@@ -2244,12 +2422,12 @@ fn draw_stack(
                     })
                     .unwrap_or_default();
                 let st = ui::ColumnsStyle {
-                    label_role: role_opt(m, "label_role").unwrap_or_else(|| {
-                        ui::bound_role(&LABEL_ROLE, "script.columns_label_role")
-                    }),
-                    value_role: role_opt(m, "value_role").unwrap_or_else(|| {
-                        ui::bound_role(&VALUE_ROLE, "script.columns_value_role")
-                    }),
+                    // The theme's, not the call's — the ruling `rows`
+                    // above sets out. A cell of the instrument strip and
+                    // a line of a key:value block are the same two
+                    // halves, and they are set by the same two bindings.
+                    label_role: ui::bound_role(&LABEL_ROLE, "script.columns_label_role"),
+                    value_role: ui::bound_role(&VALUE_ROLE, "script.columns_value_role"),
                     align: match str_of(m, "align").as_str() {
                         "" => None,
                         w => Some(align_of(w)),
@@ -2270,6 +2448,7 @@ fn draw_stack(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pointer::Pointer;
 
     fn snapshot() -> crate::telemetry::Snapshot {
         crate::telemetry::Snapshot {
@@ -2394,10 +2573,10 @@ mod tests {
             fn draw() {
                 [
                     runs([
-                        #{ t: "LOAD", role: "caption" },
-                        #{ t: ":", role: "display.clock", blink: "value_blink" },
-                        #{ t: "42", role: "value", severity: "warning" },
-                        #{ t: "47°C", role: "data", align: "right" },
+                        #{ t: "LOAD", role: "label" },
+                        #{ t: ":", role: "clock", blink: "value_blink" },
+                        #{ t: "42", role: "reading", severity: "warning" },
+                        #{ t: "47°C", role: "reading", align: "right" },
                     ], "center"),
                     rule(),
                     group("SWAP", [
@@ -2467,7 +2646,7 @@ mod tests {
                     table([["PID", "right"], ["CPU", "right", #{ kind: "bar", of: 100.0 }]],
                           [["1", "41.2%", "warning"]], 0,
                           #{ zebra: true, severity_col: 2 }),
-                    text("21:57:30", "center", #{ role: "display.clock" }),
+                    text("21:57:30", "center", #{ role: "clock" }),
                 ]
             }
         "#)
@@ -2495,9 +2674,98 @@ mod tests {
         assert!(table.get("zebra").unwrap().as_bool().unwrap());
         assert_eq!(table.get("severity_col").unwrap().as_int().unwrap(), 2);
         let text = out[5].read_lock::<Map>().unwrap();
-        assert_eq!(str_of(&text, "role"), "display.clock");
-        // The named role replaces the free size entirely.
+        assert_eq!(str_of(&text, "role"), "clock");
+        // The named kind replaces the free size entirely.
         assert!(!text.contains_key("size"));
+    }
+
+    /// A script's own measuring stick, built the way tests/role_size_bounds
+    /// builds one: no scaling of its own, so a px is the theme's number.
+    fn measuring_ctx<T>(f: impl FnOnce(&Ctx) -> T) -> T {
+        let mut dl = crate::draw::DrawList::new();
+        let mut fonts = crate::font::FontSystem::new();
+        let c = Ctx {
+            dl: &mut dl,
+            fonts: &mut fonts,
+            w: 1920.0,
+            h: 1080.0,
+            t: 0.0,
+            mouse: Pointer::new(0.0, 0.0),
+            term_font_scale: 1.0,
+            ui_font_scale: 1.0,
+            panel_scale: 1.0,
+            focus: None,
+            tips: None,
+        };
+        f(&c)
+    }
+
+    /// The kinds a script may name are the master's closed list, and a
+    /// TYPE ROLE is not one of them.
+    ///
+    /// This is the door the old `role_opt` left open: it handed the
+    /// script's word straight to `ui::role`, so `#{ role: "data" }` — or
+    /// `rows(…, #{ value_role: "data" })` — chose a size at the call.
+    /// Naming the same word now reaches only the sizes the MASTER binds to
+    /// a kind, so the call has stopped deciding; the old spelling is
+    /// carried to the kind the master already points at that role, and
+    /// where no kind points at it, to `script.text_role`.
+    ///
+    /// The invariant is not "an old word draws nothing". It is that no
+    /// word a script can write reaches a size the master has not bound to
+    /// a kind — which is what stopped the value half of four panels of
+    /// one kind being set at three different sizes, and which a silent
+    /// hole in a third-party addon was never needed to enforce.
+    #[test]
+    fn a_kind_is_the_master_s_word_and_never_a_type_role() {
+        measuring_ctx(|c| {
+            // The kinds the shipped widgets name.
+            for kind in ["clock", "date", "label", "reading", "text"] {
+                assert!(
+                    kind_role(kind).px(c, 1.0) > 0.0,
+                    "the master binds no script.kind_{kind}_role"
+                );
+            }
+            // Every size a script can ask for is one of the kinds', and
+            // the kinds are the master's five.
+            let ladder: Vec<f32> = ["clock", "date", "label", "reading", "text"]
+                .iter()
+                .map(|k| kind_role(k).px(c, 1.0))
+                .collect();
+            for role in ["data", "caption", "value", "display.clock", "value.large", "terminal"] {
+                assert!(ui::role(role).px(c, 1.0) > 0.0, "type.{role} is a real role");
+                let got = kind_role(role).px(c, 1.0);
+                assert!(
+                    ladder.contains(&got),
+                    "the type role \"{role}\" reached {got} px, which no kind binds"
+                );
+            }
+            // Where the master DOES bind a kind to the role a legacy word
+            // names, the word is carried there rather than to the default:
+            // `kind_reading_role = value`, so an addon still writing
+            // `value` keeps the size it has always drawn at.
+            assert_eq!(kind_role("value").px(c, 1.0), kind_role("reading").px(c, 1.0));
+            assert_eq!(
+                kind_role("display.clock").px(c, 1.0),
+                kind_role("clock").px(c, 1.0)
+            );
+            // And a role no kind binds lands on the text role, not on its
+            // own ladder: `type.data` is 10.10 px and must not be reachable.
+            static TEXT: OnceLock<TokenId> = OnceLock::new();
+            let text_px = ui::bound_role(&TEXT, "script.text_role").px(c, 1.0);
+            assert_eq!(kind_role("data").px(c, 1.0), text_px);
+            assert_ne!(kind_role("data").px(c, 1.0), ui::role("data").px(c, 1.0));
+            // A word that is neither a kind nor a role does the same, so
+            // a misspelling costs a line of text and not the widget.
+            assert_eq!(kind_role("no such thing at all").px(c, 1.0), text_px);
+            // A reading is the value half of a row, to the pixel: this is
+            // the whole of what NETWORK lost 74% for.
+            static VALUE: OnceLock<TokenId> = OnceLock::new();
+            assert_eq!(
+                kind_role("reading").px(c, 1.0),
+                ui::bound_role(&VALUE, "script.rows_value_role").px(c, 1.0),
+            );
+        });
     }
 
     /// The severity words a script may use are the closed set of §5.10,

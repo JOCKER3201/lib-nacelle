@@ -13,9 +13,8 @@
 //! is no fallback underneath any read: a missing token degrades through
 //! the engine's per-kind default and is allowed to look raw.
 
-use super::window::{corner_segments, corner_style, panel_edge_glow};
-use crate::draw::Corner;
-use crate::font::FONT_UI;
+use super::elev;
+use crate::font::Figures;
 use crate::theme::{self, Color, TokenId};
 use crate::ui;
 use crate::view::surface::{CtxSurface, Surface};
@@ -214,36 +213,14 @@ fn report_step(panel: usize, step: u8) {
 /// edge glow, then the title band from `chrome`, and the same rect this
 /// returns must be the one `click` and `wheel` later receive (u2 §4.1).
 pub fn draw(ctx: &mut Ctx, r: Rect, chrome: &Chrome, panel_idx: usize) -> Rect {
-    static FILL: OnceLock<TokenId> = OnceLock::new();
-    static EDGE: OnceLock<TokenId> = OnceLock::new();
-    static EDGE_W: OnceLock<TokenId> = OnceLock::new();
-    static CORNER_MODE: OnceLock<TokenId> = OnceLock::new();
-    static CORNER_IDX: OnceLock<(Option<u16>, Option<u16>)> = OnceLock::new();
-    static RADIUS: OnceLock<TokenId> = OnceLock::new();
-    static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
-    let t = theme::resolved();
+    static LEVEL: OnceLock<elev::Level> = OnceLock::new();
 
-    // Material. `elev.panel.glass.rank` is 0 in every shipped theme, so
-    // the body is the fill; the glass pair joins when the renderer's
-    // blur ranks do (Appendix B R3/R6 — the container does not wait).
-    let fill = col(t.bed(tok(&FILL, "elev.panel.fill")));
-    let style = corner_style(t, tok(&CORNER_MODE, "elev.panel.corner"), &CORNER_IDX);
-    // Through `Corner::sized`, not a clamp: `elev.panel.radius` is a
-    // length a master may write as `pill`, and `pill` bakes negative
-    // because it has no value until there is a box to be round on.
-    let cut = Corner::sized(style, t.px(tok(&RADIUS, "elev.panel.radius")), r);
-    let corners = [cut; 4];
-    let seg = corner_segments(t, &SEGMENTS, cut.size);
-    if fill.a > 0.0 {
-        ctx.dl.ring_fill(r, &corners, seg, fill);
-    }
-    // The ring, and family A's bloom over it when the theme opts in.
-    let edge = col(t.color(tok(&EDGE, "elev.panel.edge.color")));
-    let edge_w = t.px(tok(&EDGE_W, "elev.panel.edge.width")).max(0.0);
-    if edge.a > 0.0 && edge_w > 0.0 {
-        ctx.dl.ring(r, &corners, seg, edge_w, edge);
-        panel_edge_glow(ctx.dl, t, r, &corners, seg, edge);
-    }
+    // Material, ring, and family A's bloom over the ring — Elev 2, read
+    // as a whole rung rather than key by key. `elev.panel.glass.rank` is
+    // 0 in every shipped theme, so the body is the fill; the glass pair
+    // joins when the renderer's blur ranks do (Appendix B R3/R6), and it
+    // joins for every rung at once because there is one reader.
+    LEVEL.get_or_init(|| elev::Level::of("elev.panel")).draw(ctx, r);
 
     let titled = chrome.title.is_some() || chrome.right.is_some();
     let placed = place(r, titled);
@@ -304,6 +281,13 @@ fn draw_band(
         px = (band.h / leading).max(1.0);
     }
     let spacing = role.tracking_px(px);
+    // WHICH FACE the band is set in, and the figure box it steps its
+    // digits by — both the role's, read once and carried to every
+    // measure and every draw below. Naming `FONT_UI` here is what made
+    // `type.title.panel.face = ui_medium` come out as the interface
+    // Regular: the master's word had no way past this line.
+    let face = role.font();
+    let fig = role.figures(ctx.fonts, face, px);
 
     // `smallcaps` is approximated as upper until FontSystem can set true
     // small caps (§5.16 owes it the face work).
@@ -321,19 +305,33 @@ fn draw_band(
     let left_c = col(t.color(tok(&LEFT_C, "component.panel.title")));
     let left_c = left_c.alpha(left_c.a * alpha);
     if !left.is_empty() {
-        ctx.dl
-            .text(ctx.fonts, FONT_UI, px, band.x + inset, y, &left, left_c, spacing);
+        ctx.dl.text_fig(
+            ctx.fonts,
+            face,
+            px,
+            band.x + inset,
+            y,
+            &left,
+            left_c,
+            spacing,
+            &fig,
+        );
     }
 
     if let Some(right) = chrome.right.as_deref() {
         let right = cased(right);
+        // The room the right text gets is what the LEFT one leaves, so
+        // this measure has to be the one that drew it: same face, same
+        // px, same box. Measured proportionally under a boxed role, the
+        // gap would be short by the difference and the two texts would
+        // collide at the width the master picked to keep them apart.
         let used = if left.is_empty() {
             0.0
         } else {
-            ctx.fonts.measure(FONT_UI, px, &left, spacing) + gap
+            ctx.fonts.measure_fig(face, px, &left, spacing, &fig) + gap
         };
         let room = (band.w - 2.0 * inset - used).max(0.0);
-        let shown = fit_lead(ctx, px, &right, spacing, room);
+        let shown = fit_lead(ctx, face, px, &right, spacing, room, &fig);
         if !shown.is_empty() {
             // The one text in the chrome that is routinely cut: a cwd
             // keeps its tail and loses its root, and the root is exactly
@@ -342,7 +340,7 @@ fn draw_band(
             // different word, drawn whole — says nothing. The identity
             // is the panel's place plus the path, so two browsers open
             // on one directory are still two things to explain.
-            let tw = ctx.fonts.measure(FONT_UI, px, &shown, spacing);
+            let tw = ctx.fonts.measure_fig(face, px, &shown, spacing, &fig);
             crate::view::paint::explain_trim(
                 &mut CtxSurface::new(ctx),
                 crate::object::tooltip::cell_key(0, panel_idx, &right),
@@ -352,15 +350,16 @@ fn draw_band(
             );
             let right_c = col(t.color(tok(&RIGHT_C, "panel.title_right_color")));
             let right_c = right_c.alpha(right_c.a * alpha);
-            ctx.dl.text_right(
+            ctx.dl.text_right_fig(
                 ctx.fonts,
-                FONT_UI,
+                face,
                 px,
                 band.right() - inset,
                 y,
                 &shown,
                 right_c,
                 spacing,
+                &fig,
             );
         }
     }
@@ -387,11 +386,26 @@ fn draw_band(
 /// Shortens `text` from the LEFT with a leading ellipsis until it fits —
 /// the file browser's cwd trim, now in the one place that draws the band
 /// (u2 §4.3): the tail of a path is the part worth keeping.
-fn fit_lead(ctx: &mut Ctx, px: f32, text: &str, spacing: f32, max_w: f32) -> String {
+///
+/// `face` and `fig` are the caller's, never this function's: a string
+/// trimmed against one face and drawn in another either loses a
+/// character it had room for or overruns the band it was trimmed to fit,
+/// and which of the two happens depends on the theme — so nobody looking
+/// at a cut path can tell whether the trim or the draw is wrong.
+#[allow(clippy::too_many_arguments)]
+fn fit_lead(
+    ctx: &mut Ctx,
+    face: u8,
+    px: f32,
+    text: &str,
+    spacing: f32,
+    max_w: f32,
+    fig: &Figures,
+) -> String {
     if max_w <= 0.0 {
         return String::new();
     }
-    if ctx.fonts.measure(FONT_UI, px, text, spacing) <= max_w {
+    if ctx.fonts.measure_fig(face, px, text, spacing, fig) <= max_w {
         return text.to_string();
     }
     let chars: Vec<char> = text.chars().collect();
@@ -399,7 +413,7 @@ fn fit_lead(ctx: &mut Ctx, px: f32, text: &str, spacing: f32, max_w: f32) -> Str
     while start < chars.len() {
         let cand: String =
             std::iter::once('\u{2026}').chain(chars[start..].iter().copied()).collect();
-        if ctx.fonts.measure(FONT_UI, px, &cand, spacing) <= max_w {
+        if ctx.fonts.measure_fig(face, px, &cand, spacing, fig) <= max_w {
             return cand;
         }
         start += 1;
@@ -408,8 +422,245 @@ fn fit_lead(ctx: &mut Ctx, px: f32, text: &str, spacing: f32, max_w: f32) -> Str
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::draw::{DrawCmd, DrawList};
+    use crate::font::{FontSystem, FONT_MONO};
+    use crate::pointer::Pointer;
+    use std::path::{Path, PathBuf};
+
+    // ------------------------------------------------------ face harness
+    //
+    // Every object in this directory has to answer the same question —
+    // "did the run reach the draw list in the face its ROLE names, and
+    // does it move when a theme moves the role?" — and the answer is
+    // measured the same way in each. The harness is therefore written
+    // once, here, and used from the other objects' own test modules: a
+    // second copy is a second definition of what counts as proof.
+
+    /// Every (font slot, string) `f` sent to the draw list, read from the
+    /// COMMAND REGISTER rather than inferred from the vertex buffer: the
+    /// register holds the slot the call was made with, which is exactly
+    /// the claim under test, and it holds it even on a machine whose
+    /// atlas could not rasterise a single glyph.
+    pub(crate) fn drawn_text(f: impl FnOnce(&mut Ctx)) -> Vec<(u8, String)> {
+        drawn_runs(f)
+            .into_iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text { font, text, .. } => Some((font, text)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// [`drawn_text`] with the whole command kept: the anchor, the px,
+    /// the tracking and the figure advance a run was made with — what a
+    /// claim about COLUMNS needs and a slot number cannot carry.
+    pub(crate) fn drawn_runs(f: impl FnOnce(&mut Ctx)) -> Vec<DrawCmd> {
+        crate::draw::arm_cmds();
+        let mut dl = DrawList::new();
+        let mut fonts = FontSystem::new();
+        {
+            let mut ctx = Ctx {
+                dl: &mut dl,
+                fonts: &mut fonts,
+                w: 1920.0,
+                h: 1080.0,
+                // Well past every unfold in the master, so an animated
+                // object is measured at rest rather than mid-open.
+                t: 1000.0,
+                mouse: Pointer::new(-1.0, -1.0),
+                term_font_scale: 1.0,
+                ui_font_scale: 1.0,
+                panel_scale: 1.0,
+                focus: None,
+                tips: None,
+            };
+            f(&mut ctx);
+        }
+        dl.cmds()
+            .iter()
+            .filter(|c| matches!(c, DrawCmd::Text { .. }))
+            .cloned()
+            .collect()
+    }
+
+    /// What one child run reported.
+    pub(crate) struct Measured {
+        /// The font slot every text of the run was drawn in.
+        pub face: u8,
+        /// The role word the binding resolved to in that run.
+        pub role: String,
+        /// The whole child output, for a failure message worth reading.
+        pub log: String,
+    }
+
+    impl Measured {
+        /// Any other `KEY=value` the child chose to print — the figure
+        /// advance, say. Read from the log rather than added to the
+        /// struct, so one more measurement is one more `println` in a
+        /// child and not a change every child has to follow.
+        pub(crate) fn field(&self, key: &str) -> String {
+            read_field(&self.log, key, "the child")
+        }
+    }
+
+    /// One `KEY=value` out of a child's output. Anywhere in the line,
+    /// not at its head: the test harness writes "test <name> ... "
+    /// without a newline, so a child's first `println` lands on the tail
+    /// of the harness's own line.
+    fn read_field(log: &str, key: &str, who: &str) -> String {
+        log.lines()
+            .find_map(|l| l.split_once(key).map(|(_, v)| v))
+            .unwrap_or_else(|| panic!("{who} printed no {key} line:\n{log}"))
+            .trim()
+            .to_string()
+    }
+
+    /// The role word a `*_role` binding stands at — the name whose
+    /// `type.<name>.face` a fixture has to move. Read rather than
+    /// written down, so this batch keeps working when the master
+    /// repoints a binding.
+    pub(crate) fn role_word(binding: &str) -> String {
+        crate::ui::theme_word(theme::id(binding).unwrap_or(TokenId::MISSING))
+    }
+
+    /// The line a child test prints so its parent can read the slot back.
+    pub(crate) fn report(role: &str, face: u8, drawn: &[(u8, String)]) {
+        println!("ROLE={role}");
+        println!("FACE={face}");
+        for (f, s) in drawn {
+            println!("drew {f} \"{s}\"");
+        }
+    }
+
+    /// Asserts every text of a run went to `want`, and answers the run.
+    pub(crate) fn all_in(drawn: &[(u8, String)], want: u8) {
+        assert!(!drawn.is_empty(), "nothing was drawn at all — the run proves nothing");
+        for (face, text) in drawn {
+            assert_eq!(
+                *face, want,
+                "\"{text}\" reached the draw list in slot {face}; its role names {want}"
+            );
+        }
+    }
+
+    /// Runs one `#[ignore]`d child test in a PROCESS of its own, under
+    /// `theme`, and reads back what it drew.
+    ///
+    /// A process of its own because the resolved theme is process-wide
+    /// and `cargo test` runs a binary's tests in parallel threads: a test
+    /// that swapped the theme in-process would decide what every other
+    /// test in the suite was measuring. The child is this same test
+    /// binary re-exec'd — no fixture crate, no second target directory,
+    /// nothing for the other three authors' builds to trip over — with
+    /// `NACELLE_THEME_PATH` pointing at the theme under test.
+    pub(crate) fn measure_in_child(test: &str, theme: Option<&Path>) -> Measured {
+        let exe = std::env::current_exe().expect("the test binary must be locatable");
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args(["--exact", test, "--ignored", "--nocapture", "--test-threads=1"]);
+        cmd.env("NACELLE_DRAW_CMDS", "1");
+        match theme {
+            Some(p) => cmd.env("NACELLE_THEME_PATH", p),
+            None => cmd.env_remove("NACELLE_THEME_PATH"),
+        };
+        let out = cmd.output().expect("the child measuring process must start");
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{test} failed in its own process:\n{log}");
+        Measured {
+            face: read_field(&log, "FACE=", test).parse().expect("FACE= is a slot number"),
+            role: read_field(&log, "ROLE=", test),
+            log,
+        }
+    }
+
+    /// A theme that inherits the shipped master and moves ONE role's
+    /// face to `mono` — the whole fixture, so nothing else can explain a
+    /// change of slot.
+    pub(crate) fn mono_theme(tag: &str, role: &str) -> PathBuf {
+        let path = std::env::temp_dir()
+            .join(format!("nacelle-face-{tag}-{}.theme", std::process::id()));
+        std::fs::write(
+            &path,
+            format!(
+                "[meta]\nschema = 1\nname = \"face {tag}\"\nbase = \"default\"\n\n\
+                 [type]\n{role}.face = mono\n"
+            ),
+        )
+        .expect("the fixture theme must be writable");
+        path
+    }
+
+    /// The whole claim for one object: the run went to the face its role
+    /// names under the MASTER, a theme that moves that role's face to
+    /// mono moves the run with it, and the two runs are not the same
+    /// slot — which is the part a `FONT_UI` written at the call site
+    /// cannot satisfy however the master is wired.
+    pub(crate) fn face_follows_the_theme(tag: &str, child: &str) {
+        let master = measure_in_child(child, None);
+        let fixture = mono_theme(tag, &master.role);
+        let moved = measure_in_child(child, Some(&fixture));
+        let _ = std::fs::remove_file(&fixture);
+        assert_eq!(
+            moved.role, master.role,
+            "the fixture changed which ROLE is bound, not which face it is set in"
+        );
+        assert_eq!(
+            moved.face, FONT_MONO,
+            "a theme put `type.{}.face = mono` and {tag} drew slot {} instead:\n{}",
+            master.role, moved.face, moved.log
+        );
+        assert_ne!(
+            master.face, moved.face,
+            "{tag} drew the same slot under both themes ({}), so nothing was proved: \
+             the face is still being chosen at the call site",
+            master.face
+        );
+    }
+
+    // ------------------------------------------------------- panel's own
+
+    /// The title band draws in the face `panel.title.role` names, and
+    /// follows a theme that moves it.
+    #[test]
+    fn the_band_is_set_in_the_face_its_role_names() {
+        face_follows_the_theme("panel", "object::panel::tests::child_band_face");
+    }
+
+    /// [`the_band_is_set_in_the_face_its_role_names`]'s child: one titled
+    /// panel with both halves of a band, drawn for real.
+    #[test]
+    #[ignore = "measured in a process of its own by the test above"]
+    fn child_band_face() {
+        static PROBE: OnceLock<TokenId> = OnceLock::new();
+        let role = ui::bound_role(&PROBE, "panel.title.role");
+        let want = role.font();
+        let drawn = drawn_text(|ctx| {
+            let chrome = Chrome {
+                title: Some("MONITOR ZASOBOW".to_string()),
+                // Long enough to be trimmed: `fit_lead` measures with the
+                // same face and box the draw uses, and a trim measured in
+                // another face is exactly what this run would not catch
+                // if the text always fitted.
+                right: Some("/var/home/michael/.git/nacelle/src/object".to_string()),
+                ..Chrome::none()
+            };
+            draw(ctx, Rect::new(40.0, 40.0, 420.0, 260.0), &chrome, 0);
+        });
+        all_in(&drawn, want);
+        assert_eq!(drawn.len(), 2, "the band draws its left half and its right half");
+        assert!(
+            drawn[1].1.starts_with('\u{2026}'),
+            "the right half fitted whole, so the trim — the one measure that is \
+             taken apart from its draw — was never exercised: {:?}",
+            drawn[1].1
+        );
+        report(&role_word("panel.title.role"), want, &drawn);
+    }
 
     /// A tall panel keeps the full container: band, padding, and a
     /// content box strictly inside the widget box.

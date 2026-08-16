@@ -115,9 +115,13 @@ unit_min_px   = 4px
 unit_max_px   = 10px
                     # the 4K defence: unclamped 4K is the 1080p interface at 2x · - · device px, 4 .. 64 · companion ceiling of unit_pct_h (3.2)
 ui_scale      = 1.0
+                    # the user's UIFontSize= / 100, applied after the clamp · - · f, 0.5 .. 3.0 · no derivation — a user setting, not a theme one
+                    # The host overwrites it per frame (theme::set_viewport), so 1.0 here is the value for a host that never says:
+                    # the interface at the size the file was authored at. Because u is the root of every length, this one number is
+                    # how the setting reaches type, gaps, row heights and control sizes alike — there is no second route, and a
+                    # consumer that multiplies a token by the setting as well applies it twice.
 ramp_span     = 0.62
                     # how far the top rung of a `ramp()` ladder stands from the bottom, in OKLCh lightness · 2, 3, 8, 9 · f, 0.0 .. 1.0 · the spacing every data series and every chart ladder is built on; an author states the number of rungs and which rung a series sits on, and this is the third number that decides what they look like
-                    # the user's UIFontSize= / 100, applied after the clamp · - · f, 0.5 .. 3.0 · no derivation — a user setting, not a theme one
 density       = compact
                     # spacing/type multiplier level · 1 (compact), 6 (airy), 7 (comfortable), 8 (dense), 9 (instrument) ·
                     # one of airy | comfortable | compact | dense | instrument · GENERATES both floats below:
@@ -279,6 +283,21 @@ pill     = pill
                     # pill badges, scrollbar thumbs · 1, 3, 4 (CRITICAL / CONTAINED badges) · sentinel, bakes to -2.0 = half the shorter side · sentinel by rule (5.0)
 segments = 6
                     # arc tessellation quads per corner; 6 at an 8 px radius is a 0.4 px chord error · - · n, 3 .. 16 · literal count (5.4)
+mode     = round
+                    # THE CUT, for the whole interface: how every radius above is taken off a box · 1-10 · enum: square | round | chamfer · no derivation; this is the one place a theme states its corner language
+# The cut lives beside the radii ON PURPOSE. Twelve presets used to state it
+# for themselves — eight elevations, panel, winframe, scrollbar, modal — with
+# "no derivation" written against each, so a file could say `round` in ten of
+# them and `chamfer` in two and be internally consistent by its own lights.
+# The shipped file did exactly that: the window frame, the context menu (which
+# follows the frame), the tooltip and the modal were cut, and everything
+# hanging off the panel was rounded. Family A's language in four places and
+# family B's in the rest of one file.
+# A radius without its cut is half a decision — the same reason every `*.corner`
+# in this file carries a `*_corner_mode` sibling rather than a bare length. The
+# twelve presets keep their sibling keys and a theme may still pin any one of
+# them; what changed is that they DERIVE, so a theme that wants the console
+# language writes `chamfer` once, here, and the whole interface answers.
 
 
 # =========================================================================
@@ -1470,7 +1489,7 @@ glass.tint           = #FFFFFF / 1.0          # multiply tint of the blur quad; 
 glass.wash           = none                   # alpha-over wash on the frost; the theme's own light · 7,8,10 · colour or none · none = the second quad is not drawn; user BlurOpacity scales this alpha
 # body, shape
 fill                 = @surface.void          # the backdrop bed when backdrop.source paints nothing over it (used INSTEAD of the glass pair while rank = 0) · 7,8,10 · colour or none · @surface.void — the opaque bed and the swapchain clear (5.5)
-corner               = round                  # corner treatment of the backdrop plate rect · 7,8,10 · enum: square | round | chamfer · no derivation; 5.12 names round, family A may say chamfer here
+corner               = @corner.mode           # corner treatment of the backdrop plate rect · 7,8,10 · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · 7,8,10 · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
 edge.color           = @component.panel.border # the backdrop plate has no ring in a silent theme · 7,8,10 · colour or none · @component.panel.border -> @border.default -> alpha(@accent.primary, 0.78)
@@ -1512,7 +1531,7 @@ glass.tint           = #FFFFFF / 1.0          # multiply tint of the blur quad; 
 glass.wash           = none                   # alpha-over wash on the frost; the theme's own light · 7,8,10 · colour or none · none = the second quad is not drawn; user BlurOpacity scales this alpha
 # body, shape
 fill                 = @surface.base          # the desktop field behind every panel (used INSTEAD of the glass pair while rank = 0) · 1-6 · colour or none · @surface.base — the screen background traces and vignette live on (5.5)
-corner               = round                  # corner treatment of the board rect · 1-6 · enum: square | round | chamfer · no derivation; 5.12 names round, family A may say chamfer here
+corner               = @corner.mode           # corner treatment of the board rect · 1-6 · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · 1-6 · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
 edge.color           = @component.panel.border # ring around the board field · 1-6 · colour or none · @component.panel.border -> @border.default -> alpha(@accent.primary, 0.78)
@@ -1596,7 +1615,7 @@ glass.tint           = #FFFFFF / 1.0          # multiply tint of the blur quad; 
 glass.wash           = none                   # alpha-over wash on the frost; the theme's own light · 7,8,10 · colour or none · none = the second quad is not drawn; user BlurOpacity scales this alpha
 # body, shape
 fill                 = @surface.raised        # the body of a lifted panel or an active tile (used INSTEAD of the glass pair while rank = 0) · 3,8 · colour or none · @surface.raised — one step up the surface ladder (5.5)
-corner               = round                  # corner treatment of the raised container rect · 3,8 · enum: square | round | chamfer · no derivation; 5.12 names round, family A may say chamfer here
+corner               = @corner.mode           # corner treatment of the raised container rect · 3,8 · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · 3,8 · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
 edge.color           = @component.panel.border # ring around a lifted container · 3,8 · colour or none · @component.panel.border -> @border.default -> alpha(@accent.primary, 0.78)
@@ -1638,7 +1657,7 @@ glass.tint           = #FFFFFF / 1.0          # multiply tint of the blur quad; 
 glass.wash           = none                   # alpha-over wash on the frost; the theme's own light · 7,8,10 · colour or none · none = the second quad is not drawn; user BlurOpacity scales this alpha
 # body, shape
 fill                 = @surface.panel         # the focused window body when glass.rank = 0 (used INSTEAD of the glass pair while rank = 0) · 7 · colour or none · @surface.panel — focus is carried by edge and glow, not by a different fill (5.12)
-corner               = round                  # corner treatment of the focused window rect · 7 · enum: square | round | chamfer · no derivation; 5.12 names round, family A may say chamfer here
+corner               = @corner.mode           # corner treatment of the focused window rect · 7 · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · 7 · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
 edge.color           = @component.panel.border # the focused frame; image 7 makes this a magenta->violet gradient · 7 · colour or none · @component.panel.border -> @border.default -> alpha(@accent.primary, 0.78)
@@ -1671,7 +1690,14 @@ reflect.alpha        = 0.0                    # opacity of the mirrored smear wh
 reflect.fade         = 2.0                    # exponent of the reflection's alpha ramp toward 0 · 8 · f, > 0 · no derivation; 2.0 is the quadratic falloff image 8's desk shows
 
 # -------------------------------------------------------------------------
-# elev.popover — (Elev 5) menu, tooltip, dropdown, context menu, drag ghost.
+# elev.popover — (Elev 5) menu, tooltip, context menu, drag ghost.
+#
+# NOT the drop-down list any more. A drop-down used to be one framed box
+# on this rung with its rows kept inside it; it is now the anchor plus N
+# separate elements, each dressed as the anchor is (`[button]`), with
+# `[menu].anchor_gap` of background between them and nothing drawn around
+# the group. The rung keeps its glosses for the objects that are still a
+# single surface.
 # -------------------------------------------------------------------------
 [elev.popover]
 # glass — two quads; skipped entirely while rank is 0
@@ -1679,11 +1705,11 @@ glass.rank           = 0                      # frost rank of the popover: 0 emi
 glass.tint           = #FFFFFF / 1.0          # multiply tint of the blur quad; its alpha is the frost coverage · 7,8,10 · colour, straight alpha 0..1 · no derivation — white at 1.0 is an identity multiply
 glass.wash           = none                   # alpha-over wash on the frost; the theme's own light · 7,8,10 · colour or none · none = the second quad is not drawn; user BlurOpacity scales this alpha
 # body, shape
-fill                 = @surface.raised        # the menu / tooltip body when glass.rank = 0 (used INSTEAD of the glass pair while rank = 0) · - · colour or none · @surface.raised — popovers float above panels (5.5)
-corner               = round                  # corner treatment of the popover rect · - · enum: square | round | chamfer · no derivation; 5.12 names round, family A may say chamfer here
+fill                 = @elev.focused.fill     # the popover body when glass.rank = 0 (used INSTEAD of the glass pair while rank = 0) · - · colour or none · @elev.focused.fill — a popover belongs to the window it opens in and is bedded like it, not one rung above it
+corner               = @corner.mode           # corner treatment of the popover rect · - · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · - · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
-edge.color           = @component.panel.border # ring around a menu or tooltip · - · colour or none · @component.panel.border -> @border.default -> alpha(@accent.primary, 0.78)
+edge.color           = @elev.focused.edge.color # ring around a popover · - · colour or none · @elev.focused.edge.color — the SAME ring as the window, by derivation. Both used to name @component.panel.border and matched by coincidence: moving the window's ring left this one behind
 edge.color2          = same_as_parent         # far end of a two-stop edge; SUGAR, bakes to an anonymous gradient · - · colour or same_as_parent · same_as_parent = copy edge.color, i.e. a flat ring
 edge.mode            = solid                  # how the ring is coloured · - · solid | gradient · no derivation; gradient reads edge.gradient, else the color/color2 pair
 edge.gradient        = none                   # named multi-stop ring; image 7's magenta->violet->blue focused frame · 7 · @grad.<name> with 2..8 stops, or none · none = no named gradient, so edge.color2 sugar (if set) wins
@@ -1722,7 +1748,7 @@ glass.tint           = #FFFFFF / 1.0          # multiply tint of the blur quad; 
 glass.wash           = none                   # alpha-over wash on the frost; the theme's own light · 7,8,10 · colour or none · none = the second quad is not drawn; user BlurOpacity scales this alpha
 # body, shape
 fill                 = @surface.sunken        # the interior of a recessed well (used INSTEAD of the glass pair while rank = 0) · 1,2,7 · colour or none · @surface.sunken — recessed beds (5.5)
-corner               = round                  # corner treatment of the inset well rect · 1,2,7 · enum: square | round | chamfer · no derivation; 5.12 names round, family A may say chamfer here
+corner               = @corner.mode           # corner treatment of the inset well rect · 1,2,7 · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · 1,2,7 · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
 edge.color           = @component.panel.border # ring around a recessed well · 1,2,7 · colour or none · @component.panel.border -> @border.default -> alpha(@accent.primary, 0.78)
@@ -1764,7 +1790,7 @@ glass.tint           = #FFFFFF / 1.0          # multiply tint of the blur quad; 
 glass.wash           = none                   # alpha-over wash on the frost; the theme's own light · 7,8,10 · colour or none · none = the second quad is not drawn; user BlurOpacity scales this alpha
 # body, shape
 fill                 = none                   # the overlay plate paints nothing of its own; decor.* fills it (used INSTEAD of the glass pair while rank = 0) · 4 · colour or none · none = draw no quad; the baked overlay plate is the content (5.15)
-corner               = round                  # corner treatment of the overlay plate rect · 4 · enum: square | round | chamfer · no derivation; 5.12 names round, family A may say chamfer here
+corner               = @corner.mode           # corner treatment of the overlay plate rect · 4 · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · 4 · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
 edge.color           = @component.panel.border # the overlay plate has no ring · 4 · colour or none · @component.panel.border -> @border.default -> alpha(@accent.primary, 0.78)
@@ -1809,7 +1835,7 @@ glass.wash           = none                   # alpha-over wash on the frost; th
 # 5.12's prose says default gives fixture rank 0 and alpha(@surface.base, 0.92).
 # The prose is the one that speaks about default.theme, so 0.92 is written here.
 fill                 = alpha(@surface.base, 0.92) # the full-screen sheet over the frozen board; legible with no offscreen pass (used INSTEAD of the glass pair while rank = 0) · - · colour or none · stated for default in 5.12's prose; its table row says alpha at 0.0 instead
-corner               = round                  # corner treatment of the fixture sheet rect · - · enum: square | round | chamfer · no derivation; 5.12 names round, family A may say chamfer here
+corner               = @corner.mode           # corner treatment of the fixture sheet rect · - · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 radius               = @corner.md             # corner radius, or the chamfer cut length · - · len (u) · @corner.md = 1.2u ~ 8.6px @1440p (5.4)
 # edge — one ring, one winner: a named edge.gradient beats the color2 sugar
 edge.color           = @component.panel.border # ring around the full-screen sheet · - · colour or none · @component.panel.border -> @border.default -> alpha(@accent.primary, 0.78)
@@ -2025,7 +2051,7 @@ family                = ["Rajdhani", "Saira", "Exo 2", "United Sans"]
                                               # ordered candidate families for FACE_UI = 0 · 1-10 · list of text · matched by find_font/load_variant_for; first hit wins
 weight                = 400                   # requested weight for the ui slot · 1-10 · n, 100..900 · maps to the filename word: 300 Light 400 Regular 500 Medium 600 SemiBold 700 Bold
 file                  = ""                    # theme-shipped binary font for this slot · - · text, path relative to the theme directory · empty = use the system font dirs; the ONLY path allowed to escape them
-fallback              = mono                  # next slot tried when every family above fails · 1-10 · enum, a face id | builtin | none · no further UI family exists; step 5 aliases FACE_UI to FACE_MONO
+fallback              = mono                  # next slot tried when every family above fails · 1-10 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved | builtin | none · no further UI family exists; step 5 aliases FACE_UI to FACE_MONO
 synthetic_bold        = 0.028em               # x-offset of the second pass that fakes weight · - · em, 0.0em .. 0.10em · auto-enabled when a >=600 request fell back to Regular (5.16)
 codepoints            = ""                    # name = U+XXXX map; meaningful ONLY on face.icon · - · text, path relative to the theme directory · empty on every non-icon slot
                     # TODO(default): chosen here, spec silent. 5.16 counts 8 faces x 6
@@ -2039,7 +2065,7 @@ family                = ["JetBrains Mono", "Fira Mono"]
                                               # ordered candidate families for FACE_MONO = 1 · 1, 9 · list of text · matched by find_font/load_variant_for; first hit wins
 weight                = 400                   # requested weight for the mono slot · 1, 9 · n, 100..900 · maps to the filename word: 300 Light 400 Regular 500 Medium 600 SemiBold 700 Bold
 file                  = ""                    # theme-shipped binary font for this slot · - · text, path relative to the theme directory · empty = use the system font dirs; the ONLY path allowed to escape them
-fallback              = none                  # next slot tried when every family above fails · 1, 9 · enum, a face id | builtin | none · end of the chain: an unresolvable FACE_MONO fails the load (5.16)
+fallback              = none                  # next slot tried when every family above fails · 1, 9 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved | builtin | none · end of the chain: an unresolvable FACE_MONO fails the load (5.16)
 synthetic_bold        = 0.028em               # x-offset of the second pass that fakes weight · - · em, 0.0em .. 0.10em · auto-enabled when a >=600 request fell back to Regular (5.16)
 codepoints            = ""                    # name = U+XXXX map; meaningful ONLY on face.icon · - · text, path relative to the theme directory · empty on every non-icon slot
 
@@ -2048,7 +2074,7 @@ family                = ["Rajdhani", "Saira", "Exo 2", "United Sans"]
                                               # ordered candidate families for FACE_UI_MEDIUM = 2 · 1-10 · list of text · matched by find_font/load_variant_for; first hit wins
 weight                = 500                   # requested weight for the ui_medium slot · 1-10 · n, 100..900 · maps to the filename word: 300 Light 400 Regular 500 Medium 600 SemiBold 700 Bold
 file                  = ""                    # theme-shipped binary font for this slot · - · text, path relative to the theme directory · empty = use the system font dirs; the ONLY path allowed to escape them
-fallback              = ui                    # next slot tried when every family above fails · 1-10 · enum, a face id | builtin | none · same families one weight down
+fallback              = ui                    # next slot tried when every family above fails · 1-10 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved | builtin | none · same families one weight down
 synthetic_bold        = 0.028em               # x-offset of the second pass that fakes weight · - · em, 0.0em .. 0.10em · auto-enabled when a >=600 request fell back to Regular (5.16)
 codepoints            = ""                    # name = U+XXXX map; meaningful ONLY on face.icon · - · text, path relative to the theme directory · empty on every non-icon slot
 
@@ -2057,7 +2083,7 @@ family                = ["Rajdhani", "Saira", "Exo 2", "United Sans"]
                                               # ordered candidate families for FACE_UI_BOLD = 3 · - · list of text · matched by find_font/load_variant_for; first hit wins
 weight                = 700                   # requested weight for the ui_bold slot · - · n, 100..900 · maps to the filename word: 300 Light 400 Regular 500 Medium 600 SemiBold 700 Bold
 file                  = ""                    # theme-shipped binary font for this slot · - · text, path relative to the theme directory · empty = use the system font dirs; the ONLY path allowed to escape them
-fallback              = ui_medium             # next slot tried when every family above fails · - · enum, a face id | builtin | none · same families one weight down
+fallback              = ui_medium             # next slot tried when every family above fails · - · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved | builtin | none · same families one weight down
 synthetic_bold        = 0.028em               # x-offset of the second pass that fakes weight · - · em, 0.0em .. 0.10em · auto-enabled when a >=600 request fell back to Regular (5.16)
 codepoints            = ""                    # name = U+XXXX map; meaningful ONLY on face.icon · - · text, path relative to the theme directory · empty on every non-icon slot
 
@@ -2065,7 +2091,7 @@ codepoints            = ""                    # name = U+XXXX map; meaningful ON
 family                = ["Orbitron"]          # ordered candidate families for FACE_DISPLAY = 4 · 1, 9 · list of text · matched by find_font/load_variant_for; first hit wins
 weight                = 600                   # requested weight for the display slot · 1, 9 · n, 100..900 · maps to the filename word: 300 Light 400 Regular 500 Medium 600 SemiBold 700 Bold
 file                  = ""                    # theme-shipped binary font for this slot · - · text, path relative to the theme directory · empty = use the system font dirs; the ONLY path allowed to escape them
-fallback              = ui_bold               # next slot tried when every family above fails · 1, 9 · enum, a face id | builtin | none · a display face is optional; the UI bold weight stands in
+fallback              = ui_bold               # next slot tried when every family above fails · 1, 9 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved | builtin | none · a display face is optional; the UI bold weight stands in
 synthetic_bold        = 0.028em               # x-offset of the second pass that fakes weight · - · em, 0.0em .. 0.10em · auto-enabled when a >=600 request fell back to Regular (5.16)
 codepoints            = ""                    # name = U+XXXX map; meaningful ONLY on face.icon · - · text, path relative to the theme directory · empty on every non-icon slot
 
@@ -2074,7 +2100,7 @@ family                = ["JetBrains Mono", "Fira Mono"]
                                               # ordered candidate families for FACE_MONO_BOLD = 5 · 1 · list of text · matched by find_font/load_variant_for; first hit wins
 weight                = 700                   # requested weight for the mono_bold slot · 1 · n, 100..900 · maps to the filename word: 300 Light 400 Regular 500 Medium 600 SemiBold 700 Bold
 file                  = ""                    # theme-shipped binary font for this slot · - · text, path relative to the theme directory · empty = use the system font dirs; the ONLY path allowed to escape them
-fallback              = mono                  # next slot tried when every family above fails · 1 · enum, a face id | builtin | none · same families at Regular, synthetic bold applied
+fallback              = mono                  # next slot tried when every family above fails · 1 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved | builtin | none · same families at Regular, synthetic bold applied
 synthetic_bold        = 0.028em               # x-offset of the second pass that fakes weight · - · em, 0.0em .. 0.10em · auto-enabled when a >=600 request fell back to Regular (5.16)
 codepoints            = ""                    # name = U+XXXX map; meaningful ONLY on face.icon · - · text, path relative to the theme directory · empty on every non-icon slot
 
@@ -2082,7 +2108,7 @@ codepoints            = ""                    # name = U+XXXX map; meaningful ON
 family                = []                    # ordered candidate families for FACE_ICON = 6 · 1, 8, 9 · list of text · matched by find_font/load_variant_for; first hit wins
 weight                = 400                   # requested weight for the icon slot · 1, 8, 9 · n, 100..900 · maps to the filename word: 300 Light 400 Regular 500 Medium 600 SemiBold 700 Bold
 file                  = ""                    # theme-shipped binary font for this slot · - · text, path relative to the theme directory · empty = use the system font dirs; the ONLY path allowed to escape them
-fallback              = builtin               # next slot tried when every family above fails · 1, 8, 9 · enum, a face id | builtin | none · no family: the compiled-in polyline set draws all 40 names
+fallback              = builtin               # next slot tried when every family above fails · 1, 8, 9 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved | builtin | none · no family: the compiled-in polyline set draws all 40 names
 synthetic_bold        = 0.028em               # x-offset of the second pass that fakes weight · - · em, 0.0em .. 0.10em · auto-enabled when a >=600 request fell back to Regular (5.16)
 codepoints            = "icons/icons.map"     # name = U+XXXX map consulted once at load · 1, 8, 9 · text, path relative to the theme directory · no derivation; unmapped names fall back to the built-in vector set
 
@@ -2090,7 +2116,7 @@ codepoints            = "icons/icons.map"     # name = U+XXXX map consulted once
 family                = []                    # ordered candidate families for FACE_RESERVED = 7 · - · list of text · matched by find_font/load_variant_for; first hit wins
 weight                = 400                   # requested weight for the reserved slot · - · n, 100..900 · maps to the filename word: 300 Light 400 Regular 500 Medium 600 SemiBold 700 Bold
 file                  = ""                    # theme-shipped binary font for this slot · - · text, path relative to the theme directory · empty = use the system font dirs; the ONLY path allowed to escape them
-fallback              = ui                    # next slot tried when every family above fails · - · enum, a face id | builtin | none · unused in default; aliases to FACE_UI
+fallback              = ui                    # next slot tried when every family above fails · - · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved | builtin | none · unused in default; aliases to FACE_UI
 synthetic_bold        = 0.028em               # x-offset of the second pass that fakes weight · - · em, 0.0em .. 0.10em · auto-enabled when a >=600 request fell back to Regular (5.16)
 codepoints            = ""                    # name = U+XXXX map; meaningful ONLY on face.icon · - · text, path relative to the theme directory · empty on every non-icon slot
 
@@ -2136,7 +2162,7 @@ ellipsis                      = "…"           # the character appended to trim
 
 # ---------------------------------------------------------------- type.display.clock
 # the big clock, 21:57:30
-display.clock.face            = display       # which face slot draws the big clock, 21:57:30 · 1, 2, 9 · enum, a face id · no derivation; 5.16's role table
+display.clock.face            = display       # which face slot draws the big clock, 21:57:30 · 1, 2, 9 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 display.clock.size            = 8.32u         # type size for the big clock, 21:57:30 · 1, 2, 9 · u · 45 px at 1080p, 60 px at 1440p; size_u = size_vh x 2.6
 display.clock.min_px          = @type.min_px  # px floor for this role · 1, 2, 9 · device px · the global floor
 display.clock.max_px          = 0px           # px ceiling for this role · 1, 2, 9 · device px, 0px = uncapped · uncapped
@@ -2152,7 +2178,7 @@ display.clock.synthetic_bold  = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.display.date
 # the date under the clock, 14.11.2142
-display.date.face             = ui            # which face slot draws the date under the clock, 14.11.2142 · 1 · enum, a face id · no derivation; 5.16's role table
+display.date.face             = ui            # which face slot draws the date under the clock, 14.11.2142 · 1 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 display.date.size             = 2.21u         # type size for the date under the clock, 14.11.2142 · 1 · u · 12 px at 1080p, 16 px at 1440p; size_u = size_vh x 2.6
 display.date.min_px           = @type.min_px  # px floor for this role · 1 · device px · the global floor
 display.date.max_px           = 0px           # px ceiling for this role · 1 · device px, 0px = uncapped · uncapped
@@ -2168,7 +2194,7 @@ display.date.synthetic_bold   = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.display.hero
 # the one oversized string on a screen
-display.hero.face             = display       # which face slot draws the one oversized string on a screen · 7, 9 · enum, a face id · no derivation; 5.16's role table
+display.hero.face             = display       # which face slot draws the one oversized string on a screen · 7, 9 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 display.hero.size             = 5.72u         # type size for the one oversized string on a screen · 7, 9 · u · 31 px at 1080p, 41 px at 1440p; size_u = size_vh x 2.6
 display.hero.min_px           = @type.min_px  # px floor for this role · 7, 9 · device px · the global floor
 display.hero.max_px           = 0px           # px ceiling for this role · 7, 9 · device px, 0px = uncapped · uncapped
@@ -2184,7 +2210,7 @@ display.hero.synthetic_bold   = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.title.window
 # a window frame's title
-title.window.face             = ui_medium     # which face slot draws a window frame's title · 1, 7 · enum, a face id · no derivation; 5.16's role table
+title.window.face             = ui_medium     # which face slot draws a window frame's title · 1, 7 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 title.window.size             = 2.99u         # type size for a window frame's title · 1, 7 · u · 16 px at 1080p, 22 px at 1440p; size_u = size_vh x 2.6
 title.window.min_px           = @type.min_px  # px floor for this role · 1, 7 · device px · the global floor
 title.window.max_px           = 0px           # px ceiling for this role · 1, 7 · device px, 0px = uncapped · uncapped
@@ -2203,7 +2229,7 @@ title.window.synthetic_bold   = auto          # per-role override of the face's 
 # quantified in 5.16: at 1440p that is 18px caps, 14px small caps and
 # +2.5px between every pair of glyphs - a title reads ~40% wider than the
 # same string set solid
-title.panel.face              = ui_medium     # which face slot draws a panel title: MONITOR ZASOBOW · 1-10 · enum, a face id · no derivation; 5.16's role table
+title.panel.face              = ui_medium     # which face slot draws a panel title: MONITOR ZASOBOW · 1-10 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 title.panel.size              = 2.47u         # type size for a panel title: MONITOR ZASOBOW · 1-10 · u · 13 px at 1080p, 18 px at 1440p; size_u = size_vh x 2.6
 title.panel.min_px            = @type.min_px  # px floor for this role · 1-10 · device px · the global floor
 title.panel.max_px            = 0px           # px ceiling for this role · 1-10 · device px, 0px = uncapped · uncapped
@@ -2221,7 +2247,7 @@ title.panel.synthetic_bold    = auto          # per-role override of the face's 
 # an instrument label above a group
 # 0.180em because a short string must read as an instrument label rather
 # than a word
-label.section.face            = ui            # which face slot draws an instrument label above a group · 1, 9 · enum, a face id · no derivation; 5.16's role table
+label.section.face            = ui            # which face slot draws an instrument label above a group · 1, 9 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 label.section.size            = 2.03u         # type size for an instrument label above a group · 1, 9 · u · 11 px at 1080p, 15 px at 1440p; size_u = size_vh x 2.6
 label.section.min_px          = @type.min_px  # px floor for this role · 1, 9 · device px · the global floor
 label.section.max_px          = 0px           # px ceiling for this role · 1, 9 · device px, 0px = uncapped · uncapped
@@ -2238,7 +2264,7 @@ label.section.synthetic_bold  = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.body
 # ordinary running text
-body.face                     = ui            # which face slot draws ordinary running text · 1-10 · enum, a face id · no derivation; 5.16's role table
+body.face                     = ui            # which face slot draws ordinary running text · 1-10 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 body.size                     = 2.47u         # type size for ordinary running text · 1-10 · u · 13 px at 1080p, 18 px at 1440p; size_u = size_vh x 2.6
 body.min_px                   = @type.min_px  # px floor for this role · 1-10 · device px · the global floor
 body.max_px                   = 0px           # px ceiling for this role · 1-10 · device px, 0px = uncapped · uncapped
@@ -2254,7 +2280,7 @@ body.synthetic_bold           = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.body.dim
 # running text one step back: captions, legends
-body.dim.face                 = ui            # which face slot draws running text one step back: captions, legends · 1, 2 · enum, a face id · no derivation; 5.16's role table
+body.dim.face                 = ui            # which face slot draws running text one step back: captions, legends · 1, 2 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 body.dim.size                 = 2.47u         # type size for running text one step back: captions, legends · 1, 2 · u · 13 px at 1080p, 18 px at 1440p; size_u = size_vh x 2.6
 body.dim.min_px               = @type.min_px  # px floor for this role · 1, 2 · device px · the global floor
 body.dim.max_px               = 0px           # px ceiling for this role · 1, 2 · device px, 0px = uncapped · uncapped
@@ -2270,7 +2296,7 @@ body.dim.synthetic_bold       = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.value
 # the value half of key:value, 74%
-value.face                    = ui_medium     # which face slot draws the value half of key:value, 74% · 1, 7 · enum, a face id · no derivation; 5.16's role table
+value.face                    = ui_medium     # which face slot draws the value half of key:value, 74% · 1, 7 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 value.size                    = 3.25u         # type size for the value half of key:value, 74% · 1, 7 · u · 18 px at 1080p, 23 px at 1440p; size_u = size_vh x 2.6
 value.min_px                  = @type.min_px  # px floor for this role · 1, 7 · device px · the global floor
 value.max_px                  = 0px           # px ceiling for this role · 1, 7 · device px, 0px = uncapped · uncapped
@@ -2286,7 +2312,7 @@ value.synthetic_bold          = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.value.large
 # a donut gauge's centred readout, 92%
-value.large.face              = ui_medium     # which face slot draws a donut gauge's centred readout, 92% · 9 · enum, a face id · no derivation; 5.16's role table
+value.large.face              = ui_medium     # which face slot draws a donut gauge's centred readout, 92% · 9 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 value.large.size              = 4.68u         # type size for a donut gauge's centred readout, 92% · 9 · u · 25 px at 1080p, 34 px at 1440p; size_u = size_vh x 2.6
 value.large.min_px            = @type.min_px  # px floor for this role · 9 · device px · the global floor
 value.large.max_px            = 0px           # px ceiling for this role · 9 · device px, 0px = uncapped · uncapped
@@ -2302,7 +2328,7 @@ value.large.synthetic_bold    = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.caption
 # a launcher tile caption, FILES
-caption.face                  = ui            # which face slot draws a launcher tile caption, FILES · 1 · enum, a face id · no derivation; 5.16's role table
+caption.face                  = ui            # which face slot draws a launcher tile caption, FILES · 1 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 caption.size                  = 1.77u         # type size for a launcher tile caption, FILES · 1 · u · 10 px at 1080p, 13 px at 1440p; size_u = size_vh x 2.6
 caption.min_px                = @type.min_px  # px floor for this role · 1 · device px · the global floor
 caption.max_px                = 0px           # px ceiling for this role · 1 · device px, 0px = uncapped · uncapped
@@ -2318,7 +2344,7 @@ caption.synthetic_bold        = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.badge
 # a pill badge, CRITICAL / CONTAINED
-badge.face                    = ui_medium     # which face slot draws a pill badge, CRITICAL / CONTAINED · 1, 3, 4 · enum, a face id · no derivation; 5.16's role table
+badge.face                    = ui_medium     # which face slot draws a pill badge, CRITICAL / CONTAINED · 1, 3, 4 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 badge.size                    = 1.61u         # type size for a pill badge, CRITICAL / CONTAINED · 1, 3, 4 · u · 9 px at 1080p, 12 px at 1440p; size_u = size_vh x 2.6
 badge.min_px                  = @type.min_px  # px floor for this role · 1, 3, 4 · device px · the global floor
 badge.max_px                  = 0px           # px ceiling for this role · 1, 3, 4 · device px, 0px = uncapped · uncapped
@@ -2334,7 +2360,7 @@ badge.synthetic_bold          = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.button
 # a button cap, START / SZUKAJ
-button.face                   = ui_medium     # which face slot draws a button cap, START / SZUKAJ · 7, 9 · enum, a face id · no derivation; 5.16's role table
+button.face                   = ui_medium     # which face slot draws a button cap, START / SZUKAJ · 7, 9 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 button.size                   = 2.21u         # type size for a button cap, START / SZUKAJ · 7, 9 · u · 12 px at 1080p, 16 px at 1440p; size_u = size_vh x 2.6
 button.min_px                 = @type.min_px  # px floor for this role · 7, 9 · device px · the global floor
 button.max_px                 = 0px           # px ceiling for this role · 7, 9 · device px, 0px = uncapped · uncapped
@@ -2350,7 +2376,7 @@ button.synthetic_bold         = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.field
 # text typed into a field, browser
-field.face                    = ui            # which face slot draws text typed into a field, browser · 7 · enum, a face id · no derivation; 5.16's role table
+field.face                    = ui            # which face slot draws text typed into a field, browser · 7 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 field.size                    = 2.34u         # type size for text typed into a field, browser · 7 · u · 13 px at 1080p, 17 px at 1440p; size_u = size_vh x 2.6
 field.min_px                  = @type.min_px  # px floor for this role · 7 · device px · the global floor
 field.max_px                  = 0px           # px ceiling for this role · 7 · device px, 0px = uncapped · uncapped
@@ -2366,7 +2392,7 @@ field.synthetic_bold          = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.alert.banner
 # the top bar's alarm half
-alert.banner.face             = ui_medium     # which face slot draws the top bar's alarm half · 1, 4 · enum, a face id · no derivation; 5.16's role table
+alert.banner.face             = ui_medium     # which face slot draws the top bar's alarm half · 1, 4 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 alert.banner.size             = 2.34u         # type size for the top bar's alarm half · 1, 4 · u · 13 px at 1080p, 17 px at 1440p; size_u = size_vh x 2.6
 alert.banner.min_px           = @type.min_px  # px floor for this role · 1, 4 · device px · the global floor
 alert.banner.max_px           = 0px           # px ceiling for this role · 1, 4 · device px, 0px = uncapped · uncapped
@@ -2383,7 +2409,7 @@ alert.banner.synthetic_bold   = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.tooltip
 # a tooltip's text
-tooltip.face                  = ui            # which face slot draws a tooltip's text · - · enum, a face id · no derivation; 5.16's role table
+tooltip.face                  = ui            # which face slot draws a tooltip's text · - · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 tooltip.size                  = 1.87u         # type size for a tooltip's text · - · u · 10 px at 1080p, 13 px at 1440p; size_u = size_vh x 2.6
 tooltip.min_px                = @type.min_px  # px floor for this role · - · device px · the global floor
 tooltip.max_px                = 0px           # px ceiling for this role · - · device px, 0px = uncapped · uncapped
@@ -2399,7 +2425,7 @@ tooltip.synthetic_bold        = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.data
 # monospace coordinate and telemetry columns
-data.face                     = mono          # which face slot draws monospace coordinate and telemetry columns · 1, 2 · enum, a face id · no derivation; 5.16's role table
+data.face                     = mono          # which face slot draws monospace coordinate and telemetry columns · 1, 2 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 data.size                     = 1.87u         # type size for monospace coordinate and telemetry columns · 1, 2 · u · 10 px at 1080p, 14 px at 1440p; size_u = size_vh x 2.6
 data.min_px                   = @type.min_px  # px floor for this role · 1, 2 · device px · the global floor
 data.max_px                   = 0px           # px ceiling for this role · 1, 2 · device px, 0px = uncapped · uncapped
@@ -2419,7 +2445,7 @@ data.synthetic_bold           = auto          # per-role override of the face's 
 # the densest thing on screen: glyphs touch at -0.020em, leading 1.05
 # compresses a mono face's natural ~1.30 by 19%, and upper puts hex digits
 # and labels on one cap height so the block reads as a solid texture
-data.dump.face                = mono          # which face slot draws image 9's hexadecimal margins · 9 · enum, a face id · no derivation; 5.16's role table
+data.dump.face                = mono          # which face slot draws image 9's hexadecimal margins · 9 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 data.dump.size                = 1.35u         # type size for image 9's hexadecimal margins · 9 · u · 8* px at 1080p, 10 px at 1440p; size_u = size_vh x 2.6
 data.dump.min_px              = 8px           # px floor for this role · 9 · device px · pinned: below this the dump stops being a texture
 data.dump.max_px              = 13px          # px ceiling for this role · 9 · device px, 0px = uncapped · stops the instrument decoration becoming readable body text on a 4K panel
@@ -2436,7 +2462,7 @@ data.dump.synthetic_bold      = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.leader.label
 # a leader line's label, DAMAGE BREACH
-leader.label.face             = ui            # which face slot draws a leader line's label, DAMAGE BREACH · 1 · enum, a face id · no derivation; 5.16's role table
+leader.label.face             = ui            # which face slot draws a leader line's label, DAMAGE BREACH · 1 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 leader.label.size             = 1.82u         # type size for a leader line's label, DAMAGE BREACH · 1 · u · 10 px at 1080p, 13 px at 1440p; size_u = size_vh x 2.6
 leader.label.min_px           = @type.min_px  # px floor for this role · 1 · device px · the global floor
 leader.label.max_px           = 0px           # px ceiling for this role · 1 · device px, 0px = uncapped · uncapped
@@ -2452,7 +2478,7 @@ leader.label.synthetic_bold   = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.terminal
 # terminal cells
-terminal.face                 = mono          # which face slot draws terminal cells · 1 · enum, a face id · no derivation; 5.16's role table
+terminal.face                 = mono          # which face slot draws terminal cells · 1 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 terminal.size                 = 2.9u          # type size for terminal cells · 1 · u · 15.7 px at 1080p, 20.9 px at 1440p; size_u = size_vh x 2.6
 terminal.min_px               = @type.min_px  # px floor for this role · 1 · device px · the global floor
 terminal.max_px               = 0px           # px ceiling for this role · 1 · device px, 0px = uncapped · uncapped
@@ -2468,7 +2494,7 @@ terminal.synthetic_bold       = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.spare0
 # reserved role slot 0
-spare0.face                   = ui            # which face slot draws reserved role slot 0 · - · enum, a face id · no derivation; 5.16's role table
+spare0.face                   = ui            # which face slot draws reserved role slot 0 · - · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 spare0.size                   = 2.47u         # type size for reserved role slot 0 · - · u · 13 px at 1080p, 18 px at 1440p; size_u = size_vh x 2.6
 spare0.min_px                 = @type.min_px  # px floor for this role · - · device px · the global floor
 spare0.max_px                 = 0px           # px ceiling for this role · - · device px, 0px = uncapped · uncapped
@@ -2484,7 +2510,7 @@ spare0.synthetic_bold         = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.spare1
 # reserved role slot 1
-spare1.face                   = ui            # which face slot draws reserved role slot 1 · - · enum, a face id · no derivation; 5.16's role table
+spare1.face                   = ui            # which face slot draws reserved role slot 1 · - · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 spare1.size                   = 2.47u         # type size for reserved role slot 1 · - · u · 13 px at 1080p, 18 px at 1440p; size_u = size_vh x 2.6
 spare1.min_px                 = @type.min_px  # px floor for this role · - · device px · the global floor
 spare1.max_px                 = 0px           # px ceiling for this role · - · device px, 0px = uncapped · uncapped
@@ -2500,7 +2526,7 @@ spare1.synthetic_bold         = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.spare2
 # reserved role slot 2
-spare2.face                   = ui            # which face slot draws reserved role slot 2 · - · enum, a face id · no derivation; 5.16's role table
+spare2.face                   = ui            # which face slot draws reserved role slot 2 · - · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 spare2.size                   = 2.47u         # type size for reserved role slot 2 · - · u · 13 px at 1080p, 18 px at 1440p; size_u = size_vh x 2.6
 spare2.min_px                 = @type.min_px  # px floor for this role · - · device px · the global floor
 spare2.max_px                 = 0px           # px ceiling for this role · - · device px, 0px = uncapped · uncapped
@@ -2516,7 +2542,7 @@ spare2.synthetic_bold         = auto          # per-role override of the face's 
 
 # ---------------------------------------------------------------- type.spare3
 # reserved role slot 3
-spare3.face                   = ui            # which face slot draws reserved role slot 3 · - · enum, a face id · no derivation; 5.16's role table
+spare3.face                   = ui            # which face slot draws reserved role slot 3 · - · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
 spare3.size                   = 2.47u         # type size for reserved role slot 3 · - · u · 13 px at 1080p, 18 px at 1440p; size_u = size_vh x 2.6
 spare3.min_px                 = @type.min_px  # px floor for this role · - · device px · the global floor
 spare3.max_px                 = 0px           # px ceiling for this role · - · device px, 0px = uncapped · uncapped
@@ -2585,7 +2611,7 @@ brackets                  = "()"              # the opening and closing bracket 
 paren_alpha               = 0.55              # alpha of the brackets alone, not the word · 1, 7 · frac, 0..1 · the brackets read dimmer than the word - the detail that makes it look drawn rather than typed
 gap                       = 0.35em            # space between the value and the opening bracket · 1, 7 · em · no derivation
 case                      = none              # case transform applied to the suffix word · 1, 7 · enum: none | upper | lower | smallcaps · none, because (Zakonczone) is a word and not a label
-face                      = ui_medium         # face slot for the suffix word, overriding the role's own · 1, 7 · enum, a face id · one weight up from body so a status reads at a glance
+face                      = ui_medium         # face slot for the suffix word, overriding the role's own · 1, 7 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · one weight up from body so a status reads at a glance
 
 # TODO(default): chosen here, spec silent. 5.17 spells the face value
 #   "ui-medium"; a hyphen is not a legal ident (3.2) and 5.0's naming law 2
@@ -3482,12 +3508,12 @@ button          = @accent.primary   # the ladder's base for the parallelogram bu
 icon_button     = @accent.primary   # window controls, the close and add plates · 1,7 · col · @accent.primary
 chip            = @accent.primary   # the settings colour-depth chips · - · col · @accent.primary
 tab             = @accent.primary   # the shell's session tabs · - · col · @accent.primary
-menu.item       = @accent.primary   # a window-menu or drop-down row · - · col · @accent.primary
+menu.item       = @accent.primary   # a window-menu or context-menu row · - · col · @accent.primary; a DROP-DOWN's row is not one of these — it is a list row and wears list.item below
 field           = @accent.primary   # the search box and the SAVE AS name field · 7 · col · @accent.primary
 checkbox        = @accent.primary   # the SNAP TO GRID box · - · col · @accent.primary
 slider.track    = @accent.primary   # a slider's groove ring · - · col · @accent.primary
 slider.knob     = @accent.primary   # a slider's handle · - · col · @accent.primary
-list.item       = @accent.primary   # a task, notification or process row · 1,7 · col · @accent.primary
+list.item       = @accent.primary   # a task, notification or process row, and the row of an open drop-down · 1,7 · col · @accent.primary
 tile            = @accent.primary   # a launcher tile, a file tile, an ADD WIDGET entry · 1,8 · col · @accent.primary
 launcher.icon   = @accent.primary   # a launcher glyph · 1,8 · col · @accent.primary
 key             = @accent.primary   # an on-screen keyboard cap · 3,5 · col · @accent.primary
@@ -4068,26 +4094,49 @@ overflow           = scale             # policy for an overfull panel; -; one of
 overflow_min_scale = 0.62              # floor of the shrink-to-fit; below it, clip; -; f, 0.4 .. 1.0; stops role px drifting off the ladder (5.16). 0.62, NOT 5.29's 0.72: it matches the panel_font_scale clamp uptime and hardware sit on today — a 0.72 floor clips them under this very theme (u2 6.4). Raise to 0.72 only after u2 2.3/2.4's compact arrangements land
 
 # ---- element role bindings -----------------------------------------------
-# Every element kind maps to a type role (5.16, 24 names). The `text` element
-# names its own role in the call - text(content, align, #{ role: "value" }) -
-# and falls back to text_role when it does not. An unknown role name warns at
-# load and draws NOTHING: there is no spare role, because a role is twelve
-# tokens and a spare word would hide a whole ladder behind a name nobody
-# wrote.
+# Every element kind maps to a type role (5.16, 24 names), and THESE KEYS ARE
+# THE ONLY PLACE A SCRIPT'S TYPE SIZE IS CHOSEN. A call may not overrule one:
+# `rows` and `columns` used to take label_role and value_role options, which
+# is how the value half of four panels of the same kind came to be set at
+# three different sizes — network at 1.87u, uptime at 3.25u, memory's headline
+# figure at 1.77u UNDER its own swap readout. The options are gone; a widget
+# says what an element IS and this block says how big that is.
+# An unknown role name warns at load and draws NOTHING: there is no spare
+# role, because a role is twelve tokens and a spare word would hide a whole
+# ladder behind a name nobody wrote.
 # TODO(default): the role bindings below are named tokens here; 5.29 states
 # the bindings in its element table but does not spell the token names.
 title_role         = title.panel   # role for a `title` element; images 1-10; type role; the in-body heading, not the host's panel band
 text_role          = body          # role for a `text` element that names none; images 1,7; type role; the role of an element that states no role of its own — NOT a fallback for a role name that does not exist, which draws nothing
-rows_label_role    = caption       # role for the PROCESOR: half of a `rows` line; images 1,7; type role; -
-rows_value_role    = value         # role for the 74% half of a `rows` line; images 1,7; type role; tabular figures come from the role
-meter_label_role   = caption       # role for a `meter`'s label; images 1,7; type role; -
-meter_value_role   = value         # role for a `meter`'s numeric readout; images 1,7; type role; -
-columns_label_role = caption       # role for a `columns` label; images 1,9; type role; -
-columns_value_role = value         # role for a `columns` value; images 1,9; type role; -
+rows_label_role    = caption       # role for the PROCESOR: half of a `rows` line; images 1,7; type role; one label size for every widget on the screen
+rows_value_role    = value         # role for the 74% half of a `rows` line; images 1,7; type role; ONE value size for every widget on the screen — steady figures come from type.value.tabular, never from dropping to a smaller role
+meter_label_role   = caption       # role for a `meter`'s label; images 1,7; type role; = rows_label_role: a meter's label and a row's label are the same thing
+meter_value_role   = value         # role for a `meter`'s numeric readout; images 1,7; type role; = rows_value_role: MEMORY's swap readout and its headline figure are one ladder
+columns_label_role = caption       # role for a `columns` label; images 1,9; type role; = rows_label_role
+columns_value_role = value         # role for a `columns` value; images 1,9; type role; = rows_value_role
 table_head_role    = label.section # role for a `table` heading row; images 8,9; type role; -
-table_cell_role    = data          # role for a `table` body cell; images 8,9; type role; mono, tabular
+table_cell_role    = data          # role for a `table` body cell; images 8,9; type role; mono, tabular — a table is a dense grid of its own, not a stack of rows lines, and one cell size holds across every table
 badge_role         = badge         # role for the `badge` element's text; images 1,3,4; type role; the colours come from sev[i] at draw time
 group_label_role   = label.section # role for a `group` element's caption (u2 3.1 #13); images 1,7; type role; the instrument label above a section
+
+# ---- the kinds a script may name -----------------------------------------
+# A `text` element and a `runs` item may say WHAT their string is —
+# text(date, "center", #{ role: "date" }), #{ t: "0.42", role: "reading" } —
+# and this closed list is what the word may be. It is a statement about the
+# CONTENT, the same shape as severity: the script judges its data, the theme
+# decides what that judgement looks like. A script may NOT name a type role
+# here; that was the door through which `role: "data"` walked into
+# network.rhai, and it took a 74% size cut with it because `data` was the only
+# role that could be reached that also carried tabular figures.
+#
+# A word this block does not bind warns once and draws nothing — the same
+# answer every missing binding gives. Adding a kind is one line here; it needs
+# no code and no script rewrite anywhere else.
+kind_clock_role    = display.clock # the running time itself, 21:57:30; images 1,2,9; type role; the one role large enough to read across a room, and tabular so the line does not shift when a 1 becomes a 2
+kind_date_role     = display.date  # the date line under the clock; image 1; type role; a date is a number too — 14.11.2142 — and is set as one
+kind_label_role    = caption       # a word naming the reading beside it: LOAD, STATE; images 1,7; type role; = rows_label_role, so a label is one size whether it stands in a row or on a line of runs
+kind_reading_role  = value         # a measured quantity: a load average, a temperature, an address, a rate; images 1,7; type role; = rows_value_role. THIS is what network.rhai wanted when it reached for `data`: steady figures, which type.value.tabular now gives it at the size every other panel reads at
+kind_text_role     = body          # running prose inside a line of runs; -; type role; = text_role, which is also what an item naming no kind gets
 
 # ---- policy and remaining layout ----------------------------------------
 severity_fallback  = unknown       # what an unrecognised severity: argument resolves to; -; severity role name; NEVER ok (5.10)
@@ -4164,7 +4213,7 @@ content_pad = 2.8u                  # inset from the panel border to its content
 content_pad_x = same_as_parent      # horizontal half of content_pad, split when a theme wants it · images 1-10 · sentinel | len (u) · same_as_parent = @panel.content_pad
 content_pad_y = same_as_parent      # vertical half of content_pad · images 1-10 · sentinel | len (u) · same_as_parent = @panel.content_pad
 corner = @corner.md                 # panel corner radius · images 1,7 ("~8 px at 1440p") · len (u) · @corner.md = 1.2u = 6.5 px
-corner_mode = round                 # how that radius is cut · images 1,7 · enum: round | chamfer · family A may set chamfer
+corner_mode = @corner.mode          # how that radius is cut · images 1,7 · enum: round | chamfer · @corner.mode, the one place this file states its corner language
 border = @stroke.hair               # the resting panel ring · images 1-10, the brief's "thin glowing 1px border" · str · @stroke.hair
 border_focused = @stroke.regular    # the ring when the panel is the focused container · image 7 · str · @stroke.regular
 min_content_h = @rhythm.row         # the content box a short panel is never squeezed under; the container's degradation ladder (u2 §4.2) starts when the box would fall below it · images 1-10 · len (u) · @rhythm.row = 27.0 px
@@ -4262,7 +4311,7 @@ count_pad = 0.6u                    # padding around that number · images 7,9 �
 title_h = @titlebar.h               # the window title bar height · images 7,8 · len (u) · exactly today's vh(2.6); shared root
 border = @stroke.regular            # the frame ring · images 7,8 · str · today (vh*0.18).max(1.5) = 1.94
 corner = @corner.lg                 # frame corner radius · images 7,8 · len (u) · @corner.lg = 2.2u = 11.9 px
-corner_mode = chamfer               # how that corner is cut · images 7,8 · enum: round | chamfer · family A's language; family B sets round
+corner_mode = @corner.mode        # how that corner is cut · images 7,8 · enum: round | chamfer · @corner.mode, the one place this file states its corner language
 # The grip band lies OVER the title bar at the top edge and resize wins
 # over the title, so a band as deep as the bar leaves no title left to drag
 # by: at 1.1x this was 30.9 px against a bar of border + title_h = 30.0, and
@@ -4294,18 +4343,33 @@ rule = @stroke.hair                 # the title bar's floor line · images 7,8 �
 # hint/chevron/rule/submenu keys below, which the two older menus ignore.
 # =========================================================================
 [menu]
-row_h = 0.85x @titlebar.h           # one menu row · - · rat of @titlebar.h · 23.9 px; the drop-down's btn_h*0.8 = 36.3 unified down
+row_h = 1.05x @titlebar.h           # one menu row · - · rat of @titlebar.h · 29.5 px; raised from 0.85x (23.9 px) at the owner's ask 2026-08-16 — the unfolded elements sat too tight
 pad = 0.35x @menu.row_h             # padding inside the menu box · - · rat of @menu.row_h · 8.4 px
 min_w = 7.0x @titlebar.h            # minimum menu width · - · rat of @titlebar.h · 196.6 px
 corner = 0.5x @winframe.corner      # menu corner radius · - · rat of @winframe.corner · 5.9 px
 corner_mode = @winframe.corner_mode # how that radius is cut · - · enum: round | chamfer · @winframe.corner_mode; the window menu and the context menu are ONE object drawn twice, so the cut is decided once, where the radius already is
-border = @stroke.hair               # the menu's ring · - · str · @stroke.hair
+border = @stroke.hair               # the ring around the menu BOX · - · str · @stroke.hair; a ROW's ring is not this: a row is an instance of the menu.item class, whose ladder states an edge_width per rung (5.27), and the drop-down used to borrow this key for it — which pinned every row to one width and left the selected rung's thicker ring unreachable
 # TODO(default): 5.25 spells this `menu`, but `menu` is not one of 5.16's
 # 20 named type roles and 5.25 itself glosses it "(→ body)". Written as the
 # role that exists; if a `menu` role is added to 5.16, change this line.
 item.role = body                    # type role of a menu row's label · - · role · type.body, which 5.25's gloss names as the target anyway
-item_inset = 0.5x @menu.row_h       # left inset of a row's label · - · rat of @menu.row_h · 12.0 px
+item_inset = 0.7x @menu.row_h       # left inset of a row's label · - · rat of @menu.row_h · 20.7 px; raised with row_h 2026-08-16, the same ask
 item_text_threshold = 0.7x @menu.row_h   # below this height an unfolding row draws no text · - · rat of @menu.row_h · 16.7 px
+anchor_gap = @space.1               # the air between a control that unfolds and every element it unfolds · - · len (u) · @space.1 = 0.5u = 2.7 px; the smallest step that leaves BACKGROUND between two rings
+# ONE number, used twice over. A drop-down is no longer a box with rows
+# inside it: it is the anchor plus N separate elements, each dressed as the
+# anchor is — same plate, same ring, same corner, same class ladder. Two
+# complete rounded frames flush against each other stroke their shared edge
+# twice, and each one's corner curves into the other's so the rounding reads
+# as cancelled; this is the air that stops that happening. The owner asked
+# for every element of the list to be spaced exactly like the first, so the
+# SAME token stands between the anchor and element 0 and between element i
+# and element i+1. A list that took its outer gap from here and its inner
+# gap from `[list].gap` could not answer that with one line, which is why
+# the drop-down reads neither `[list].gap` nor `[list].rule` any more —
+# those are the furniture of a list drawn as one body, and this one is not.
+# The gap does not scale with the unfold: it is a distance between two
+# finished objects, not a share of an animation.
 anchor_width = anchor               # whether the menu takes its anchor's width or its own minimum · - · enum: anchor | min_w · -; context menus always size to content over the min_w floor
 rule = @stroke.hair                 # the separator between menu groups · - · str | none · @stroke.hair
 hint_role = caption                 # type role of the shortcut hint at a row's right edge · - · role · type.caption
@@ -4468,6 +4532,7 @@ label_role = body                   # type role of a row's label · images 1,7 �
 status_role = caption               # type role of the trailing status word · images 1,7 · role · type.caption, a step under the label so the status reads as an aside
 corner = @corner.sm                 # a row's corner radius, for the hover/selection plate behind it · images 1,7 · len (u) · @corner.sm = 0.8u = 4.3 px, the value the plugins borrowed from filetile.corner
 corner_style = @button.corner_style # which shape that plate's corners take · images 1,7 · enum: square | round | chamfer · follows the button: the plate is the row's whole hit target, and a hit target answers in the control language
+unfold_text_threshold = 0.7         # the share of a row's full height below which a row still unfolding draws no label · images 1,7 · frac · 0.7, the ratio [menu].item_text_threshold states against its own row height (0.7x @menu.row_h) — the drop-down reads it here because a drop-down element's LABEL is the list's (label_role above) even though its dress is the anchor's ([button]), and as a FRACTION because an element's height is the one its anchor hands it, never @list.row_h
 wheel_px = 8u                       # scroll distance per wheel notch in a row list · images 1,7 · len (u) · 43.2 px, the value the plugins borrowed from filetile.wheel_px
 scroll_gutter = 0u                  # width kept clear at the scrolling edge of a row so an overlay bar has its own lane · images 1,7 · len (u) · 0u = today's drawing, where scrollbar.mode = overlay lets the bar sit over the row's trailing status; a theme that wants the bar beside the text sets this to scrollbar.w plus twice scrollbar.margin
 
@@ -4578,10 +4643,11 @@ gap = @space.1                      # gap between two bars inside one gauge · i
 cols = 2                            # gauges per row when they are laid out in a grid · image 1 · n · -
 style = row                         # what one gauge is drawn as (u2 2.5) · image 1's rows, image 9's donuts · enum: row | cell | bar | donut · row since u2 §2.5 landed: label + thin track + value, image 1's instrument row; cell is the old framed box; bar and donut degrade to row until they can carry their value labels
 border = @stroke.hair               # the gauge's ring · image 1 · str · @stroke.hair
-label_role = caption                # type role of the numeric readout under a gauge · image 1 (`33.1106`) · role · type.caption
-label_inset = 0.6u                  # inset of that readout inside the gauge box · image 1 · len (u) · 3.2 px
-label_clearance = 1.2u              # fill closer to the number than this flips the number's colour · image 1 · len (u) · ui.rs:138's real contrast decision, now named
-min_h_for_label = 1.4x @type.caption.size   # below this height the readout is dropped entirely · image 1 · rat of @type.caption.size · -
+label_role = caption                # type role of the key half of a gauge row, `C0` · image 1 · role · type.caption, the role every other row label in the master is bound to (script.meter_label_role, columns.label_role)
+value_role = value                  # type role of a gauge's numeric readout, `12%` / `33.1106` · image 1 · role · type.value, the role every other numeric readout in the master is bound to (script.meter_value_role, columns.value_role, donut.label_role); ui.rs used to read type.caption.size by name for the label AND the readout, which set a reading at its own label's size
+value_inset = 0.6u                  # inset of that readout inside the gauge box · image 1 · len (u) · 3.2 px
+value_clearance = 1.2u              # fill closer to the number than this flips the number's colour · image 1 · len (u) · ui.rs:138's real contrast decision, now named
+min_h_for_value = 1.4x @type.value.size   # below this height the readout is dropped entirely · image 1 · rat of @type.value.size · the readout's OWN resting size, because the threshold guards the readout: written against the caption it guarded a line 1.8x shorter than the one drawn
 
 # =========================================================================
 # dotmatrix — the dot grid a script widget draws. gap_min_px guarantees
@@ -4758,13 +4824,13 @@ glide_halflife_ms = 160ms           # how long a glide takes to lose half its sp
 # where it is is a defect.
 # =========================================================================
 [scrollbar]
-mode = overlay                      # whether the bar takes layout space · - · enum: overlay | inset | none · overlay costs no layout, which is why it is the default
+mode = inset                        # whether the bar takes layout space · - · enum: overlay | inset | none · inset since 2026-08-16, the owner's ask: the bar stands BESIDE the content, even widened under the pointer — a bar over the controls read as a defect
 w = 1.2u                            # the resting bar width · - · len (u) · 6.5 px
 w_hover = 2u                        # the width under the pointer · - · len (u) · 10.8 px
 margin = @space.1                   # gap between bar and content edge · - · len (u) · @space.1 = 0.5u = 2.7 px
 thumb_min = 6u                      # minimum thumb length, so a long document still shows one · - · len (u) · 32.4 px
 corner = @corner.pill               # the thumb's radius · - · len (u) | pill · @corner.pill = w/2
-corner_style = round                # which shape that radius is cut to · - · enum: square | round | chamfer · a length is not a shape (5.4d): the radius beside it says `pill`, and a capsule is round by name
+corner_style = @corner.mode         # which shape that radius is cut to · - · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 track = off                         # whether the groove behind the thumb is drawn · - · enum: on | off · -
 auto_hide = true                    # whether the bar fades out when idle · - · bool · -
 fade_ms = 260ms                     # how long that fade takes, from the last movement · - · ms, 0ms .. 2000ms · read only when auto_hide = true; 0ms cuts the bar instead of fading it
@@ -4902,7 +4968,7 @@ min_h = 48u                         # minimum modal height · - · len (u) · 25
 min_h_min_px = 260px                # absolute floor for min_h · - · device px · companion of modal.min_h (3.2)
 pad = 2.8u                          # padding inside the modal · - · len (u) · 15.1 px
 corner = @corner.lg                 # the modal's corner radius · - · len (u) · @corner.lg = 2.2u = 11.9 px
-corner_mode = chamfer               # how that corner is cut · - · enum: round | chamfer · family B sets round
+corner_mode = @corner.mode        # how that corner is cut · - · enum: round | chamfer · @corner.mode, the one place this file states its corner language
 border = @stroke.regular            # the modal's ring · - · str · @stroke.regular
 scrim_alpha = 0.55                  # how far the scrim darkens what is behind · - · frac 0..1 · the colour is component.modal.scrim
 title.role = title.window           # type role of the modal title · - · role · type.title.window
@@ -4960,7 +5026,7 @@ body_line_gap = 15%                 # baseline distance between the two body lin
 [boot]
 pad_top = 6u                        # space above the first boot line · - · len (u) · 32.4 px
 pad_x = 7u                          # left/right padding of the boot log · - · len (u) · 37.8 px; today vw(2.0)
-line_role = body                    # type role of one boot line · - · role · type.body
+line_role = data                    # type role of one boot line · - · role · type.data: mono, tabular. A `[   0.0000] text` line is instrument data, and the binding has to AGREE with the face the line is drawn in: boot.rs drew every line in the monospace slot while this key said `body` (face `ui`), with a comment saying the face was the one part of a binding that could not be routed. It can (`Role::font`), so the key now says what the screen shows — and the stamps stop shivering, because `data` is tabular
 logo_role = display.hero            # type role of the product logo on the boot screen · - · role · type.display.hero
 sub_role = caption                  # type role of the version sub-line · - · role · type.caption
 duration_ms = 3000ms                # how long the boot screen is on screen at all · - · ms, 0ms .. 10000ms · boot.rs:32; a theme that ships no boot log wants 0ms
@@ -4999,6 +5065,7 @@ icon.w = 56%                        # the glyph's width · image 8 · % of the c
 icon.h = 50%                        # the glyph's height · image 8 · % of the cell's height · -
 icon.stroke = @stroke.thin          # the glyph's line weight · image 8 · str · @stroke.thin
 caption_role = tooltip              # type role of a file name · image 8 · role · type.tooltip
+error_role = alert.banner           # type role of the I/O error the panel shows instead of its tiles · image 8 · role · type.alert.banner, the role topbar.alarm.role already names for the same kind of sentence; fs/lib.rs spelled `type.alert.banner.*` out by name, which is a second binding nobody can edit
 caption_gap = 70%                   # gap between glyph and file name · image 8 · % of the caption block's height (3.2) · -
 wheel_px = 8u                       # scroll distance per wheel notch · image 8 · len (u) · 43.2 px
 row_justify = fill                  # fill stretches row pitch so the last visible row ends on the panel's floor; pack sits rows on filetile.gap · image 8 · enum: pack | fill · fs/lib.rs:266 — why the tiles do not sit on filetile.gap today
@@ -5089,7 +5156,7 @@ bar.fill = @data.line               # the filled part · images 1,5,7 · col · 
 bar.fill_warn = @severity.warning.text   # the filled part in a warning band · image 1's ENERGIA · col · @severity.warning.text
 bar.fill_crit = @severity.critical.text  # the filled part in a critical band · images 1,4 · col · @severity.critical.text
 bar.text = @text.primary            # the readout beside the bar · images 1,7 · col · @text.primary
-bar.text_on_fill = @accent.on       # that readout when it lands ON the fill · images 1,7 · col · ui.rs:138, the contrast flip gauge.label_clearance triggers
+bar.text_on_fill = @accent.on       # that readout when it lands ON the fill · images 1,7 · col · ui.rs:138, the contrast flip gauge.value_clearance triggers
 
 # ---------------------------------------------------------------- chart
 chart.line = @data.line             # the plot line · images 2,8 · col · @data.line
@@ -5306,7 +5373,7 @@ image.render.tint_strength = 1.0    # a wireframe IS a drawing, so it is fully t
 # checkbox              •    •     •     •    •     –    •      ring
 # slider.track          •    •     –     –    –     •    •      ring
 # slider.knob           •    •     •     –    –     •    •      –
-# list.item             •    •     •     •    •     •    •      –
+# list.item             •    •     •     •    •     •    •      ring*
 # tile                  •    •     •     •    •     •    •      –
 # launcher.icon         •    •     •     •    •     •    –      –
 # key                   •    •     •     •    •     –    •      –
@@ -5356,6 +5423,26 @@ image.render.tint_strength = 1.0    # a wireframe IS a drawing, so it is fully t
 # sort (F2 §2.1): the heading is a control now, and `selected` is the
 # SORTED column. A table that was never told it is interactive never asks
 # for those rungs, which is why the master's own tables look untouched.
+#
+# list.item's `selected` is the row ALREADY IN FORCE in an open
+# drop-down — the theme now applied, the layout now loaded. Once the
+# anchor was ruled to wear the list's own name rather than the choice,
+# an unmarked list left the standing choice unstated everywhere in the
+# window. What carries it is `fill`: the row's PLATE, cut to
+# `list.corner_style`. A drop-down row draws no ring at all, so `edge`
+# and `edge_width` reach nothing on it — that ring was what made an open
+# list read as a column of loose boxes, each with its own hairline and
+# two hairlines in every seam.
+#
+# `menu.item`'s own `selected` is the menu's checked row (menu.rs), and
+# that is now the only thing it is: a drop-down is not a menu.
+#
+# * list.item's focus cell reads `ring` where the class first went in
+#   with `–`. A list row in a panel is not in the focus chain and takes
+#   no ring; a drop-down's rows ARE registered in it (`AccordionStyle::
+#   focus`), and a chain member the ring skips is a keyboard user with
+#   no cursor. Focus is orthogonal to the ladder either way (5.21) — no
+#   rung moves for it.
 #
 # Two gaps the inventory exposed, which this table closes: slider.rs has no
 # hover, no drag and no disabled — a dragging slider looks identical to an

@@ -48,10 +48,10 @@ impl Surface for Probe {
     fn polyline(&mut self, pts: &[[f32; 2]], _w: f32, _c: Color, _closed: bool) {
         self.polys.push(pts.to_vec());
     }
-    fn text(&mut self, _px: f32, x: f32, y: f32, s: &str, _c: Color, _t: f32, a: Align) {
+    fn text(&mut self, _face: u8, _px: f32, x: f32, y: f32, s: &str, _c: Color, _t: f32, a: Align) {
         self.texts.push((x, y, s.to_string(), a));
     }
-    fn measure(&mut self, px: f32, s: &str, _track: f32) -> f32 {
+    fn measure(&mut self, _face: u8, px: f32, s: &str, _track: f32) -> f32 {
         s.chars().count() as f32 * px * 0.5
     }
     fn clip(&mut self, r: Rect) -> bool {
@@ -420,11 +420,11 @@ fn a_surface_that_cannot_clip_scrolls_by_whole_rows_instead() {
         fn polyline(&mut self, p: &[[f32; 2]], w: f32, c: Color, closed: bool) {
             self.0.polyline(p, w, c, closed)
         }
-        fn text(&mut self, px: f32, x: f32, y: f32, s: &str, c: Color, t: f32, a: Align) {
-            self.0.text(px, x, y, s, c, t, a)
+        fn text(&mut self, _face: u8, px: f32, x: f32, y: f32, s: &str, c: Color, t: f32, a: Align) {
+            self.0.text(_face, px, x, y, s, c, t, a)
         }
-        fn measure(&mut self, px: f32, s: &str, t: f32) -> f32 {
-            self.0.measure(px, s, t)
+        fn measure(&mut self, _face: u8, px: f32, s: &str, t: f32) -> f32 {
+            self.0.measure(_face, px, s, t)
         }
         fn clip(&mut self, _r: Rect) -> bool {
             false

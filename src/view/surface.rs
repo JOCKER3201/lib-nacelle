@@ -23,7 +23,6 @@
 //! `Look` struct ONCE per draw and never inside a row loop.
 
 use crate::draw::{Corner, CornerStyle};
-use crate::font::FONT_UI;
 use crate::theme::parse::State;
 use crate::theme::{self, Color, TokenId};
 use crate::ui::Align;
@@ -155,8 +154,68 @@ pub trait Surface {
         }
         self.rect(Rect::new(x0, y0, x1 - x0, y1 - y0), c);
     }
-    fn text(&mut self, px: f32, x: f32, y: f32, s: &str, c: Color, track: f32, align: Align);
-    fn measure(&mut self, px: f32, s: &str, track: f32) -> f32;
+    /// A run of text in `face` — a slot of [`crate::font::FACE_IDS`],
+    /// which is what `type.<role>.face` names.
+    ///
+    /// The face is a PARAMETER because it is the role's to state. Both
+    /// backends have always taken one — `DrawList::text` and
+    /// `HostApi::text` both begin with a font id — and this trait was the
+    /// one link in the chain that dropped it, writing `FONT_UI` on the far
+    /// side. That is how `script.table_cell_role = data` came to be drawn
+    /// in the interface face while `type.data.face = mono`: the role said
+    /// monospace, the surface said otherwise, and both were in this
+    /// library.
+    #[allow(clippy::too_many_arguments)]
+    fn text(
+        &mut self,
+        face: u8,
+        px: f32,
+        x: f32,
+        y: f32,
+        s: &str,
+        c: Color,
+        track: f32,
+        align: Align,
+    );
+    fn measure(&mut self, face: u8, px: f32, s: &str, track: f32) -> f32;
+
+    /// [`Surface::text`] under a role's figure box (§5.16 `tabular`,
+    /// §5.17): every figure is stepped by the widest of them and centred
+    /// in that step, so the run keeps its width when its digits change.
+    ///
+    /// `tabular` is the ROLE's bool, because that is all a caller holding
+    /// a [`crate::view::paint::RoleLook`] knows; how wide the box is has
+    /// to be measured from the face, which only the surface can reach.
+    ///
+    /// The default implementation draws proportionally. That is the
+    /// honest answer for a surface with no channel for the box — the ABI
+    /// gets one when §7.4's `text_role`/`measure_role` land — and never a
+    /// silent approximation of one.
+    #[allow(clippy::too_many_arguments)]
+    fn text_tab(
+        &mut self,
+        face: u8,
+        px: f32,
+        x: f32,
+        y: f32,
+        s: &str,
+        c: Color,
+        track: f32,
+        align: Align,
+        tabular: bool,
+    ) {
+        let _ = tabular;
+        self.text(face, px, x, y, s, c, track, align);
+    }
+
+    /// [`Surface::measure`] under the same box. It MUST agree with
+    /// [`Surface::text_tab`] on the same surface: a string trimmed
+    /// against one width and drawn at another is how a content-measured
+    /// column comes to ellipsise the very cell it was sized from.
+    fn measure_tab(&mut self, face: u8, px: f32, s: &str, track: f32, tabular: bool) -> f32 {
+        let _ = tabular;
+        self.measure(face, px, s, track)
+    }
 
     /// Clips everything drawn until the matching [`Surface::unclip`] to
     /// `r`, intersected with whatever clip is already in force.
@@ -368,20 +427,61 @@ impl Surface for CtxSurface<'_, '_> {
         self.ctx.dl.quad(pts, c);
     }
 
-    fn text(&mut self, px: f32, x: f32, y: f32, s: &str, c: Color, track: f32, align: Align) {
+    fn text(
+        &mut self,
+        face: u8,
+        px: f32,
+        x: f32,
+        y: f32,
+        s: &str,
+        c: Color,
+        track: f32,
+        align: Align,
+    ) {
         match align {
-            Align::Left => self.ctx.dl.text(self.ctx.fonts, FONT_UI, px, x, y, s, c, track),
+            Align::Left => self.ctx.dl.text(self.ctx.fonts, face, px, x, y, s, c, track),
             Align::Center => {
-                self.ctx.dl.text_center(self.ctx.fonts, FONT_UI, px, x, y, s, c, track)
+                self.ctx.dl.text_center(self.ctx.fonts, face, px, x, y, s, c, track)
             }
             Align::Right => {
-                self.ctx.dl.text_right(self.ctx.fonts, FONT_UI, px, x, y, s, c, track)
+                self.ctx.dl.text_right(self.ctx.fonts, face, px, x, y, s, c, track)
             }
         }
     }
 
-    fn measure(&mut self, px: f32, s: &str, track: f32) -> f32 {
-        self.ctx.fonts.measure(FONT_UI, px, s, track)
+    fn measure(&mut self, face: u8, px: f32, s: &str, track: f32) -> f32 {
+        self.ctx.fonts.measure(face, px, s, track)
+    }
+
+    fn text_tab(
+        &mut self,
+        face: u8,
+        px: f32,
+        x: f32,
+        y: f32,
+        s: &str,
+        c: Color,
+        track: f32,
+        align: Align,
+        tabular: bool,
+    ) {
+        let fig = crate::ui::figures(self.ctx.fonts, face, px, tabular);
+        match align {
+            Align::Left => {
+                self.ctx.dl.text_fig(self.ctx.fonts, face, px, x, y, s, c, track, &fig)
+            }
+            Align::Center => {
+                self.ctx.dl.text_center_fig(self.ctx.fonts, face, px, x, y, s, c, track, &fig)
+            }
+            Align::Right => {
+                self.ctx.dl.text_right_fig(self.ctx.fonts, face, px, x, y, s, c, track, &fig)
+            }
+        }
+    }
+
+    fn measure_tab(&mut self, face: u8, px: f32, s: &str, track: f32, tabular: bool) -> f32 {
+        let fig = crate::ui::figures(self.ctx.fonts, face, px, tabular);
+        self.ctx.fonts.measure_fig(face, px, s, track, &fig)
     }
 
     fn clip(&mut self, r: Rect) -> bool {
@@ -437,8 +537,12 @@ impl Surface for CtxSurface<'_, '_> {
         self.ctx.t
     }
 
+    /// The pointer this view may see: [`crate::pointer::Pointer::AWAY`]
+    /// while something else is drawn over it. Every hover in the toolkit
+    /// reads the pointer through this one method, so the rule reaches all
+    /// of them by being stated once here.
     fn mouse(&self) -> (f32, f32) {
-        self.ctx.mouse
+        self.ctx.mouse.at()
     }
 
     fn scale(&self) -> f32 {
@@ -451,7 +555,7 @@ impl Surface for CtxSurface<'_, '_> {
     /// would explain the wrong thing, and one comparison is cheaper than
     /// finding that out on screen.
     fn tooltip(&mut self, id: u64, anchor: Rect, text: &str) {
-        if !anchor.contains(self.ctx.mouse.0, self.ctx.mouse.1) {
+        if !self.ctx.mouse.over(anchor) {
             return;
         }
         let now = self.ctx.t;
@@ -603,15 +707,27 @@ impl Surface for AbiSurface<'_> {
         );
     }
 
-    fn text(&mut self, px: f32, x: f32, y: f32, s: &str, c: Color, track: f32, align: Align) {
+    fn text(
+        &mut self,
+        face: u8,
+        px: f32,
+        x: f32,
+        y: f32,
+        s: &str,
+        c: Color,
+        track: f32,
+        align: Align,
+    ) {
         let a = match align {
             Align::Left => 0,
             Align::Center => 1,
             Align::Right => 2,
         };
+        // The ABI has always carried a font id; this side is what used to
+        // write FONT_UI over whatever the role said.
         (self.api.text)(
             self.ctx,
-            FONT_UI as u32,
+            face as u32,
             px,
             x,
             y,
@@ -623,8 +739,8 @@ impl Surface for AbiSurface<'_> {
         );
     }
 
-    fn measure(&mut self, px: f32, s: &str, track: f32) -> f32 {
-        (self.api.measure)(self.ctx, FONT_UI as u32, px, s.as_ptr(), s.len() as u32, track)
+    fn measure(&mut self, face: u8, px: f32, s: &str, track: f32) -> f32 {
+        (self.api.measure)(self.ctx, face as u32, px, s.as_ptr(), s.len() as u32, track)
     }
 
     fn clip(&mut self, r: Rect) -> bool {
@@ -791,6 +907,11 @@ pub(crate) mod tests {
         pub rings: Vec<(Rect, CornerStyle, f32)>,
         /// Every stroked ring, same.
         pub strokes: Vec<(Rect, CornerStyle, f32)>,
+        /// Every polyline, as the points it was given. The icon
+        /// vocabulary — the sort marker, the disclosure triangle — says
+        /// what it means by WHERE it puts three points, so a fake that
+        /// dropped them could not tell one arrow from its opposite.
+        pub polylines: Vec<Vec<[f32; 2]>>,
         /// The tooltip requests the view filed, in the order it filed
         /// them — the last of a frame is the one the manager answers.
         pub tips: Vec<(u64, Rect, String)>,
@@ -818,6 +939,7 @@ pub(crate) mod tests {
                 clips: Vec::new(),
                 rings: Vec::new(),
                 strokes: Vec::new(),
+                polylines: Vec::new(),
                 tips: Vec::new(),
                 depth: 0,
                 can_clip: true,
@@ -860,7 +982,9 @@ pub(crate) mod tests {
         }
         fn rect_outline(&mut self, _r: Rect, _w: f32, _c: Color) {}
         fn line(&mut self, _a: f32, _b: f32, _c: f32, _d: f32, _w: f32, _col: Color) {}
-        fn polyline(&mut self, _p: &[[f32; 2]], _w: f32, _c: Color, _closed: bool) {}
+        fn polyline(&mut self, p: &[[f32; 2]], _w: f32, _c: Color, _closed: bool) {
+            self.polylines.push(p.to_vec());
+        }
         /// Recorded as a SHAPE, not degraded to its bounding rectangle:
         /// a fake that answered a ring with a rectangle could not tell a
         /// capsule from the square it was drawn instead of.
@@ -870,13 +994,13 @@ pub(crate) mod tests {
         fn ring(&mut self, r: Rect, style: CornerStyle, radius: f32, _w: f32, _c: Color) {
             self.strokes.push((r, style, radius));
         }
-        fn text(&mut self, _px: f32, x: f32, y: f32, s: &str, _c: Color, _t: f32, a: Align) {
+        fn text(&mut self, _face: u8, _px: f32, x: f32, y: f32, s: &str, _c: Color, _t: f32, a: Align) {
             self.texts.push((x, y, s.to_string(), a));
         }
         /// One unit per character: a measure that is wrong about fonts
         /// but right about monotonicity, which is all the trimming and
         /// the column solver ask of it.
-        fn measure(&mut self, px: f32, s: &str, _track: f32) -> f32 {
+        fn measure(&mut self, _face: u8, px: f32, s: &str, _track: f32) -> f32 {
             s.chars().count() as f32 * px * 0.5
         }
         fn clip(&mut self, r: Rect) -> bool {
@@ -962,9 +1086,20 @@ pub(crate) mod tests {
             fn rect_outline(&mut self, _r: Rect, _w: f32, _c: Color) {}
             fn line(&mut self, _a: f32, _b: f32, _c: f32, _d: f32, _w: f32, _col: Color) {}
             fn polyline(&mut self, _p: &[[f32; 2]], _w: f32, _c: Color, _closed: bool) {}
-            fn text(&mut self, _p: f32, _x: f32, _y: f32, _s: &str, _c: Color, _t: f32, _a: Align) {
+            #[allow(clippy::too_many_arguments)]
+            fn text(
+                &mut self,
+                _f: u8,
+                _p: f32,
+                _x: f32,
+                _y: f32,
+                _s: &str,
+                _c: Color,
+                _t: f32,
+                _a: Align,
+            ) {
             }
-            fn measure(&mut self, _px: f32, _s: &str, _t: f32) -> f32 {
+            fn measure(&mut self, _face: u8, _px: f32, _s: &str, _t: f32) -> f32 {
                 0.0
             }
             fn clip(&mut self, _r: Rect) -> bool {

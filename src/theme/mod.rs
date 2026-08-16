@@ -53,6 +53,7 @@
 pub mod bake;
 pub mod cascade;
 pub mod color;
+pub mod edit;
 pub mod expr;
 pub mod mood;
 pub mod parse;
@@ -179,12 +180,42 @@ struct Engine {
     /// handing out `&'static` from [`resolved`] affordable: a resize storm
     /// re-uses a bake instead of leaking one per event.
     cache: HashMap<(usize, u32), &'static ResolvedTheme>,
+    /// The same bakes the map above holds, reached WITHOUT the resolve that
+    /// computes their key. `cache` is keyed on the `u` a resolve has to
+    /// produce first, so every miss on [`set_viewport`]'s repeat check paid
+    /// for resolving every token in the theme — and two monitors of unequal
+    /// height alternate viewports every frame, which is never a repeat. What
+    /// a viewport bakes to cannot change while the schema and the siblings
+    /// stand, so the viewport itself is a sound key.
+    by_viewport: HashMap<(usize, u32, u32), &'static ResolvedTheme>,
+    /// Values the theme editor is trying out, laid over the active sibling.
+    /// Empty whenever nobody is editing, which is every run of the program
+    /// that never opens the editor.
+    ///
+    /// A preview is NOT a theme change: the file on disk still says what it
+    /// said, and switching mood or variant must keep working underneath. So
+    /// these sit beside the siblings rather than becoming one, and
+    /// [`content_epoch`] does not move for them — the font slots are named by
+    /// the file, and a colour being tried out cannot rename them.
+    preview: Vec<(TokenId, expr::Expr)>,
+    /// Moves when the preview SET changes; keys `preview_cache` so a set
+    /// that has not changed re-uses its bake instead of leaking one per
+    /// frame. Without this, `set_viewport`'s per-screen call re-baked the
+    /// preview on every frame of every screen — the morning's 100 % CPU
+    /// fault, reintroduced through a different door, plus ~9 MB/s of
+    /// leaked bakes on a two-monitor desktop.
+    preview_rev: u32,
+    preview_cache: HashMap<(usize, u32, u32, u32), &'static ResolvedTheme>,
     diagnostics: Arc<ThemeDiagnostics>,
 }
 
 static ENGINE: OnceLock<Mutex<Engine>> = OnceLock::new();
 static ACTIVE: AtomicPtr<ResolvedTheme> = AtomicPtr::new(std::ptr::null_mut());
 static EPOCH: AtomicU32 = AtomicU32::new(0);
+static RESOLVES: AtomicU32 = AtomicU32::new(0);
+/// Bumped when the theme's CONTENT changes — a load, a mood, a variant — and
+/// never when the viewport does. See [`content_epoch`].
+static CONTENT_EPOCH: AtomicU32 = AtomicU32::new(0);
 static DIAGS: OnceLock<Mutex<Arc<ThemeDiagnostics>>> = OnceLock::new();
 
 fn diags_slot() -> &'static Mutex<Arc<ThemeDiagnostics>> {
@@ -231,6 +262,43 @@ fn empty_theme() -> &'static ResolvedTheme {
 /// resize, format change (§7.4).
 pub fn epoch() -> u32 {
     EPOCH.load(Ordering::Acquire)
+}
+
+/// Moves when the theme's CONTENT changes: a load, a mood, a variant. It does
+/// NOT move when the viewport does.
+///
+/// [`epoch`] answers a different question — WHICH BAKE is published — and on a
+/// desktop whose monitors are unequal heights there are two live bakes, one
+/// per unit size, published in turn as each screen draws. Its value therefore
+/// alternates every frame, forever, by design.
+///
+/// That makes [`epoch`] a correct cache key and a ruinous change-detector. A
+/// consumer holding ONE remembered epoch and asking "has anything changed?"
+/// gets `true` on every frame of a mixed-height desktop. Anything asking
+/// whether the theme has changed under it — which families the face slots
+/// name, which colours a palette holds — wants this counter instead.
+///
+/// (Written after the font system, guarding its face reload with [`epoch`],
+/// walked the font directories and re-parsed every face file sixty times a
+/// second and put `--desktop` at 100 % CPU.)
+pub fn content_epoch() -> u32 {
+    CONTENT_EPOCH.load(Ordering::Acquire)
+}
+
+/// How many times the engine has resolved the theme in this process.
+///
+/// A diagnostic, and the only witness this one has. A resolve walks every
+/// token in the file, so it belongs to a theme load, a mood, a variant or a
+/// screen height the session has not seen before — never to a frame. Nothing
+/// else the engine exposes can tell a re-resolve from a cache hit: the
+/// published pointer and [`epoch`] read exactly the same either way, which is
+/// how `--desktop` came to resolve the whole theme twice a frame on a
+/// mixed-height desktop without a single observable saying so.
+///
+/// Rises monotonically. Compare two readings; the absolute value means
+/// nothing.
+pub fn resolves() -> u32 {
+    RESOLVES.load(Ordering::Relaxed)
 }
 
 /// The strings that came with the loaded theme.
@@ -617,6 +685,10 @@ pub fn load_with(req: LoadRequest) -> Arc<ThemeDiagnostics> {
         active: 0,
         viewport,
         cache: HashMap::new(),
+        by_viewport: HashMap::new(),
+        preview: Vec::new(),
+        preview_rev: 0,
+        preview_cache: HashMap::new(),
         diagnostics: Arc::new(ThemeDiagnostics::default()),
     };
 
@@ -630,6 +702,9 @@ pub fn load_with(req: LoadRequest) -> Arc<ThemeDiagnostics> {
     let diags = Arc::new(meta);
     engine.diagnostics = diags.clone();
     publish(theme);
+    // A load replaces the file the slots are named in, so everything derived
+    // from the theme's CONTENT — the face slots above all — is now stale.
+    CONTENT_EPOCH.fetch_add(1, Ordering::Release);
     *diags_slot().lock().unwrap() = diags.clone();
 
     match ENGINE.get() {
@@ -671,16 +746,84 @@ fn explicit_density(schema: &Schema, spec: &ThemeSpec) -> (bool, bool) {
 impl Engine {
     fn bake_active(&mut self, out: &mut Vec<Diagnostic>) -> &'static ResolvedTheme {
         let i = self.active.min(self.siblings.len().saturating_sub(1));
-        let s = &self.siblings[i];
-        let r = resolve::resolve(&self.schema, &s.spec, out);
+        // Asked BEFORE the resolve, never after. The `u` that keys `cache`
+        // is what a resolve produces, so reaching that cache costs a full
+        // resolve of the whole theme — and `set_viewport` only drops a
+        // REPEAT of the last viewport, which two alternating monitor
+        // heights never are. Without this the program resolved every token
+        // twice a frame, for as long as it ran, on any desktop whose
+        // screens are not the same height.
+        // A preview bypasses the two STANDING caches — reading either would
+        // answer with the file's colours while the editor shows other ones —
+        // and keeps its own, keyed additionally by `preview_rev`. The
+        // revision is what makes keeping safe: every change to the set bumps
+        // it and drains the map, so a bake can never outlive the values it
+        // was made of. Without this memo a STANDING preview was re-baked by
+        // `set_viewport` on every frame of every screen — the morning's
+        // 100 % CPU fault through another door, plus ~9 MB/s of leaked
+        // bakes on a two-monitor desktop, plus a plate re-bake per frame.
+        //
+        // Verified limit, recorded not fixed: with THREE or more screens the
+        // frozen per-bake epochs can collide so that `poll_plates` misses
+        // one re-bake of the decoration after a preview pulse. Unreachable
+        // with two screens; the same class exists on the ordinary path at
+        // `set_sibling`.
+        if !self.preview.is_empty() {
+            let pk = (
+                i,
+                self.viewport.screen_h.to_bits(),
+                self.viewport.ui_scale.to_bits(),
+                self.preview_rev,
+            );
+            if let Some(&t) = self.preview_cache.get(&pk) {
+                return t;
+            }
+            let (mut spec, explicit_density) = {
+                let s = &self.siblings[i];
+                (s.spec.clone(), s.explicit_density)
+            };
+            for (id, e) in &self.preview {
+                if let Some(slot) = spec.exprs.get_mut(id.index()) {
+                    *slot = e.clone();
+                }
+            }
+            let r = resolve::resolve(&self.schema, &spec, out);
+            let input = BakeInput {
+                viewport: self.viewport,
+                epoch: EPOCH.load(Ordering::Acquire).wrapping_add(1),
+                explicit_density,
+            };
+            RESOLVES.fetch_add(1, Ordering::Relaxed);
+            let baked: &'static ResolvedTheme =
+                Box::leak(Box::new(bake::bake(&self.schema, &r, &input, out)));
+            self.preview_cache.insert(pk, baked);
+            return baked;
+        }
+        let vk = (
+            i,
+            self.viewport.screen_h.to_bits(),
+            self.viewport.ui_scale.to_bits(),
+        );
+        if let Some(&t) = self.by_viewport.get(&vk) {
+            return t;
+        }
+        RESOLVES.fetch_add(1, Ordering::Relaxed);
+        let (r, explicit_density) = {
+            let s = &self.siblings[i];
+            (
+                resolve::resolve(&self.schema, &s.spec, out),
+                s.explicit_density,
+            )
+        };
         let input = BakeInput {
             viewport: self.viewport,
             epoch: EPOCH.load(Ordering::Acquire).wrapping_add(1),
-            explicit_density: s.explicit_density,
+            explicit_density,
         };
         let probe = bake::metrics(&self.schema, &r, &input, &mut Vec::new());
         let key = (i, probe.u.to_bits());
-        if let Some(t) = self.cache.get(&key) {
+        if let Some(&t) = self.cache.get(&key) {
+            self.by_viewport.insert(vk, t);
             return t;
         }
         let baked: &'static ResolvedTheme = Box::leak(Box::new(bake::bake(
@@ -690,6 +833,7 @@ impl Engine {
             out,
         )));
         self.cache.insert(key, baked);
+        self.by_viewport.insert(vk, baked);
         baked
     }
 }
@@ -722,6 +866,102 @@ pub fn set_viewport(screen_h: f32, ui_scale: f32) {
     }
 }
 
+/// Lays a set of values over the theme, so the editor can be SEEN rather than
+/// described. Returns what it refused, empty when it took everything.
+///
+/// Each entry is a token name and the text a person just produced — the same
+/// text that would be written into the file — read by the file's own parser
+/// (`parse::parse_value`), so nothing can be previewed that could not be
+/// saved. An unknown token or a value the parser rejects is refused by name
+/// and the rest still applies.
+///
+/// # Not a theme change
+///
+/// [`content_epoch`] does not move. A preview cannot rename a font slot: the
+/// face names come from the file, and the file has not changed. Moving it
+/// would wake the whole face reload — a walk of the font directories and an
+/// atlas reset — behind every slider.
+///
+/// # WHY THE CALLER STILL PACES ITSELF
+///
+/// A bake is 76 031 bytes, measured, and nothing ever frees one: they are
+/// handed out as `&'static` so that reading the theme costs one atomic load
+/// with no lifetime to thread through a draw call. The revision memo means a
+/// STANDING set costs nothing per frame — but every CHANGED set is a fresh
+/// bake per screen, permanently. A caller applying every motion event at
+/// sixty a second would leak 4.5 MB/s; the desktop's editor pulses at ten,
+/// which is ~0.8 MB for a second of active dragging and nothing once the
+/// hand stops.
+///
+/// If a preview on every tick is ever wanted, the thing to change is not this
+/// function: it is that bakes are leaked. Retiring them means the lock-free
+/// `&'static` read path everything draws through has to grow a lifetime or a
+/// refcount, which is a change to the engine's shape rather than an addition.
+pub fn set_preview(values: &[(&str, &str)]) -> Vec<String> {
+    let Some(slot) = ENGINE.get() else {
+        return values.iter().map(|(n, _)| format!("{n}: no theme loaded")).collect();
+    };
+    let Ok(mut g) = slot.lock() else {
+        return values.iter().map(|(n, _)| format!("{n}: the theme engine is poisoned")).collect();
+    };
+    let mut refused = Vec::new();
+    let mut taken = Vec::with_capacity(values.len());
+    for (name, text) in values {
+        let Some(id) = g.schema.id(name) else {
+            refused.push(format!("{name}: no such token"));
+            continue;
+        };
+        let mut out = Vec::new();
+        let e = parse::parse_value(text, Span::default(), &mut out);
+        // The parser reports trailing text as a warning rather than an error,
+        // and for a file that is right — a person can see the line. Here the
+        // text came from a control, so anything left over means the control
+        // produced something it did not mean to, and it is refused.
+        if let Some(d) = out.first() {
+            refused.push(format!("{name}: {}", d.message));
+            continue;
+        }
+        taken.push((id, e));
+    }
+    g.preview = taken;
+    // A new set is a new revision; the old revision's bakes will never be
+    // asked for again, so the map is drained rather than left to grow.
+    g.preview_rev = g.preview_rev.wrapping_add(1);
+    g.preview_cache.clear();
+    let mut out = Vec::new();
+    let t = g.bake_active(&mut out);
+    publish(t);
+    refused
+}
+
+/// Puts the theme back the way the file has it. What CANCEL is made of.
+///
+/// Cheap and total: the preview never touched the siblings, so there is
+/// nothing to undo — the overrides are dropped and the next bake comes from
+/// the cache the preview was bypassing.
+pub fn clear_preview() {
+    let Some(slot) = ENGINE.get() else { return };
+    let Ok(mut g) = slot.lock() else { return };
+    if g.preview.is_empty() {
+        return;
+    }
+    g.preview.clear();
+    g.preview_rev = g.preview_rev.wrapping_add(1);
+    g.preview_cache.clear();
+    let mut out = Vec::new();
+    let t = g.bake_active(&mut out);
+    publish(t);
+}
+
+/// Whether values are currently laid over the file's own.
+pub fn previewing() -> bool {
+    ENGINE
+        .get()
+        .and_then(|s| s.lock().ok())
+        .map(|g| !g.preview.is_empty())
+        .unwrap_or(false)
+}
+
 /// Every resolved sibling, in selection order. Index 0 is the plain theme.
 pub fn siblings() -> Vec<String> {
     ENGINE
@@ -746,6 +986,10 @@ pub fn set_sibling(i: usize) -> bool {
     let mut out = Vec::new();
     let t = g.bake_active(&mut out);
     publish(t);
+    // A sibling is a different mood or variant, so its `[face]` block may
+    // name other families than the one standing — a content change, unlike
+    // the viewport swaps that pass through `set_viewport`.
+    CONTENT_EPOCH.fetch_add(1, Ordering::Release);
     true
 }
 

@@ -72,6 +72,19 @@ pub struct RoleLook {
     pub track: f32,
     /// Line height as a multiple of `px`.
     pub leading: f32,
+    /// Whether this role sets its figures on a fixed advance (§5.16's
+    /// `tabular`). Carried as the ROLE's bool and handed to
+    /// [`Surface::text_tab`], which measures the box from the face —
+    /// this side of the library owns tokens, not faces.
+    pub tabular: bool,
+    /// The slot `type.<role>.face` names — the family AND the weight this
+    /// role is set in, since the master declares both on the face block.
+    ///
+    /// This field is why the struct exists in the shape it does: a look
+    /// read once per draw is only worth having if it carries everything
+    /// the row loop needs, and the row loop was writing `FONT_UI` because
+    /// the face was the one thing it could not get from here.
+    pub face: u8,
     /// The role's own ink: `fg` at its constant alpha.
     pub color: Color,
 }
@@ -86,8 +99,17 @@ pub struct RoleLook {
 /// [`crate::ui::role`] makes for the objects that draw against `Ctx`,
 /// made once more here because this is the resolver every view, every
 /// script table and the whole ABI side goes through.
-pub const NO_ROLE: RoleLook =
-    RoleLook { px: 0.0, track: 0.0, leading: 0.0, color: Color::TRANSPARENT };
+pub const NO_ROLE: RoleLook = RoleLook {
+    px: 0.0,
+    track: 0.0,
+    leading: 0.0,
+    tabular: false,
+    // The interface slot, which is where an undesigned run has always
+    // landed. Nothing is drawn in this look anyway — px is zero — so the
+    // face is the one field here that cannot decide anything.
+    face: crate::font::FONT_UI,
+    color: Color::TRANSPARENT,
+};
 
 /// Resolves a type role by name. A name no `type.*` block declares warns
 /// once and answers [`NO_ROLE`]: naming a role the theme does not have is
@@ -125,10 +147,17 @@ pub fn role_look(sf: &mut impl Surface, name: &str, shrink: f32) -> RoleLook {
     // line height is a broken role, and the height of a broken role is
     // not this file's to invent.
     let leading = sf.px(&format!("type.{name}.leading"));
+    // §5.16's `tabular`, read here so that every view, every script table
+    // and the whole ABI side gets it from ONE resolver.
+    let tabular = sf.flag(&format!("type.{name}.tabular"));
+    // §5.16's `face`, read through the same one resolver and by the same
+    // word→slot rule `ui::Role::font` uses. Reading it here is what stops
+    // a view and an object disagreeing about which family one role is in.
+    let face = crate::font::face_slot(&sf.word(&format!("type.{name}.face")));
     let mut color = sf.color(&format!("type.{name}.fg"));
     let alpha = sf.px(&format!("type.{name}.alpha"));
     color.a *= if alpha > 0.0 { alpha.min(1.0) } else { 1.0 };
-    RoleLook { px, track, leading, color }
+    RoleLook { px, track, leading, tabular, face, color }
 }
 
 /// The role a `*_role` binding token names — `script.table_head_role`,
@@ -210,15 +239,48 @@ pub fn corner_radius(sf: &mut impl Surface, name: &str, r: Rect, shrink: f32) ->
 ///
 /// Measuring at a different tracking is how a content-measured table
 /// column came to ellipsise the very cell it was sized from.
-pub fn fit_end(sf: &mut impl Surface, px: f32, text: &str, max_w: f32, track: f32) -> String {
-    if sf.measure(px, text, track) <= max_w {
+pub fn fit_end(
+    sf: &mut impl Surface,
+    face: u8,
+    px: f32,
+    text: &str,
+    max_w: f32,
+    track: f32,
+) -> String {
+    fit_end_tab(sf, face, px, text, max_w, track, false)
+}
+
+/// [`fit_end`] measured under the role's figure box. The same rule one
+/// rung further: a tabular column trimmed against proportional widths
+/// ellipsises a cell that fits, because every figure it holds is drawn
+/// wider than it was measured.
+pub fn fit_end_tab(
+    sf: &mut impl Surface,
+    face: u8,
+    px: f32,
+    text: &str,
+    max_w: f32,
+    track: f32,
+    tabular: bool,
+) -> String {
+    // No room at all is not a width to abbreviate to: the ellipsis this
+    // used to answer with is a glyph as wide as any other, so it went
+    // over whatever squeezed the room shut. `draw::fit_tail` and the
+    // panel band's `fit_lead` have both ruled it that way since they
+    // were written, and `winframe::fit_title` had to re-state it locally
+    // because THIS function did not — a trimming rule stated three times
+    // and contradicted once. Stated here, it is the toolkit's answer.
+    if max_w <= 0.0 {
+        return String::new();
+    }
+    if sf.measure_tab(face, px, text, track, tabular) <= max_w {
         return text.to_string();
     }
     let chars: Vec<char> = text.chars().collect();
     let mut n = chars.len().saturating_sub(1);
     while n > 1 {
         let cand: String = chars[..n].iter().collect::<String>() + "\u{2026}";
-        if sf.measure(px, &cand, track) <= max_w {
+        if sf.measure_tab(face, px, &cand, track, tabular) <= max_w {
             return cand;
         }
         n -= 1;
@@ -260,7 +322,35 @@ pub fn explain_trim(sf: &mut impl Surface, id: u64, anchor: Rect, shown: &str, f
 /// text are kept; an empty `max_w` (or one narrower than a character)
 /// answers one line per source line, unbroken, so a nonsense width
 /// degrades to "no wrapping" instead of to an endless loop.
-pub fn wrap(sf: &mut impl Surface, px: f32, text: &str, max_w: f32, track: f32) -> Vec<String> {
+pub fn wrap(
+    sf: &mut impl Surface,
+    face: u8,
+    px: f32,
+    text: &str,
+    max_w: f32,
+    track: f32,
+) -> Vec<String> {
+    wrap_tab(sf, face, px, text, max_w, track, false)
+}
+
+/// [`wrap`] measured under the role's figure box (§5.16 `tabular`), the
+/// same rung [`fit_end_tab`] is to [`fit_end`].
+///
+/// A break is a MEASUREMENT, and a run that is drawn with a box and
+/// broken without one is broken in the wrong places: every figure of the
+/// candidate line is drawn wider than it was ruled, so the box overflows
+/// on the right exactly as far as the digits it holds. That is the
+/// mismatch `fit_end_tab` was written for, one line-breaking further on.
+#[allow(clippy::too_many_arguments)]
+pub fn wrap_tab(
+    sf: &mut impl Surface,
+    face: u8,
+    px: f32,
+    text: &str,
+    max_w: f32,
+    track: f32,
+    tabular: bool,
+) -> Vec<String> {
     let mut out = Vec::new();
     for para in text.split('\n') {
         if max_w <= 0.0 {
@@ -274,7 +364,7 @@ pub fn wrap(sf: &mut impl Surface, px: f32, text: &str, max_w: f32, track: f32) 
             } else {
                 format!("{line} {word}")
             };
-            if sf.measure(px, &cand, track) <= max_w {
+            if sf.measure_tab(face, px, &cand, track, tabular) <= max_w {
                 line = cand;
                 continue;
             }
@@ -283,7 +373,7 @@ pub fn wrap(sf: &mut impl Surface, px: f32, text: &str, max_w: f32, track: f32) 
             }
             // The word alone on its line: kept whole when it fits,
             // broken by characters when nothing else can be done.
-            if sf.measure(px, word, track) <= max_w {
+            if sf.measure_tab(face, px, word, track, tabular) <= max_w {
                 line = word.to_string();
                 continue;
             }
@@ -291,7 +381,7 @@ pub fn wrap(sf: &mut impl Surface, px: f32, text: &str, max_w: f32, track: f32) 
             for ch in word.chars() {
                 let mut cand = piece.clone();
                 cand.push(ch);
-                if !piece.is_empty() && sf.measure(px, &cand, track) > max_w {
+                if !piece.is_empty() && sf.measure_tab(face, px, &cand, track, tabular) > max_w {
                     out.push(std::mem::take(&mut piece));
                     piece.push(ch);
                 } else {
@@ -323,17 +413,39 @@ pub fn cell_text(
     y: f32,
     w: f32,
     align: Align,
+    face: u8,
     px: f32,
     text: &str,
     color: Color,
     track: f32,
+) {
+    cell_text_tab(sf, x, y, w, align, face, px, text, color, track, false);
+}
+
+/// [`cell_text`] under the role's figure box — the form a numeric column
+/// takes. `PID 1471` and `PID 1888` then occupy the same width, which is
+/// the difference between a column that stands still and one that moves
+/// a pixel or two every time a process is replaced.
+#[allow(clippy::too_many_arguments)]
+pub fn cell_text_tab(
+    sf: &mut impl Surface,
+    x: f32,
+    y: f32,
+    w: f32,
+    align: Align,
+    face: u8,
+    px: f32,
+    text: &str,
+    color: Color,
+    track: f32,
+    tabular: bool,
 ) {
     let tx = match align {
         Align::Left => x,
         Align::Center => x + w / 2.0,
         Align::Right => x + w,
     };
-    sf.text(px, tx, y, text, color, track, align);
+    sf.text_tab(face, px, tx, y, text, color, track, align, tabular);
 }
 
 /// The number at the front of a formatted cell (`"41.2%"` → 41.2), for a
@@ -397,7 +509,7 @@ pub fn badge(
     shrink: f32,
 ) -> f32 {
     let role = bound_role(sf, "script.badge_role", shrink);
-    let tw = sf.measure(role.px, text, role.track);
+    let tw = sf.measure_tab(role.face, role.px, text, role.track, role.tabular);
     let pad = sf.px("badge.pad_x") * shrink;
     // No floor under either: a `.max(1.0)` here is a one-pixel badge
     // nobody's theme asked for. `badge.h = 0` means the master wants no
@@ -449,7 +561,10 @@ pub fn badge(
         sf.ring(pill, cut, radius, bw, edge);
     }
     let ty = center_line_y(sf, y, h, role.px, role.leading);
-    sf.text(role.px, x + w / 2.0, ty, text, ink, role.track, Align::Center);
+    sf.text_tab(
+        role.face, role.px, x + w / 2.0, ty, text, ink, role.track, Align::Center,
+        role.tabular,
+    );
     w
 }
 
@@ -481,8 +596,34 @@ pub fn sort_marker(
     sf.polyline(&pts, hair, color, true);
 }
 
-/// The expander beside a tree row: a triangle pointing right when the
-/// node is closed and down when it is open.
+/// Which GRAMMAR a [`disclosure`] triangle is drawn in.
+///
+/// The two consumers draw the same three points and mean opposite things
+/// by them, and that is the whole of the difference — so this is one
+/// primitive with a parameter and not two triangles. Two copies would
+/// let a theme's hairline, its centring rule and its winding drift apart
+/// for no reason, and the caller would still have to choose between
+/// them: the choice does not go away, it only stops being named.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Disclosure {
+    /// A node in a TREE. Closed points along the row — "there is more
+    /// inside this" — and open points down at the children it just
+    /// revealed. Every file tree ever drawn reads this way and nothing
+    /// here changes it.
+    Tree,
+    /// The caret on a DROP-DOWN's anchor. Closed points DOWN, at the
+    /// direction the list will unfold, because a caret announces where
+    /// the list goes and not the fact that it is currently shut — GTK,
+    /// Qt and HTML's `select` all agree, and a `▷` here reads as "go
+    /// into this row", which is the tree's sentence and not this one's.
+    /// Open points back up, at the edge the list folds into.
+    Drop,
+}
+
+/// The triangle that says a thing opens: the expander beside a tree row,
+/// the caret on a drop-down's anchor. `kind` picks which of the two
+/// sentences the shape is speaking ([`Disclosure`]); `expanded` is the
+/// thing's own state.
 ///
 /// The state turns the GLYPH, not its colour: rotation is geometry, and
 /// geometry is the one thing a theme does not have to say twice.
@@ -492,6 +633,7 @@ pub fn disclosure(
     y: f32,
     size: f32,
     line_px: f32,
+    kind: Disclosure,
     expanded: bool,
     color: Color,
 ) {
@@ -500,10 +642,16 @@ pub fn disclosure(
     }
     let top = y + (line_px - size).max(0.0) / 2.0;
     let half = size / 2.0;
-    let pts = if expanded {
-        [[x, top], [x + size, top], [x + half, top + size]]
-    } else {
-        [[x, top], [x + size, top + half], [x, top + size]]
+    // Named once and used by both grammars, so "down" is one shape in
+    // this file and cannot end up two slightly different ones.
+    let down = [[x, top], [x + size, top], [x + half, top + size]];
+    let pts = match (kind, expanded) {
+        // Along the row, toward what opening would reveal.
+        (Disclosure::Tree, false) => [[x, top], [x + size, top + half], [x, top + size]],
+        (Disclosure::Tree, true) => down,
+        (Disclosure::Drop, false) => down,
+        // Back at the anchor the open list folds into.
+        (Disclosure::Drop, true) => [[x + half, top], [x + size, top + size], [x, top + size]],
     };
     let hair = sf.px("stroke.hair");
     sf.polyline(&pts, hair, color, true);
@@ -558,6 +706,7 @@ pub fn scrollbar(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::font::FONT_UI;
 
     /// A surface that only measures: half an em a character, which is
     /// wrong about fonts and right about monotonicity — all the breaking
@@ -569,9 +718,23 @@ pub(crate) mod tests {
         fn rect_outline(&mut self, _r: Rect, _w: f32, _c: Color) {}
         fn line(&mut self, _x0: f32, _y0: f32, _x1: f32, _y1: f32, _w: f32, _c: Color) {}
         fn polyline(&mut self, _p: &[[f32; 2]], _w: f32, _c: Color, _closed: bool) {}
-        fn text(&mut self, _px: f32, _x: f32, _y: f32, _s: &str, _c: Color, _t: f32, _a: Align) {}
-        fn measure(&mut self, px: f32, s: &str, _track: f32) -> f32 {
+        fn text(&mut self, _face: u8, _px: f32, _x: f32, _y: f32, _s: &str, _c: Color, _t: f32, _a: Align) {}
+        fn measure(&mut self, _face: u8, px: f32, s: &str, _track: f32) -> f32 {
             s.chars().count() as f32 * px * 0.5
+        }
+        /// A box that is WIDER than the proportional run it replaces,
+        /// which is the one property a caller can rely on: a real box is
+        /// the widest figure of the face, so a boxed run never measures
+        /// narrower. Doubling makes the difference impossible to miss —
+        /// the default implementation of this method ignores `tabular`
+        /// entirely, and a break that went through it would be silent.
+        fn measure_tab(&mut self, face: u8, px: f32, s: &str, track: f32, tabular: bool) -> f32 {
+            let w = self.measure(face, px, s, track);
+            if tabular {
+                w * 2.0
+            } else {
+                w
+            }
         }
         fn clip(&mut self, _r: Rect) -> bool {
             false
@@ -617,33 +780,74 @@ pub(crate) mod tests {
     #[test]
     fn text_that_fits_is_one_line_and_keeps_its_spacing_rules() {
         // 10 characters at 10 px = 50 px wide.
-        assert_eq!(wrap(&mut Ruler, 10.0, "abcdefghij", 50.0, 0.0), ["abcdefghij"]);
-        assert_eq!(wrap(&mut Ruler, 10.0, "", 50.0, 0.0), [""]);
+        assert_eq!(wrap(&mut Ruler, FONT_UI, 10.0, "abcdefghij", 50.0, 0.0), ["abcdefghij"]);
+        assert_eq!(wrap(&mut Ruler, FONT_UI, 10.0, "", 50.0, 0.0), [""]);
     }
 
     #[test]
     fn a_line_breaks_at_the_last_word_that_fits() {
         // At 10 px a character is 5 px wide: 35 px holds "one two".
-        assert_eq!(wrap(&mut Ruler, 10.0, "one two three", 35.0, 0.0), ["one two", "three"]);
+        assert_eq!(wrap(&mut Ruler, FONT_UI, 10.0, "one two three", 35.0, 0.0), ["one two", "three"]);
         // 30 px does not, so every word gets its own line.
         assert_eq!(
-            wrap(&mut Ruler, 10.0, "one two three", 30.0, 0.0),
+            wrap(&mut Ruler, FONT_UI, 10.0, "one two three", 30.0, 0.0),
             ["one", "two", "three"]
         );
     }
 
     #[test]
     fn a_word_wider_than_the_box_is_broken_rather_than_left_hanging() {
-        assert_eq!(wrap(&mut Ruler, 10.0, "abcdefghij", 25.0, 0.0), ["abcde", "fghij"]);
+        assert_eq!(wrap(&mut Ruler, FONT_UI, 10.0, "abcdefghij", 25.0, 0.0), ["abcde", "fghij"]);
         // A short word before it still gets its own line first.
-        assert_eq!(wrap(&mut Ruler, 10.0, "x abcdef", 25.0, 0.0), ["x", "abcde", "f"]);
+        assert_eq!(wrap(&mut Ruler, FONT_UI, 10.0, "x abcdef", 25.0, 0.0), ["x", "abcde", "f"]);
     }
 
     #[test]
     fn explicit_newlines_are_kept_and_a_nonsense_width_stops_wrapping() {
-        assert_eq!(wrap(&mut Ruler, 10.0, "one\ntwo", 500.0, 0.0), ["one", "two"]);
+        assert_eq!(wrap(&mut Ruler, FONT_UI, 10.0, "one\ntwo", 500.0, 0.0), ["one", "two"]);
         // Zero width would otherwise break every character forever.
-        assert_eq!(wrap(&mut Ruler, 10.0, "one two", 0.0, 0.0), ["one two"]);
+        assert_eq!(wrap(&mut Ruler, FONT_UI, 10.0, "one two", 0.0, 0.0), ["one two"]);
+    }
+
+    /// A break is a measurement, so the role's figure box has to reach
+    /// it. The pair is the proof: the same string, the same width, and
+    /// the only difference between the two calls is the box.
+    #[test]
+    fn a_break_is_measured_under_the_box_the_run_will_be_drawn_with() {
+        // 60 px holds "one two" proportionally; under a box every run is
+        // twice as wide, so each word takes a line of its own.
+        assert_eq!(
+            wrap_tab(&mut Ruler, FONT_UI, 10.0, "one two three", 60.0, 0.0, false),
+            ["one two", "three"]
+        );
+        assert_eq!(
+            wrap_tab(&mut Ruler, FONT_UI, 10.0, "one two three", 60.0, 0.0, true),
+            ["one", "two", "three"]
+        );
+        // The character break inside one long word answers the box too:
+        // five characters fit at 25 px, two under the box.
+        assert_eq!(
+            wrap_tab(&mut Ruler, FONT_UI, 10.0, "abcdefghij", 25.0, 0.0, true),
+            ["ab", "cd", "ef", "gh", "ij"]
+        );
+    }
+
+    /// No room is not a width to abbreviate to. Three trimmers in this
+    /// library answered that way and this one answered "…", so the
+    /// objects that wanted the toolkit's answer had to write it out
+    /// themselves; the rule is stated once now.
+    #[test]
+    fn a_trim_with_no_room_at_all_draws_nothing_rather_than_an_ellipsis() {
+        for room in [0.0, -1.0, -400.0] {
+            assert_eq!(
+                fit_end(&mut Ruler, FONT_UI, 10.0, "SESSION", room, 0.0),
+                "",
+                "room {room} produced a glyph to draw"
+            );
+        }
+        // A width that holds something still holds the ellipsis: the
+        // rule above is about NO room, not about tight room.
+        assert_eq!(fit_end(&mut Ruler, FONT_UI, 10.0, "SESSION", 20.0, 0.0), "SES\u{2026}");
     }
 
     #[test]
@@ -949,6 +1153,72 @@ pub(crate) mod tests {
             !crate::ui::theme_word(id("progress.corner_style")).is_empty(),
             "a radius with no cut is the same silence one step along"
         );
+    }
+
+    // ---- the triangle that says a thing opens ----
+
+    /// The one triangle `disclosure` drew, as its three points.
+    fn triangle(kind: Disclosure, expanded: bool) -> Vec<[f32; 2]> {
+        let mut sf = FakeSurface::new();
+        // A 10 px glyph in a 10 px line box: the box drops out of the
+        // arithmetic, so what is left is the shape and only the shape.
+        disclosure(&mut sf, 0.0, 0.0, 10.0, 10.0, kind, expanded, Color::TRANSPARENT);
+        assert_eq!(sf.polylines.len(), 1, "a disclosure is one closed outline");
+        sf.polylines.remove(0)
+    }
+
+    /// Where a three-point triangle points, read off its own geometry:
+    /// the apex is the corner that shares no coordinate with the other
+    /// two, and the direction is where it sits relative to them.
+    fn points(pts: &[[f32; 2]]) -> &'static str {
+        assert_eq!(pts.len(), 3);
+        let same = |a: f32, b: f32| (a - b).abs() < 0.01;
+        // The apex stands alone on both axes; the other two hold the
+        // edge it points away from.
+        let apex = *pts
+            .iter()
+            .find(|p| {
+                pts.iter().filter(|q| same(q[0], p[0])).count() == 1
+                    && pts.iter().filter(|q| same(q[1], p[1])).count() == 1
+            })
+            .expect("a triangle with no apex is not one of ours");
+        let base: Vec<[f32; 2]> = pts.iter().copied().filter(|p| *p != apex).collect();
+        if same(base[0][0], base[1][0]) {
+            "right"
+        } else if apex[1] > base[0][1] {
+            "down"
+        } else {
+            "up"
+        }
+    }
+
+    /// The two grammars, which are the whole reason the parameter
+    /// exists. A tree says "there is more inside this row" and points
+    /// ALONG it when shut; a drop-down's caret says "the list comes out
+    /// downwards" and points DOWN when shut — the convention GTK, Qt and
+    /// `select` share. Drawing a tree's `▷` on a list anchor tells the
+    /// user to walk into the row, which is a different offer entirely.
+    #[test]
+    fn a_caret_points_where_its_own_convention_says_and_not_where_a_trees_does() {
+        assert_eq!(points(&triangle(Disclosure::Tree, false)), "right");
+        assert_eq!(points(&triangle(Disclosure::Tree, true)), "down");
+        assert_eq!(points(&triangle(Disclosure::Drop, false)), "down");
+        assert_eq!(points(&triangle(Disclosure::Drop, true)), "up");
+        // Open and shut are different SHAPES in both grammars — the
+        // state turns the glyph, and a caret that never turned would
+        // leave the open list unannounced.
+        assert_ne!(triangle(Disclosure::Tree, false), triangle(Disclosure::Tree, true));
+        assert_ne!(triangle(Disclosure::Drop, false), triangle(Disclosure::Drop, true));
+        // The shut drop and the open tree are the same "down" arrow, and
+        // that is the point of one primitive: there is exactly one of it.
+        assert_eq!(triangle(Disclosure::Drop, false), triangle(Disclosure::Tree, true));
+    }
+
+    #[test]
+    fn a_disclosure_with_no_box_to_draw_in_draws_nothing() {
+        let mut sf = FakeSurface::new();
+        disclosure(&mut sf, 0.0, 0.0, 0.0, 10.0, Disclosure::Drop, false, Color::TRANSPARENT);
+        assert!(sf.polylines.is_empty(), "a glyph the theme sized to nothing is not drawn");
     }
 
     // ---- the rule every trimmed label follows ----

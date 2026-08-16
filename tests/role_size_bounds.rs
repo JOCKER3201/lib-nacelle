@@ -18,6 +18,7 @@
 
 use nacelle::draw::DrawList;
 use nacelle::font::FontSystem;
+use nacelle::pointer::Pointer;
 use nacelle::theme::{self, LoadRequest};
 use nacelle::ui;
 use nacelle::Ctx;
@@ -42,7 +43,7 @@ fn body_px() -> f32 {
             w: 1920.0,
             h: 1080.0,
             t: 0.0,
-            mouse: (0.0, 0.0),
+            mouse: Pointer::new(0.0, 0.0),
             term_font_scale: 1.0,
             ui_font_scale: 1.0,
             panel_scale: 1.0,

@@ -22,6 +22,7 @@
 use nacelle::draw::{ring_segments, DrawList};
 use nacelle::font::FontSystem;
 use nacelle::object::segmented::{self, StripState};
+use nacelle::pointer::Pointer;
 use nacelle::theme;
 use nacelle::{Ctx, Rect};
 
@@ -37,7 +38,7 @@ fn ctx<'a>(dl: &'a mut DrawList, fonts: &'a mut FontSystem) -> Ctx<'a> {
         w: W,
         h: H,
         t: 0.0,
-        mouse: (-1.0, -1.0),
+        mouse: Pointer::new(-1.0, -1.0),
         term_font_scale: 1.0,
         ui_font_scale: 1.0,
         panel_scale: 1.0,

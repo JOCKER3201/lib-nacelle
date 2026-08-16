@@ -1158,8 +1158,16 @@ pub fn relex(text: &str, span: Span, out: &mut Vec<Diagnostic>) -> Expr {
     e
 }
 
-/// Parse one value out of a standalone string. Used by tests and by
-/// `--check-theme`; the loader goes through [`parse`].
+/// Parse one value out of a standalone string. Used by tests, by
+/// `--check-theme`, and by the theme editor; the loader goes through
+/// [`parse`].
+///
+/// The editor holds a token name and a piece of text a slider just produced,
+/// and needs the same `Expr` the file would have produced — read by the SAME
+/// cursor, so nothing an editor writes can be something the parser would
+/// refuse from a file. Trailing text is a warning in `out`, so a caller that
+/// means to accept only a whole value must look at `out` and not just at the
+/// expression.
 pub fn parse_value(text: &str, span: Span, out: &mut Vec<Diagnostic>) -> Expr {
     let mut c = Cursor::new(text.trim(), span);
     let e = c.value(out);

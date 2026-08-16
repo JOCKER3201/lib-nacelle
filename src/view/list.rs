@@ -379,6 +379,8 @@ pub fn list<S: Surface, M: RowModel>(
                     y,
                     look.disclosure,
                     look.row_h,
+                    // A tree row, so the tree's grammar: `▷` closed.
+                    paint::Disclosure::Tree,
                     buf.expanded,
                     look.label.color,
                 );
@@ -409,9 +411,10 @@ pub fn list<S: Surface, M: RowModel>(
         // what is left.
         let mut right = r.right() - gutter_r - look.pad_x;
         if !buf.status.is_empty() {
-            let sw = sf.measure(look.status.px, &buf.status, look.status.track);
+            let sw = sf.measure(look.status.face, look.status.px, &buf.status, look.status.track);
             let sy = paint::center_line_y(sf, y, look.row_h, look.status.px, look.status.leading);
             sf.text(
+                look.status.face,
                 look.status.px,
                 right,
                 sy,
@@ -430,8 +433,11 @@ pub fn list<S: Surface, M: RowModel>(
             None => look.row_h,
         };
         let ly = paint::center_line_y(sf, y, text_h, look.label.px, look.label.leading);
-        let shown = paint::fit_end(sf, look.label.px, &buf.label, label_w, look.label.track);
+        let shown = paint::fit_end(
+            sf, look.label.face, look.label.px, &buf.label, label_w, look.label.track,
+        );
         sf.text(
+            look.label.face,
             look.label.px,
             x,
             ly,
@@ -540,11 +546,14 @@ mod tests {
         // a row that switches names draws and scrolls exactly as before.
         assert_eq!(px("list.corner"), px("filetile.corner"));
         assert_eq!(px("list.wheel_px"), px("filetile.wheel_px"));
-        // scrollbar.mode = overlay costs the content nothing, so the bar
-        // may sit over a row's trailing status. The gutter is the theme's
-        // answer to that, and the master's answer is "leave it as it was".
+        // scrollbar.mode went to `inset` on 2026-08-16 (the owner's ask:
+        // the bar stands BESIDE the content), so the bar takes its lane
+        // from the content box through `inset_w` and no longer sits over
+        // a row's trailing status. The gutter stays at zero: the lane is
+        // the inset's, and a second gutter on top of it would double the
+        // air.
         assert_eq!(px("list.scroll_gutter"), 0.0);
-        assert_eq!(word("scrollbar.mode"), "overlay");
+        assert_eq!(word("scrollbar.mode"), "inset");
     }
 
     #[test]
