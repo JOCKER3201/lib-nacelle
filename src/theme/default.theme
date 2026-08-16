@@ -4999,7 +4999,7 @@ bar_gap = @space.4                  # odstęp przycisków paska akcji · - · le
 rail_w_frac = 22%                   # szyna sekcji edytora (krok 3) · - · % szerokości treści · wzorem back_w_frac
 rail_w_min = 13u                    # minimum szyny · - · len (u) · 70.2 px
 rail_w_min_min_px = 70px            # podłoga companion (3.2) · - · device px · -
-subrail_w_frac = 26%                # druga kolumna podstron (ANEKS: układ trzypanelowy) · - · % szerokości treści · rail 22% + subrail 26% = 48% treści, panel treści trzyma większość; szersza od szyny, bo niesie nazwy podstron, dłuższe niż nagłówki grup
+subrail_w_frac = @settings.rail_w_frac  # druga kolumna podstron (ANEKS: układ trzypanelowy) · - · % szerokości treści · decyzja właściciela 2026-08-16: OBIE kolumny nawigacji równe, treść bierze całą resztę; poniżej progu col_min_w całe okno składa się do pionowej listy
 hint.role = caption                 # type role of a setting's hint line · - · role · type.caption
 hint_inset = 1.6x @type.caption.size    # inset of that hint under its control · - · rat of @type.caption.size · -
 note.role = caption                 # type role of a section note · - · role · type.caption
