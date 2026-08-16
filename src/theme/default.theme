@@ -2196,7 +2196,7 @@ display.date.synthetic_bold   = auto          # per-role override of the face's 
 # ---------------------------------------------------------------- type.display.hero
 # the one oversized string on a screen
 display.hero.face             = display       # which face slot draws the one oversized string on a screen · 7, 9 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
-display.hero.size             = 5.72u         # type size for the one oversized string on a screen · 7, 9 · u · 31 px at 1080p, 41 px at 1440p; size_u = size_vh x 2.6
+display.hero.size             = 16u           # type size for the one oversized string on a screen · 7, 9 · u · 86 px at 1080p, 115 px at 1440p, 160 px at 4K (unit_max_px), 64 px at the smallest window; the boot logo was 31 px — smaller than the sub-line under it
 display.hero.min_px           = @type.min_px  # px floor for this role · 7, 9 · device px · the global floor
 display.hero.max_px           = 0px           # px ceiling for this role · 7, 9 · device px, 0px = uncapped · uncapped
 display.hero.tracking         = 0.040em       # letter spacing added to every advance · 7, 9 · em, -0.05em .. 0.30em · no derivation; 5.16's role table
@@ -2496,16 +2496,16 @@ terminal.synthetic_bold       = auto          # per-role override of the face's 
 # ---------------------------------------------------------------- type.spare0
 # reserved role slot 0
 spare0.face                   = ui            # which face slot draws reserved role slot 0 · - · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
-spare0.size                   = 2.47u         # type size for reserved role slot 0 · - · u · 13 px at 1080p, 18 px at 1440p; size_u = size_vh x 2.6
+spare0.size                   = 3.5u          # type size for reserved role slot 0 · - · u · 19 px at 1080p, 25 px at 1440p; the boot sub-line, at 0.22 of the logo above it
 spare0.min_px                 = @type.min_px  # px floor for this role · - · device px · the global floor
 spare0.max_px                 = 0px           # px ceiling for this role · - · device px, 0px = uncapped · uncapped
-spare0.tracking               = 0.020em       # letter spacing added to every advance · - · em, -0.05em .. 0.30em · no derivation; 5.16's role table
+spare0.tracking               = 0.200em       # letter spacing added to every advance · - · em, -0.05em .. 0.30em · the width `caption` gave the boot sub-line before it moved here
 spare0.case                   = none          # case transform applied inside FontSystem::text · - · enum: none | upper | lower | smallcaps · no derivation; 5.16's role table
 spare0.smallcaps_ratio        = @type.smallcaps_ratio
                                               # px multiplier for glyphs that were lowercase in the source · - · f, 0.5 .. 1.0 · the global ratio; smallcaps has no OpenType path (fontdue exposes no features)
-spare0.leading                = 1.45          # line height as a multiple of the resolved px · - · f, 1.0 .. 2.0 · no derivation; 5.16's role table
+spare0.leading                = 1.35          # line height as a multiple of the resolved px · - · f, 1.0 .. 2.0 · `caption`'s, carried across with the sub-line
 spare0.tabular                = false         # advance every figure by figure_advance and centre it in that box · - · bool · makes an all-figure string len x figure_advance wide without touching the atlas (5.17)
-spare0.fg                     = @text.primary # the colour this role draws in · - · colour · may name any colour token including @data.series[n] and @term.ansi[n] (5.19)
+spare0.fg                     = @text.muted   # the colour this role draws in · - · colour · subordinate to the logo's @text.title above it
 spare0.alpha                  = 1.0           # constant alpha multiplier on fg · - · frac, 0..1 · opaque
 spare0.synthetic_bold         = auto          # per-role override of the face's fake-bold x-offset · - · em, or auto · auto = @face.<this role's face>.synthetic_bold, applied only when a >=600 request fell back to Regular
 
@@ -5047,11 +5047,11 @@ pad_top = 6u                        # space above the first boot line · - · le
 pad_x = 7u                          # left/right padding of the boot log · - · len (u) · 37.8 px; today vw(2.0)
 line_role = data                    # type role of one boot line · - · role · type.data: mono, tabular. A `[   0.0000] text` line is instrument data, and the binding has to AGREE with the face the line is drawn in: boot.rs drew every line in the monospace slot while this key said `body` (face `ui`), with a comment saying the face was the one part of a binding that could not be routed. It can (`Role::font`), so the key now says what the screen shows — and the stamps stop shivering, because `data` is tabular
 logo_role = display.hero            # type role of the product logo on the boot screen · - · role · type.display.hero
-sub_role = caption                  # type role of the version sub-line · - · role · type.caption
+sub_role = spare0                   # type role of the version sub-line · - · role · type.spare0, a role of its own: `caption` is shared by file tiles, the layout editor and the status bar, so the sub-line could not grow without dragging half the interface with it
 duration_ms = 3000ms                # how long the boot screen is on screen at all · - · ms, 0ms .. 10000ms · boot.rs:32; a theme that ships no boot log wants 0ms
 log_duration_ms = 1600ms            # how fast the log scrolls — all its lines inside this window · - · ms, 0ms .. 10000ms · boot.rs:38; the split between log and logo is the shape of the sequence
-logo_y_frac = 44%                   # where the logo's baseline sits · - · % of the viewport height · boot.rs:65's h/2 - big
-sub_gap = 0.4x @type.display.hero.size   # gap between the logo and its sub-line · - · rat of @type.display.hero.size · boot.rs:78
+logo_y_frac = 44%                   # where the TOP OF THE LOGO'S LINE BOX sits — the baseline lies one ascent below it (draw.rs text_center_fig -> text_verts) · - · % of the viewport height · boot.rs:125. This key said "baseline" for a long time, and sub_gap was written to match that fiction
+sub_gap = 1.25x @type.display.hero.size  # gap between the top of the logo's line box and the top of the sub-line's · - · rat of @type.display.hero.size · boot.rs:148. The two boxes part at 0.985x for the measured face and at 1.2x for the fallback metric, so 1.25x clears both and every real ascent up to ~1.36 em; it was 0.4x, and the sub-line was drawn THROUGH the logo
 
 # =========================================================================
 # emptystate — the line a panel draws when it has nothing to show. Its two
