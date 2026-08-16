@@ -1110,29 +1110,23 @@ impl cascade::ThemeSource for FsThemes {
                 return parse::parse_file(src, &p, out);
             }
         }
-        // The shipped themes are in the binary, and a file of the same name
-        // anywhere on the search path shadows one — the same rule the widget
-        // registry follows. A program with nothing installed still has all
-        // nine looks; a user who wants to edit `aurora` drops a file in his
-        // own directory and the built-in steps aside.
-        builtin(name).and_then(|text| {
-            parse::parse_text(src, &format!("<built-in {name}>"), text, out)
-        })
+        // Nothing else. The master is the ONE look compiled in; every other
+        // theme is a file the person made — through the editor or by hand —
+        // and lives on the search path. The eight shipped variants left on
+        // 2026-08-16 at the owner's decision: a clean slate where `default`
+        // is the only built-in and the editor is how themes come to be.
+        None
     }
 }
 
-/// Every theme this program can load, by name: the eight compiled in, plus
-/// every `<name>.theme` on the search path, with a file shadowing a built-in of
-/// the same name. Sorted, `default` first — it is the master, and it is always
-/// selectable even though it is not in [`BUILTIN_THEMES`].
+/// Every theme this program can load, by name: `default` — the embedded
+/// master, always first and never a file — plus every `<name>.theme` on the
+/// search path.
 ///
 /// For the settings panel. It touches the filesystem, so it is not for a draw
 /// path.
 pub fn available_themes() -> Vec<String> {
     let mut out: Vec<String> = vec!["default".to_string()];
-    for (n, _) in BUILTIN_THEMES {
-        out.push(n.to_string());
-    }
     for d in FsThemes::new().dirs {
         let Ok(rd) = std::fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
@@ -1151,24 +1145,83 @@ pub fn available_themes() -> Vec<String> {
     out
 }
 
-/// The themes compiled into the toolkit. `default` is not here — it is the
-/// master, embedded separately and always loaded first (§4.1 stage 2).
-pub const BUILTIN_THEMES: [(&str, &str); 8] = [
-    ("aurora", include_str!("themes/aurora.theme")),
-    ("spring", include_str!("themes/spring.theme")),
-    ("pure", include_str!("themes/pure.theme")),
-    ("crimson", include_str!("themes/crimson.theme")),
-    ("lockdown", include_str!("themes/lockdown.theme")),
-    ("azure", include_str!("themes/azure.theme")),
-    ("cockpit", include_str!("themes/cockpit.theme")),
-    ("instrument", include_str!("themes/instrument.theme")),
-];
+/// The directory the editor SAVES to: the user's own themes, first on the
+/// search path after the explicit env override, so a saved theme is found
+/// by the same walk that loads every other.
+pub fn user_themes_dir() -> Option<PathBuf> {
+    let home = home_dir()?;
+    Some(match std::env::var_os("XDG_DATA_HOME") {
+        Some(d) => PathBuf::from(d).join("nacelle-desktop/themes"),
+        None => home.join(".local/share/nacelle-desktop/themes"),
+    })
+}
 
-fn builtin(name: &str) -> Option<&'static str> {
-    BUILTIN_THEMES
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, text)| *text)
+/// Writes a theme file from the editor's edits and answers where it landed.
+///
+/// The file is GENERATED, whole, every time: these files are the editor's
+/// own — hand-authored ones do not pass through here — so regeneration
+/// loses nothing and stays simple. Keys are grouped into the section the
+/// master declares them under by splitting at the FIRST dot, which the
+/// loader's `section.key` concatenation makes exact; the round-trip is
+/// pinned by an integration test, not assumed.
+///
+/// `default` is refused by name: the master is the one look compiled in,
+/// and a file called `default.theme` would shadow it into confusion — the
+/// caller offers SAVE AS instead.
+pub fn save_theme(name: &str, edits: &[edit::Edit]) -> std::io::Result<PathBuf> {
+    use std::io::{Error, ErrorKind};
+    let name = name.trim();
+    if name.is_empty() || name.eq_ignore_ascii_case("default") {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "the master is not a file; save under another name",
+        ));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "a theme's name is its file's: ascii letters, digits, - and _",
+        ));
+    }
+    let dir = user_themes_dir()
+        .ok_or_else(|| Error::new(ErrorKind::NotFound, "no home, nowhere to save"))?;
+    std::fs::create_dir_all(&dir)?;
+    let mut by_section: Vec<(String, Vec<(String, &str)>)> = Vec::new();
+    for e in edits {
+        let (section, key) = match e.token.split_once('.') {
+            Some(p) => p,
+            // Refused loudly, not dropped: today no edit produces a bare
+            // name, and the day one does, a silent skip would be a value
+            // the person set and the file never learned about.
+            None => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("token without a section: {}", e.token),
+                ))
+            }
+        };
+        match by_section.iter_mut().find(|(s, _)| s == section) {
+            Some((_, keys)) => keys.push((key.to_string(), e.value.as_str())),
+            None => by_section.push((section.to_string(), vec![(key.to_string(), e.value.as_str())])),
+        }
+    }
+    let mut text = String::new();
+    text.push_str("# Written by the theme editor. Regenerated WHOLE on every save —
+");
+    text.push_str("# notes added here by hand do not survive the next one.
+");
+    for (section, keys) in &by_section {
+        text.push_str(&format!("
+[{section}]
+"));
+        for (k, v) in keys {
+            text.push_str(&format!("{k} = {v}
+"));
+        }
+    }
+    let path = dir.join(format!("{name}.theme"));
+    std::fs::write(&path, text)?;
+    Ok(path)
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -1448,43 +1501,10 @@ mod tests {
         assert!(missing.is_empty(), "hot names default.theme does not declare: {missing:?}");
     }
 
-    /// Every shipped theme, over the master, with nothing else. A theme is a
-    /// sparse overlay, so the only way it can be wrong is by naming a token
-    /// the master does not declare, spelling a value the grammar refuses, or
-    /// writing a cycle — and each of those is a diagnostic, which is what
-    /// this asserts the absence of. It also proves a theme resolves and bakes
-    /// to a complete table: no token is left without a value because an
-    /// override replaced a derivation with something unresolvable.
-    #[test]
-    fn every_shipped_theme_loads_over_the_master_without_a_word_of_complaint() {
-        for (name, text) in BUILTIN_THEMES {
-            let mut out = Vec::new();
-            let mut src = Sources::new();
-
-            let f = src.add("default.theme", DEFAULT_THEME);
-            let master = parse::parse(&mut src, f, None, &mut out);
-            let g = src.add(name, text);
-            let overlay = parse::parse(&mut src, g, None, &mut out);
-
-            let mut schema = Schema::from_default(&master, &mut out);
-            let spec = cascade::cascade(
-                &mut schema,
-                &[
-                    cascade::Stage::Document(&master),
-                    cascade::Stage::Document(&overlay),
-                ],
-                cascade::Options::default(),
-                &mut out,
-            );
-            let r = resolve::resolve(&schema, &spec, &mut out);
-            schema.adopt_kinds(&r.values);
-            let t = bake::bake(&schema, &r, &BakeInput::default(), &mut out);
-
-            let rendered: String = out.iter().map(|d| d.render(&src)).collect();
-            assert!(out.is_empty(), "theme \"{name}\" is not clean:\n{rendered}");
-            assert_eq!(t.len(), schema.len(), "theme \"{name}\" baked short");
-        }
-    }
+    // `every_shipped_theme_loads_over_the_master...` left with the shipped
+    // themes themselves (2026-08-16): there is nothing compiled in to iterate
+    // but the master, and the editor's saved files are pinned by their own
+    // round-trip integration test instead.
 
     /// The class x state matrix is real: a button's hover rung derives from
     /// the ACCENT (its class base) while a panel's derives from the BORDER

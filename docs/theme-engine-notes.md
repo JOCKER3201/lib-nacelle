@@ -83,9 +83,10 @@ Three deferrals, each deliberate:
   resolved from it, `glow.alpha_scale` folded, tint from the rung's own
   edge (the `element` rule) — and extrudes its chamfer octagon by the
   radius, one additive quad per segment, `glow_ring`'s 31..33 strip in the
-  sprite's own space. `aurora` opts `icon_idle` in (image 1's bordered
-  launcher squares); every other shipped default stays off, so `default`
-  renders pixel-identical. The same entry closed the enum-word gap the
+  sprite's own space. While it shipped, `aurora` opted `icon_idle` in
+  (image 1's bordered launcher squares); since the variants' removal
+  (2026-08-16) nothing compiled in opts in, so `default` renders
+  pixel-identical. The same entry closed the enum-word gap the
   badge pills documented: the shell's SCROLL pill and the filesystem's
   I/O-error pill now follow `severity.<r>.badge_style`'s word
   (solid/hollow, `hatched`/`hollow_dashed` degrading to hollow as
@@ -95,10 +96,10 @@ Three deferrals, each deliberate:
 - **`focus_ring` waits for the focus system.** `winframe` swaps its edge
   colour on focus (§5.21) and the glow follows that colour through the
   `element` rule, but the separate `[glow] focus_ring` class has no consumer
-  until containers know they are focused. No shipped theme enables it.
+  until containers know they are focused. The master ships it off.
 - **`panel_edge.color` only honours `element`.** The master types the token
   by its default, a bare word; the colour arm of the union is unimplemented
-  and no shipped theme uses it.
+  and nothing shipped uses it.
 
 ## The decoration plates (plate.rs v2, 11.08)
 
@@ -129,7 +130,7 @@ and a layer only under its own `enabled = true`:
   input** — it is per-frame UV motion of the overlay quad (host accumulator over
   `image_uv`, quantised to whole texels) and is deferred with the motion pass; the
   bake is the pattern at rest, which is exactly `drift = 0.0`, the master's value.
-  No shipped theme enables scanlines.
+  The master ships scanlines off.
 - `decor.noise.*`: `alpha`, `grain`, `chroma`, `seed`. Grain under one device
   pixel clamps to per-pixel cells.
 
@@ -140,7 +141,9 @@ themes differ; a non-zero seed pins the pattern bit for bit.
 `decor.enabled = true` plus the layer's `enabled = true`; nothing else, every
 parameter has a master default. `backdrop.source` is NOT consulted by the host
 yet — either plate's quad is drawn whenever any of its layers is on (azure and
-instrument write `source = plate` for §5.15 conformance, and the day the host
-honours the token they are already correct). Shipped users today: azure
-(starfield), instrument (grid + traces), aurora/crimson/lockdown (traces),
-crimson/lockdown (vignette, overlay layer).
+instrument wrote `source = plate` for §5.15 conformance, and the day the host
+honours the token a theme doing the same is already correct). Shipped users
+until the variants' removal on 2026-08-16: azure (starfield), instrument
+(grid + traces), aurora/crimson/lockdown (traces), crimson/lockdown (vignette,
+overlay layer). Today the master ships every layer off; the layers wait for
+user themes.
