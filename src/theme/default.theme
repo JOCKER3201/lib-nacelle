@@ -4991,6 +4991,15 @@ back_w_min = 13u                    # minimum width of that column · - · len (
 back_w_min_min_px = 70px            # absolute floor for back_w_min · - · device px · companion of settings.back_w_min (3.2)
 list_w_frac = 60%                   # width of the settings list column · - · % of the modal's width · -
 grid_cols = 3                       # columns in the settings icon grid · - · n · -
+col_gap = @space.6                  # rynna między kolumnami pasa · - · len (u) · 4u = 21.6 px
+zone_gap = @space.6                 # odstęp pionowy między pasami · - · len (u) · = section_gap, jeden rytm
+col_min_w = 72u                     # próg: węższa kolumna = pas składa się do listy · - · len (u) · 388.8 px
+col_min_w_min_px = 360px            # podłoga companion (3.2) · - · device px · dobrana tak, by 500 px składało, 720p+ trzymało kolumny
+bar_gap = @space.4                  # odstęp przycisków paska akcji · - · len (u) · 2u = 10.8 px
+rail_w_frac = 22%                   # szyna sekcji edytora (krok 3) · - · % szerokości treści · wzorem back_w_frac
+rail_w_min = 13u                    # minimum szyny · - · len (u) · 70.2 px
+rail_w_min_min_px = 70px            # podłoga companion (3.2) · - · device px · -
+subrail_w_frac = 26%                # druga kolumna podstron (ANEKS: układ trzypanelowy) · - · % szerokości treści · rail 22% + subrail 26% = 48% treści, panel treści trzyma większość; szersza od szyny, bo niesie nazwy podstron, dłuższe niż nagłówki grup
 hint.role = caption                 # type role of a setting's hint line · - · role · type.caption
 hint_inset = 1.6x @type.caption.size    # inset of that hint under its control · - · rat of @type.caption.size · -
 note.role = caption                 # type role of a section note · - · role · type.caption
