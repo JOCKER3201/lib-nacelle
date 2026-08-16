@@ -45,6 +45,9 @@ pub(crate) struct Level {
     radius: TokenId,
     edge_color: TokenId,
     edge_width: TokenId,
+    glass_rank: TokenId,
+    glass_tint: TokenId,
+    glass_wash: TokenId,
     /// `corner`'s `(round, chamfer)` indices — see
     /// [`super::window::vocabulary`].
     words: (Option<u16>, Option<u16>),
@@ -67,6 +70,9 @@ impl Level {
             radius: id("radius"),
             edge_color: id("edge.color"),
             edge_width: id("edge.width"),
+            glass_rank: id("glass.rank"),
+            glass_tint: id("glass.tint"),
+            glass_wash: id("glass.wash"),
             words: super::window::vocabulary(corner),
         }
     }
@@ -94,9 +100,26 @@ impl Level {
     pub(crate) fn draw(&self, ctx: &mut Ctx, r: Rect) -> ([Corner; 4], u8) {
         let t = theme::resolved();
         let (c, seg) = self.cut(t, r);
-        let fill = col(t.bed(self.fill));
-        if fill.a > 0.0 {
-            ctx.dl.ring_fill(r, &c, seg, fill);
+        // Glass INSTEAD of the fill, never on top of it — the master's own
+        // contract at the `fill` key ("used INSTEAD of the glass pair while
+        // rank = 0") and at the ladder's head: glass is TWO quads, the tint
+        // that multiplies the blurred scene (it can only darken) and the
+        // wash that lays over with alpha (the only knob that brightens).
+        // This is the rank's FIRST reader: until 2026-08-16 the token was
+        // declared on every rung and read by nobody, so a theme asking for
+        // glass on a panel got a flat fill and no word about it.
+        let rank = t.px(self.glass_rank).clamp(0.0, 3.0);
+        if rank > 0.0 {
+            ctx.dl.glass_fill(r, &c, seg, rank, col(t.color(self.glass_tint)));
+            let wash = col(t.color(self.glass_wash));
+            if wash.a > 0.0 {
+                ctx.dl.ring_fill(r, &c, seg, wash);
+            }
+        } else {
+            let fill = col(t.bed(self.fill));
+            if fill.a > 0.0 {
+                ctx.dl.ring_fill(r, &c, seg, fill);
+            }
         }
         let edge = col(t.color(self.edge_color));
         let width = t.px(self.edge_width).max(0.0);

@@ -4824,7 +4824,7 @@ glide_halflife_ms = 160ms           # how long a glide takes to lose half its sp
 # where it is is a defect.
 # =========================================================================
 [scrollbar]
-mode = overlay                      # whether the bar takes layout space · - · enum: overlay | inset | none · overlay costs no layout, which is why it is the default
+mode = inset                        # whether the bar takes layout space · - · enum: overlay | inset | none · inset since 2026-08-16, the owner's ask: the bar stands BESIDE the content, even widened under the pointer — a bar over the controls read as a defect
 w = 1.2u                            # the resting bar width · - · len (u) · 6.5 px
 w_hover = 2u                        # the width under the pointer · - · len (u) · 10.8 px
 margin = @space.1                   # gap between bar and content edge · - · len (u) · @space.1 = 0.5u = 2.7 px

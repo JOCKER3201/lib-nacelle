@@ -166,7 +166,26 @@ pub fn frame(ctx: &mut Ctx, r: Rect) {
     let width = t.px(tok(&WIDTH, "panel.border")).max(0.0);
     let c = [corner; 4];
     let seg = corner_segments(t, &SEGMENTS, corner.size);
-    ctx.dl.ring_fill(r, &c, seg, fill);
+    // The same glass trio the panel rung reads, BY DESIGN and not by
+    // accident: the owner's scope for a background is "windows and
+    // widgets", one decision for both, so a frame asks the same three
+    // tokens `elev::Level` does instead of growing a private copy of them
+    // the way it once did for the fill (the drift `elev.rs`'s header
+    // already names). Glass replaces the fill; the ring and its glow stand
+    // on top either way.
+    static G_RANK: OnceLock<TokenId> = OnceLock::new();
+    static G_TINT: OnceLock<TokenId> = OnceLock::new();
+    static G_WASH: OnceLock<TokenId> = OnceLock::new();
+    let rank = t.px(tok(&G_RANK, "elev.panel.glass.rank")).clamp(0.0, 3.0);
+    if rank > 0.0 {
+        ctx.dl.glass_fill(r, &c, seg, rank, col(t.color(tok(&G_TINT, "elev.panel.glass.tint"))));
+        let wash = col(t.color(tok(&G_WASH, "elev.panel.glass.wash")));
+        if wash.a > 0.0 {
+            ctx.dl.ring_fill(r, &c, seg, wash);
+        }
+    } else {
+        ctx.dl.ring_fill(r, &c, seg, fill);
+    }
     ctx.dl.ring(r, &c, seg, width, line);
     panel_edge_glow(ctx.dl, t, r, &c, seg, line);
 }

@@ -321,6 +321,7 @@ pub enum DrawCmd {
     ChamferFill { r: [f32; 4], cut: f32, color: Color },
     Ring { r: [f32; 4], corners: [Corner; 4], stroke: f32, color: Color },
     RingFill { r: [f32; 4], corners: [Corner; 4], color: Color },
+    GlassFill { r: [f32; 4], corners: [Corner; 4], depth: f32, tint: Color },
     RectGrad { r: [f32; 4], stops: Vec<(f32, Color)>, angle: f32 },
     FanC { centre: [f32; 2], c_centre: Color, rim: Vec<([f32; 2], Color)> },
     Image { r: [f32; 4], id: ImageId, tint: Color },
@@ -604,6 +605,13 @@ impl fmt::Display for DrawCmd {
             DrawCmd::Blur { r, tint } => {
                 f.write_str("blur at")?;
                 nums(f, r, PX)?;
+                rgba(f, *tint)
+            }
+            DrawCmd::GlassFill { r, corners: c, depth, tint } => {
+                f.write_str("glass_fill at")?;
+                nums(f, r, PX)?;
+                corners(f, c)?;
+                field(f, "depth", *depth, FINE)?;
                 rgba(f, *tint)
             }
             DrawCmd::MaskQuad { p, uv, color, additive } => {
@@ -1187,6 +1195,74 @@ impl DrawList {
             for i in 0..n {
                 let j = (i + 1) % n;
                 self.push_tri_c(None, [[cx, cy], pts[i], pts[j]], [col; 3]);
+            }
+        }
+        self.scratch_a = pts;
+    }
+
+    /// The blurred scene behind a SHAPE — [`DrawList::blur`]'s corner-aware
+    /// counterpart, and the first emitter the `GLASS_RANK_*` handles ever
+    /// had. `blur()` emits a rectangle, and the renderer's scissor is a
+    /// rectangle too, so a frosted panel with rounded corners would poke
+    /// past its own silhouette at every arc. The fragment shader samples by
+    /// SCREEN POSITION and ignores uv (`shaders.rs: pos.xy / pc.screen`),
+    /// so the geometry is free — this fans the same boundary `ring_fill`
+    /// draws, and the frost ends exactly where the surface does.
+    ///
+    /// `rank` picks the pyramid depth the renderer serves (clamped there to
+    /// what the frame actually wrote); 0 is not a rank — a surface with no
+    /// glass simply does not call this.
+    pub fn glass_fill(&mut self, r: Rect, c: &[Corner; 4], segments: u8, depth: f32, tint: Color) {
+        let depth = depth.clamp(1.0, 3.0);
+        self.cmd(|| DrawCmd::GlassFill {
+            r: [r.x, r.y, r.w, r.h],
+            corners: *c,
+            depth,
+            tint,
+        });
+        if r.w <= 0.0 || r.h <= 0.0 {
+            return;
+        }
+        // A FRACTIONAL depth is two fans: the lower rank in full, the higher
+        // one at the fraction's alpha, and the blend between them IS the
+        // interpolation — the pyramid has three rungs and the renderer binds
+        // one target per run, so the mixing that would otherwise need a
+        // two-sampler pipeline happens in the blender instead. Exact at full
+        // effect opacity; at partial opacity the base leaks in slightly more
+        // than a true three-way mix would allow, which is invisible next to
+        // the blur it buys. One fan when the depth lands on a rung.
+        let lo = depth.floor().clamp(1.0, 3.0);
+        let frac = depth - lo;
+        self.glass_fan(r, c, segments, lo as u8, tint);
+        if frac > 0.01 && lo < 3.0 {
+            let mut t2 = tint;
+            t2.a *= frac;
+            self.glass_fan(r, c, segments, lo as u8 + 1, t2);
+        }
+    }
+
+    /// One fan of one rank — the body `glass_fill` mixes from.
+    fn glass_fan(&mut self, r: Rect, c: &[Corner; 4], segments: u8, rank: u8, tint: Color) {
+        let img = match rank {
+            1 => GLASS_RANK_1,
+            2 => GLASS_RANK_2,
+            _ => GLASS_RANK_3,
+        };
+        let mut pts = std::mem::take(&mut self.scratch_a);
+        ring_points(r, c, segments, &mut pts);
+        let n = pts.len();
+        if n >= 3 {
+            let (mut cx, mut cy) = (0.0f32, 0.0f32);
+            for p in &pts {
+                cx += p[0];
+                cy += p[1];
+            }
+            let inv = 1.0 / n as f32;
+            let (cx, cy) = (cx * inv, cy * inv);
+            let col = tint.to_array();
+            for i in 0..n {
+                let j = (i + 1) % n;
+                self.push_tri_c(Some(img), [[cx, cy], pts[i], pts[j]], [col; 3]);
             }
         }
         self.scratch_a = pts;

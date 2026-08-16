@@ -546,11 +546,14 @@ mod tests {
         // a row that switches names draws and scrolls exactly as before.
         assert_eq!(px("list.corner"), px("filetile.corner"));
         assert_eq!(px("list.wheel_px"), px("filetile.wheel_px"));
-        // scrollbar.mode = overlay costs the content nothing, so the bar
-        // may sit over a row's trailing status. The gutter is the theme's
-        // answer to that, and the master's answer is "leave it as it was".
+        // scrollbar.mode went to `inset` on 2026-08-16 (the owner's ask:
+        // the bar stands BESIDE the content), so the bar takes its lane
+        // from the content box through `inset_w` and no longer sits over
+        // a row's trailing status. The gutter stays at zero: the lane is
+        // the inset's, and a second gutter on top of it would double the
+        // air.
         assert_eq!(px("list.scroll_gutter"), 0.0);
-        assert_eq!(word("scrollbar.mode"), "overlay");
+        assert_eq!(word("scrollbar.mode"), "inset");
     }
 
     #[test]
