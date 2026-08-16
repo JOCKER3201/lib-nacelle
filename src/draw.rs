@@ -21,7 +21,19 @@ pub struct Vertex {
     pub pos: [f32; 2],
     pub uv: [f32; 2],
     pub color: [f32; 4],
+    /// Index into the frame's [`Shape`] records, or [`NO_SHAPE`] for
+    /// every vertex that belongs to no shape — glyphs, images, glass,
+    /// the whole tessellated path (f3 D3). For a shape run the `uv`
+    /// slot carries the LOCAL position in px from the record's centre;
+    /// nothing else changes hands, which is why the vertex grows by
+    /// exactly these four bytes (32 → 36) and not by the record.
+    pub shape: u32,
 }
+
+/// The `shape` a vertex outside any shape carries. All ones rather than
+/// zero so that a record index of 0 stays a real index and a forgotten
+/// field reads as an out-of-range one, never as "the first shape".
+pub const NO_SHAPE: u32 = u32::MAX;
 
 /// A handle to pixels the RENDERER owns. The list only records which
 /// image a run samples; registering the pixels, uploading them and
@@ -52,11 +64,61 @@ pub const GLASS_RANK_3: ImageId = ImageId(u32::MAX - 3);
 /// with SRC_ALPHA/ONE colour, ZERO/ONE alpha — glow and bloom compose with
 /// light instead of milk (Appendix B, R1).
 pub const ADD_ATLAS: ImageId = ImageId(u32::MAX - 8);
+/// The vector core's lane (f3 §2.9): a run tagged SHAPE draws through
+/// the renderer's `fs_shape` — every vertex carries the index of one
+/// [`Shape`] record and its `uv` is the local position in px from that
+/// record's centre. Normal blend. The additive and glass lanes
+/// (`SHAPE_ADD`, `SHAPE_GLASS_*`) arrive with K3; this handle alone is
+/// what ring/ring_fill need.
+pub const SHAPE: ImageId = ImageId(u32::MAX - 4);
 
 /// Whether a handle is one of the reserved instructions rather than a
 /// registered texture.
 pub fn is_reserved(id: ImageId) -> bool {
     id.0 >= RESERVED_IMAGE_MIN.0
+}
+
+/// What the fragment shader reads to compute one shape (f3 §2.5).
+/// std430, 64 B — half a cache line; the index into the frame's array
+/// rides in [`Vertex::shape`]. The fill colour is NOT here: it stays on
+/// the vertex, like every fill before it, so a dot matrix of one
+/// geometry is one record however many colours it wears (f3 §3.4).
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Shape {
+    /// Half sizes, local px.
+    pub half: [f32; 2],
+    /// Stroke band width, INWARD from the boundary (the project's
+    /// convention — see [`DrawList::ring`]); 0 = no band.
+    pub stroke: f32,
+    /// Softness: shadow feather / glow reach; 0 = crisp. Always 0 in
+    /// K2 — the soft profiles are K3's.
+    pub feather: f32,
+    /// Corner sizes tl, tr, br, bl — [`ring_points`]' order — local px,
+    /// sentinels already resolved on the CPU (R9): never negative here.
+    pub corner: [f32; 4],
+    /// The stroke band's colour; the fill colour is the vertex's.
+    pub stroke_c: [f32; 4],
+    /// Bits 0-7: [`CornerStyle`] × 4 (tl, tr, br, bl), 2 bits each.
+    /// Bits 8-11: [`ShapeKind`]. Bit 12 [`Shape::FILL`], bit 13
+    /// [`Shape::STROKE`]. Bits 14-31 are K3's and MUST be zero here.
+    pub flags: u32,
+    /// Half the arc's sweep, radians; >= PI = a full ring. Ring only.
+    pub arc_half: f32,
+    /// Direction of the arc's middle, radians. Ring only.
+    pub arc_dir: f32,
+    pub _pad: f32,
+}
+const _: () = assert!(std::mem::size_of::<Shape>() == 64);
+const _: () = assert!(std::mem::align_of::<Shape>() == 4);
+
+impl Shape {
+    /// Bit 12: draw the interior with the vertex colour.
+    pub const FILL: u32 = 1 << 12;
+    /// Bit 13: draw the inward stroke band with `stroke_c`.
+    pub const STROKE: u32 = 1 << 13;
+    /// Bits 8-11 carry the [`ShapeKind`].
+    pub const KIND_SHIFT: u32 = 8;
 }
 
 /// Treatment of one rect corner — the vocabulary of the one tessellated
@@ -888,7 +950,7 @@ impl DrawList {
         c: [[f32; 4]; 4],
     ) {
         self.run_for(image);
-        let v = |i: usize| Vertex { pos: p[i], uv: uv[i], color: c[i] };
+        let v = |i: usize| Vertex { pos: p[i], uv: uv[i], color: c[i], shape: NO_SHAPE };
         self.verts.extend_from_slice(&[v(0), v(1), v(2), v(0), v(2), v(3)]);
         self.seal();
     }
@@ -898,7 +960,7 @@ impl DrawList {
     fn push_tri_c(&mut self, image: Option<ImageId>, p: [[f32; 2]; 3], c: [[f32; 4]; 3]) {
         self.run_for(image);
         let (u, v) = FontSystem::white_uv();
-        let vx = |i: usize| Vertex { pos: p[i], uv: [u, v], color: c[i] };
+        let vx = |i: usize| Vertex { pos: p[i], uv: [u, v], color: c[i], shape: NO_SHAPE };
         self.verts.extend_from_slice(&[vx(0), vx(1), vx(2)]);
         self.seal();
     }
@@ -917,7 +979,7 @@ impl DrawList {
         let c = tint.to_array();
         let p = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
         let uv = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-        let v = |i: usize| Vertex { pos: p[i], uv: uv[i], color: c };
+        let v = |i: usize| Vertex { pos: p[i], uv: uv[i], color: c, shape: NO_SHAPE };
         self.verts.extend_from_slice(&[v(0), v(1), v(2), v(0), v(2), v(3)]);
         self.seal();
     }
@@ -934,7 +996,7 @@ impl DrawList {
         let c = tint.to_array();
         let (u, v) = FontSystem::white_uv();
         let p = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
-        let vx = |i: usize| Vertex { pos: p[i], uv: [u, v], color: c };
+        let vx = |i: usize| Vertex { pos: p[i], uv: [u, v], color: c, shape: NO_SHAPE };
         self.verts
             .extend_from_slice(&[vx(0), vx(1), vx(2), vx(0), vx(2), vx(3)]);
         self.seal();
