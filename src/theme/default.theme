@@ -3752,7 +3752,7 @@ enabled     = true                    # run this effect at all; -; bool; -
 
 # ---- menu_unfold · accordion / window-menu unfold ------------------------
 [motion.menu_unfold]
-duration_ms = 150ms                   # the unfold; image 7's taskbar menus; ms, 0ms .. 2000ms; -
+duration_ms = 150ms                   # the whole pull - the slide out from under the anchor AND the unfold, one duration; image 7's taskbar menus; ms, 0ms .. 2000ms; the boundary between the two phases is the list's own geometry (owner 2026-08-16), not a token
 period_ms   = 0ms                     # unused - one-shot transition; -; ms; -
 amplitude   = 0.00                    # unused outside cyclic effects; -; 0..1; -
 floor       = 0.00                    # unused outside step easing; -; 0..1; -
