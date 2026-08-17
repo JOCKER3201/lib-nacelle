@@ -11,6 +11,7 @@
 
 use crate::base::Rect;
 use crate::font::{Figures, FontSystem, Glyph};
+use crate::sdf::{thin_band, Frame};
 use crate::theme::Color;
 use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -21,7 +22,19 @@ pub struct Vertex {
     pub pos: [f32; 2],
     pub uv: [f32; 2],
     pub color: [f32; 4],
+    /// Index into the frame's [`Shape`] records, or [`NO_SHAPE`] for
+    /// every vertex that belongs to no shape — glyphs, images, glass,
+    /// the whole tessellated path (f3 D3). For a shape run the `uv`
+    /// slot carries the LOCAL position in px from the record's centre;
+    /// nothing else changes hands, which is why the vertex grows by
+    /// exactly these four bytes (32 → 36) and not by the record.
+    pub shape: u32,
 }
+
+/// The `shape` a vertex outside any shape carries. All ones rather than
+/// zero so that a record index of 0 stays a real index and a forgotten
+/// field reads as an out-of-range one, never as "the first shape".
+pub const NO_SHAPE: u32 = u32::MAX;
 
 /// A handle to pixels the RENDERER owns. The list only records which
 /// image a run samples; registering the pixels, uploading them and
@@ -52,11 +65,328 @@ pub const GLASS_RANK_3: ImageId = ImageId(u32::MAX - 3);
 /// with SRC_ALPHA/ONE colour, ZERO/ONE alpha — glow and bloom compose with
 /// light instead of milk (Appendix B, R1).
 pub const ADD_ATLAS: ImageId = ImageId(u32::MAX - 8);
+/// The vector core's lane (f3 §2.9): a run tagged SHAPE draws through
+/// the renderer's `fs_shape` — every vertex carries the index of one
+/// [`Shape`] record and its `uv` is the local position in px from that
+/// record's centre. Normal blend. The additive and glass lanes
+/// (`SHAPE_ADD`, `SHAPE_GLASS_*`) are still ahead — see the note on
+/// [`DrawList::glow_ring`] for why; this handle alone is what
+/// ring/ring_fill need.
+pub const SHAPE: ImageId = ImageId(u32::MAX - 4);
 
 /// Whether a handle is one of the reserved instructions rather than a
 /// registered texture.
 pub fn is_reserved(id: ImageId) -> bool {
     id.0 >= RESERVED_IMAGE_MIN.0
+}
+
+/// What the fragment shader reads to compute one shape (f3 §2.5).
+/// std430, 64 B — half a cache line; the index into the frame's array
+/// rides in [`Vertex::shape`]. The fill colour is NOT here: it stays on
+/// the vertex, like every fill before it, so a dot matrix of one
+/// geometry is one record however many colours it wears (f3 §3.4).
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Shape {
+    /// Half sizes, local px.
+    pub half: [f32; 2],
+    /// Stroke band width, INWARD from the boundary (the project's
+    /// convention — see [`DrawList::ring`]); 0 = no band.
+    pub stroke: f32,
+    /// Softness: shadow feather / glow reach; 0 = crisp. Always 0 so
+    /// far — the soft profiles (§2.6) are still ahead.
+    pub feather: f32,
+    /// Corner sizes tl, tr, br, bl — [`ring_points`]' order — local px,
+    /// sentinels already resolved on the CPU (R9): never negative here.
+    pub corner: [f32; 4],
+    /// The stroke band's colour; the fill colour is the vertex's.
+    pub stroke_c: [f32; 4],
+    /// Bits 0-7: [`CornerStyle`] × 4 (tl, tr, br, bl), 2 bits each.
+    /// Bits 8-11: [`ShapeKind`]. Bit 12 [`Shape::FILL`], bit 13
+    /// [`Shape::STROKE`]. Bits 14-31 are unclaimed and MUST be zero.
+    pub flags: u32,
+    /// Half the arc's sweep, radians; >= PI = a full ring. Ring only.
+    pub arc_half: f32,
+    /// Direction of the arc's middle, radians. Ring only.
+    pub arc_dir: f32,
+    pub _pad: f32,
+}
+const _: () = assert!(std::mem::size_of::<Shape>() == 64);
+const _: () = assert!(std::mem::align_of::<Shape>() == 4);
+
+impl Shape {
+    /// Bit 12: draw the interior with the vertex colour.
+    pub const FILL: u32 = 1 << 12;
+    /// Bit 13: draw the inward stroke band with `stroke_c`.
+    pub const STROKE: u32 = 1 << 13;
+    /// Bits 8-11 carry the [`ShapeKind`].
+    pub const KIND_SHIFT: u32 = 8;
+    /// Bits 0-11: everything that describes the SILHOUETTE — the four
+    /// corner treatments and the kind — as against the parts drawn on
+    /// it. Two records agreeing here and on the numbers above outline
+    /// the same curve, which is what makes welding them legal (§2.10).
+    pub const SILHOUETTE: u32 = (1 << 12) - 1;
+}
+
+/// The closed family of silhouettes the vector core draws (f3 §2.1).
+/// Box is the only kind emitted so far; the others are declared now so
+/// the record's bits 8-11 have their meaning pinned before anything
+/// fills them in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum ShapeKind {
+    Box = 0,
+    Ring = 1,
+    Hex = 2,
+    Chevron = 3,
+    Capsule = 4,
+}
+
+/// One shape as the caller means it (f3 §2.11: bed and edge; glow and
+/// shadow are still ahead). Bed and edge SHARE the record
+/// when both are present, because they share a silhouette — as two
+/// records their antialiased outer edges would blend twice on the same
+/// pixels and a translucent panel over glass would grow a dark rim
+/// (§2.10).
+#[derive(Clone, Copy, Debug)]
+pub struct ShapeSpec {
+    pub rect: Rect,
+    /// tl, tr, br, bl — [`ring_points`]' order.
+    pub corners: [Corner; 4],
+    pub kind: ShapeKind,
+    /// Interior colour; rides the vertices, like every fill before it.
+    pub fill: Option<Color>,
+    /// Width and colour of the inward band; rides the record.
+    pub stroke: Option<(f32, Color)>,
+}
+
+/// A bed still open to the parts that belong to it (f3 §2.10).
+///
+/// `ring_fill` and `ring` are two calls because the tessellated lane
+/// needs two: a fan and a strip. On the vector lane they are two
+/// DESCRIPTIONS OF ONE SILHOUETTE, and drawing that silhouette twice
+/// means blending its antialiased outer edge twice — `1 − (1 − a)²`
+/// where the geometry says `a`, the dark rim R4 names. So the bed's
+/// record stays open: the very next call, if it draws another part of
+/// the same outline and nothing has happened in between, joins that
+/// record instead of writing a second one. No new quad, no second
+/// edge, no change at any call site.
+///
+/// **Two parts join, not one.** A border (STROKE) takes the record's
+/// band bits. A SECOND FILL — the state wash every button and every
+/// field lays over its plate — is composited into the colour of the
+/// quad that is already there ([`fill_over`]), and the offer stays
+/// open behind it, so plate + wash + border is one record.
+///
+/// The wash was the half of R4 that survived the first round, and it
+/// is the half that matters most: the census of the twelve shape sites
+/// (2026-08-17, probe on the live theme, records read back from
+/// `DrawList::shapes`) found the fill+fill pair in exactly two of them
+/// — `button::dress` (`button.rs:109` + `:114`) and `text_input::draw`
+/// (`text_input.rs:953` + `:967`) — and those two are the button, every
+/// row of every drop-down through `dropdown.rs`, and every field you
+/// type into. Its depth is the wash's alpha, which is the THEME's
+/// number and not the code's, so nothing in this file can bound it.
+/// Welded, the pair is one bed whose colour is the wash over the plate,
+/// carrying one AA edge, which is what the geometry always meant.
+///
+/// "Nothing in between" is checked, not assumed. Every drawing call
+/// moves `verts`; every clip push, pop, restore and texture change
+/// pushes a `run`; the record must still be the last one written. The
+/// geometry compared is what the RECORD holds — post-snap, post-sentinel
+/// — because two specs that resolve to the same record are the same
+/// silhouette whatever the caller wrote.
+///
+/// **The alternative, and why not.** The other way to spell this is an
+/// explicit entry — `framed(rect, corners, fill, stroke)` — and it is
+/// the honest one in the abstract: the caller says what it means and
+/// nothing has to be inferred. It was rejected because the meaning is
+/// already there. TWELVE call sites across the toolkit already write
+/// the pair in the same order for the same reason — `button`, `window`,
+/// `menu`, `tooltip`, `text_input`, `winframe`, `elev`, `segmented`,
+/// `tabs`, `surface`, and `paint`'s pill and scrollbar thumb — every one
+/// of them a fill and then a ring with nothing drawn between.
+/// [`ShapeSpec`] can already carry both parts, and `shape()` is the door
+/// for a caller who wants to say it outright. A new entry would ask every object to be rewritten to say
+/// what it already says, would leave the old pair
+/// working-but-wrong for anything not rewritten (a plugin, a script
+/// table, a widget written later), and would make the defect's absence
+/// depend on remembering. This way the defect cannot come back through
+/// the door it came in by.
+#[derive(Clone, Copy)]
+struct Weld {
+    idx: usize,
+    /// The bed's own quads, `from..verts` of the vertex buffer — the
+    /// vertices a second fill rewrites the colour of. `verts` doubles
+    /// as the "nothing drawn since" mark.
+    from: usize,
+    verts: usize,
+    runs: usize,
+    centre: [f32; 2],
+    half: [f32; 2],
+    corner: [f32; 4],
+    /// [`Shape::SILHOUETTE`] of the record: corner treatments and kind.
+    bits: u32,
+    /// What those vertices carry NOW: every fill welded so far,
+    /// composited. The bed the next one composites onto.
+    fill: [f32; 4],
+    /// The band the bed's frame was cut at (f3 §7b), or `None` where the
+    /// bed rasterises through one quad. A border welding in deepens the
+    /// band by its own width, so the core has to shrink to match — the
+    /// geometry was laid out for a bed with no border at all, and the
+    /// strips must still cover every pixel the field can bend.
+    frame: Option<f32>,
+}
+
+/// `top` over `bottom` when both are about to be blended onto the same
+/// unknown destination — the arithmetic that lets two fills of one
+/// silhouette become one.
+///
+/// The hardware blends straight alpha: `d' = c.rgb·c.a + d·(1 − c.a)`.
+/// Two fills in a row leave
+///
+/// ```text
+/// d₂ = B.rgb·B.a + (1 − B.a)·A.rgb·A.a + d·(1 − A.a)(1 − B.a)
+/// ```
+///
+/// and one fill `C` leaves `C.rgb·C.a + d·(1 − C.a)`. Matching the
+/// coefficient of `d` gives `C.a = A.a + B.a − A.a·B.a`, and what is
+/// left gives `C.rgb·C.a = B.rgb·B.a + (1 − B.a)·A.rgb·A.a`. Both sides
+/// are the same function of the destination, so this is an identity for
+/// EVERY background, not a match on one.
+///
+/// Two consequences worth naming:
+///
+/// * **No transfer curve here.** The composite is done on the numbers
+///   the vertices carry, because those are the numbers the blender
+///   works on — the swapchain's own encoding, not linear light. This is
+///   [`Color::composite_as_rendered`]'s question, not [`Color::over`]'s.
+/// * **A ride commutes with it** (§2.9, R8). The board ride mixes every
+///   vertex colour toward `surface.void`, `x ↦ v + (x − v)·s`, which is
+///   affine, and the composite's rgb weights sum to exactly `C.a`; so
+///   dimming the composite equals compositing the dimmed pair. The
+///   welded bed dims like the two it replaced, to the last bit of the
+///   arithmetic.
+///
+/// Like the band's own composition, this happens BEFORE the fragment's
+/// `grade()` — one fragment per silhouette is the lane's whole premise.
+fn fill_over(top: [f32; 4], bottom: [f32; 4]) -> [f32; 4] {
+    let (ta, ba) = (top[3], bottom[3]);
+    let a = ta + ba * (1.0 - ta);
+    if a <= 0.0 {
+        // Nothing was laid at all; the colour is unobservable, and the
+        // top's is as good a nothing as any.
+        return top;
+    }
+    let ch = |t: f32, b: f32| (t * ta + b * ba * (1.0 - ta)) / a;
+    [ch(top[0], bottom[0]), ch(top[1], bottom[1]), ch(top[2], bottom[2]), a]
+}
+
+/// How far past the silhouette a shape's quad reaches, so the coverage
+/// ramp has somewhere to land. A feather would join this margin.
+const AA_PAD: f32 = 1.0;
+
+/// The slack between the deepest the field can still differ from the
+/// plain fill and where the CORE quad begins (f3 §7b, remedy 1).
+///
+/// The core is shaded by the ordinary fill path, so the split is only
+/// legal where `fs_shape` would have returned the fill colour and
+/// nothing else — `cov = 1`, `a_band = 0`. That needs
+/// `d ≤ −(stroke + w/2)` with `w` the field's screen gradient, one on a
+/// still screen. [`corner_reach`] + the stroke buys `d ≤ −(reach +
+/// stroke + AA_PAD + CORE_PAD)` inside the core, so the margin is
+/// `AA_PAD + CORE_PAD − w/2` — 2.5 px at `w = 1`, and still positive at
+/// `w = 4`.
+///
+/// The margin is not decoration. Under multisampling the fragment is
+/// shaded at the PIXEL CENTRE while coverage is decided per sample, so
+/// a core pixel can be shaded up to half a pixel diagonal (0.71 px)
+/// outside the core it belongs to; the unsplit quad would have shaded
+/// that same fragment through the field. Two px of slack covers that
+/// with more than a pixel to spare, and costs a two-pixel-deeper band
+/// on a saving measured in hundreds.
+const CORE_PAD: f32 = 2.0;
+
+/// The smallest core worth cutting out, px². Below it the four strips
+/// of the frame cost more vertices than the fragments they save — the
+/// split is an optimisation and has to earn its place on every shape,
+/// not on the average one. 256 px² is a 16×16 core.
+const CORE_MIN: f32 = 256.0;
+
+/// How deep from the boundary a corner treatment of size `size` can
+/// still bend the field — the reason a shape needs an analytic band at
+/// all, and the number that sizes it (f3 §7b, remedy 1).
+///
+/// Take the rect inset by `m` on all four sides. Its box distance is at
+/// most `−m` everywhere for free; what can spoil that is the corner.
+///
+/// * **Square** cannot: the field IS the box distance. Reach 0.
+/// * **Round** of radius `k`: the inset rect's own corner reads
+///   `√2·(k − m) − k` while `m < k` and exactly `−m` once `m ≥ k`, so
+///   reach `k`.
+/// * **Chamfer** of cut `k`: the 45° plane reads `(k − 2m)/√2`, and
+///   `(k − 2m)/√2 ≤ −m` exactly when `m ≥ k/(2 − √2) ≈ 1.707·k`. A
+///   chamfer eats deeper than a round corner of the same size because
+///   it cuts straight across where the arc bulges out.
+fn corner_reach(style: CornerStyle, size: f32) -> f32 {
+    match style {
+        CornerStyle::Square => 0.0,
+        CornerStyle::Round => size,
+        // 1/(2 − √2) = (2 + √2)/2, written so the constant is derivable
+        // by eye rather than looked up.
+        CornerStyle::Chamfer => size * (2.0 + std::f32::consts::SQRT_2) * 0.5,
+    }
+}
+
+/// Half sizes of the core a band `band` deep leaves behind — clamped at
+/// zero, where the frame closes over the whole shape and the core is
+/// empty.
+fn core_half(half: [f32; 2], band: f32) -> [f32; 2] {
+    [(half[0] - band).max(0.0), (half[1] - band).max(0.0)]
+}
+
+/// The five rectangles a split shape rasterises through — the core
+/// first, then the four strips around it — as `[x0, y0, x1, y1]`.
+///
+/// Their union is EXACTLY the padded bounds of the single quad they
+/// replace and their interiors are disjoint, for every core the clamp
+/// above can produce: at a core of zero the two horizontal strips meet
+/// on the centre line and the other three collapse to nothing, which is
+/// the unsplit quad again in four pieces. That identity is what lets
+/// the picture be argued rather than looked at, and it is why the
+/// decomposition is a frame and not a nine-patch.
+fn frame_rects(centre: [f32; 2], ext: [f32; 2], core: [f32; 2]) -> [[f32; 4]; 5] {
+    let (x0, x1) = (centre[0] - ext[0], centre[0] + ext[0]);
+    let (y0, y1) = (centre[1] - ext[1], centre[1] + ext[1]);
+    let (ix0, ix1) = (centre[0] - core[0], centre[0] + core[0]);
+    let (iy0, iy1) = (centre[1] - core[1], centre[1] + core[1]);
+    [
+        [ix0, iy0, ix1, iy1],
+        [x0, y0, x1, iy0],
+        [x0, iy1, x1, y1],
+        [x0, iy0, ix0, iy1],
+        [ix1, iy0, x1, iy1],
+    ]
+}
+
+/// One axis-aligned rectangle as six vertices, in `push_quad4`'s own
+/// winding. `local` carries the record's centre on the shape lane —
+/// the uv contract, `pos − centre` — and `None` puts the atlas's white
+/// pixel there, which is what every solid fill in this file already
+/// samples.
+fn quad6(r: [f32; 4], local: Option<[f32; 2]>, colour: [f32; 4], shape: u32) -> [Vertex; 6] {
+    let p = [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]];
+    let white = FontSystem::white_uv();
+    let v = |i: usize| Vertex {
+        pos: p[i],
+        uv: match local {
+            Some(c) => [p[i][0] - c[0], p[i][1] - c[1]],
+            None => [white.0, white.1],
+        },
+        color: colour,
+        shape,
+    };
+    [v(0), v(1), v(2), v(0), v(2), v(3)]
 }
 
 /// Treatment of one rect corner — the vocabulary of the one tessellated
@@ -333,6 +663,17 @@ pub enum DrawCmd {
         dir: [f32; 2],
     },
     RingFill { r: [f32; 4], corners: [Corner; 4], color: Color },
+    /// [`DrawList::shape`] — the vector family's own entry. `ring` and
+    /// `ring_fill` keep their names in the register even when the
+    /// vector lane draws them: which lane tessellated is exactly the
+    /// knob the register must not see.
+    Shape {
+        r: [f32; 4],
+        corners: [Corner; 4],
+        kind: ShapeKind,
+        fill: Option<Color>,
+        stroke: Option<(f32, Color)>,
+    },
     GlassFill { r: [f32; 4], corners: [Corner; 4], depth: f32, tint: Color },
     RectGrad { r: [f32; 4], stops: Vec<(f32, Color)>, angle: f32 },
     FanC { centre: [f32; 2], c_centre: Color, rim: Vec<([f32; 2], Color)> },
@@ -590,6 +931,27 @@ impl fmt::Display for DrawCmd {
                 corners(f, c)?;
                 rgba(f, *color)
             }
+            DrawCmd::Shape { r, corners: c, kind, fill, stroke } => {
+                f.write_str("shape at")?;
+                nums(f, r, PX)?;
+                corners(f, c)?;
+                f.write_str(match kind {
+                    ShapeKind::Box => " kind box",
+                    ShapeKind::Ring => " kind ring",
+                    ShapeKind::Hex => " kind hex",
+                    ShapeKind::Chevron => " kind chevron",
+                    ShapeKind::Capsule => " kind capsule",
+                })?;
+                if let Some(col) = fill {
+                    f.write_str(" fill")?;
+                    rgba(f, *col)?;
+                }
+                if let Some((w, col)) = stroke {
+                    field(f, "stroke", *w, PX)?;
+                    rgba(f, *col)?;
+                }
+                Ok(())
+            }
             DrawCmd::RectGrad { r, stops, angle } => {
                 f.write_str("rect_grad at")?;
                 nums(f, r, PX)?;
@@ -738,6 +1100,21 @@ pub fn arm_cmds() {
 pub struct DrawList {
     pub verts: Vec<Vertex>,
     pub runs: Vec<DrawRun>,
+    /// The frame's shape records (f3 §2.5): what runs tagged [`SHAPE`]
+    /// index into through [`Vertex::shape`]. Uploaded beside the
+    /// vertices, cleared with them.
+    shapes: Vec<Shape>,
+    /// Whether ring/ring_fill take the vector lane. The application
+    /// sets it from the theme's `render.vector`; false is the shipping
+    /// default and the tessellated path bit for bit.
+    vector: bool,
+    /// §2.3's ride subdivision: shape quads emit as warp×warp grids
+    /// while a post-emission transform is in flight. 1 = one quad, and
+    /// only there does §2.7's edge snap apply.
+    warp: u8,
+    /// The bed the vector lane last wrote, still open for the border
+    /// that belongs to it (§2.10).
+    weld: Option<Weld>,
     /// The clip stack: pushes intersect, pops restore. The TOP is stamped
     /// onto every run the moment it is opened.
     clips: Vec<[f32; 4]>,
@@ -758,6 +1135,10 @@ impl DrawList {
         DrawList {
             verts: Vec::with_capacity(1 << 16),
             runs: Vec::new(),
+            shapes: Vec::new(),
+            vector: false,
+            warp: 1,
+            weld: None,
             clips: Vec::new(),
             scratch_a: Vec::new(),
             scratch_b: Vec::new(),
@@ -775,6 +1156,14 @@ impl DrawList {
     pub fn clear(&mut self) {
         self.verts.clear();
         self.runs.clear();
+        self.shapes.clear();
+        // The warp is FRAME state — a ride that forgot to lower it must
+        // not thicken every later frame — while `vector` is a mode, set
+        // once from the theme, and survives like the register does.
+        self.warp = 1;
+        // The records it indexed are gone; an open weld across a frame
+        // boundary would name a record that no longer exists.
+        self.weld = None;
         self.clips.clear();
         match &mut self.cmds {
             Some(cmds) => cmds.clear(),
@@ -925,7 +1314,7 @@ impl DrawList {
         c: [[f32; 4]; 4],
     ) {
         self.run_for(image);
-        let v = |i: usize| Vertex { pos: p[i], uv: uv[i], color: c[i] };
+        let v = |i: usize| Vertex { pos: p[i], uv: uv[i], color: c[i], shape: NO_SHAPE };
         self.verts.extend_from_slice(&[v(0), v(1), v(2), v(0), v(2), v(3)]);
         self.seal();
     }
@@ -935,7 +1324,7 @@ impl DrawList {
     fn push_tri_c(&mut self, image: Option<ImageId>, p: [[f32; 2]; 3], c: [[f32; 4]; 3]) {
         self.run_for(image);
         let (u, v) = FontSystem::white_uv();
-        let vx = |i: usize| Vertex { pos: p[i], uv: [u, v], color: c[i] };
+        let vx = |i: usize| Vertex { pos: p[i], uv: [u, v], color: c[i], shape: NO_SHAPE };
         self.verts.extend_from_slice(&[vx(0), vx(1), vx(2)]);
         self.seal();
     }
@@ -954,7 +1343,7 @@ impl DrawList {
         let c = tint.to_array();
         let p = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
         let uv = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-        let v = |i: usize| Vertex { pos: p[i], uv: uv[i], color: c };
+        let v = |i: usize| Vertex { pos: p[i], uv: uv[i], color: c, shape: NO_SHAPE };
         self.verts.extend_from_slice(&[v(0), v(1), v(2), v(0), v(2), v(3)]);
         self.seal();
     }
@@ -971,13 +1360,43 @@ impl DrawList {
         let c = tint.to_array();
         let (u, v) = FontSystem::white_uv();
         let p = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
-        let vx = |i: usize| Vertex { pos: p[i], uv: [u, v], color: c };
+        let vx = |i: usize| Vertex { pos: p[i], uv: [u, v], color: c, shape: NO_SHAPE };
         self.verts
             .extend_from_slice(&[vx(0), vx(1), vx(2), vx(0), vx(2), vx(3)]);
         self.seal();
     }
 
     /// Arbitrary quadrilateral (vertices along the perimeter).
+    ///
+    /// **K4 leaves this hard, and the census is the argument** (f3 §3.2,
+    /// counted across libnacelle, nacelle-desktop and nacelle-addons on
+    /// 2026-08-17). A filled polygon is not in the vector family: its
+    /// silhouette is a LIST OF POINTS, not a formula, so the field
+    /// cannot draw it and §3.2's answer is a different mechanism
+    /// altogether — a one-pixel `fringe()` band along the true boundary,
+    /// alpha 1 inside and 0 out, Gouraud-interpolated by the rasteriser.
+    /// That mechanism was not built, and these are the reasons:
+    ///
+    /// * **The live callers are TRAPEZOIDS**, which no affine frame can
+    ///   reach: `winframe.rs:415` (the title band's 45° shoulders) and
+    ///   `:432` (the body below it). A parallelogram would have been
+    ///   free — an affine image of a box is still a box read in oblique
+    ///   axes, and [`crate::sdf::Frame`] already carries one — but a
+    ///   trapezoid's two ends are not parallel and there is no such map.
+    /// * **The parallelogram callers are switched OFF in the shipped
+    ///   theme**: `tabs.rs:351` and `focus_ring.rs:139` draw one only
+    ///   when `tab.skew` or `button.skew` is a length, and the master
+    ///   sets both to `0u` (`default.theme:4401`, `:4602`) — a slanted
+    ///   control is a theme's choice and nobody's default.
+    /// * **The remaining caller is the ABI tunnel** (`plugin.rs:99`),
+    ///   where the toolkit cannot know what the polygon means.
+    ///
+    /// So the shape that would pay for a fringe is drawn by nobody, and
+    /// the shape that is drawn cannot use one. The mechanism waits for
+    /// a caller that needs it — and when it comes, the parallelogram is
+    /// the cheap half and the trapezoid the one that needs the band.
+    /// Meanwhile the OUTLINE of a slanted control is already smooth:
+    /// `polyline` strokes it, and every diagonal arm of it is a shape.
     pub fn quad(&mut self, p: [[f32; 2]; 4], color: Color) {
         self.cmd(|| DrawCmd::Quad { p, color });
         self.quad_verts(p, color);
@@ -998,6 +1417,18 @@ impl DrawList {
         self.push_quad(p, [[u, v]; 4], color);
     }
 
+    /// An axis-aligned rectangle, hard-edged — and it stays that way on
+    /// every lane (f3 §3.3, and §2.7 before it).
+    ///
+    /// This is the TERMINAL's own primitive: the shell plugin draws
+    /// every cell background, the cursor and the selection through
+    /// `HostApi::rect`, and none of them may ever reach the field.
+    /// Three reasons, none of them about cost alone. Cell backgrounds
+    /// touch side by side, so an antialiased edge is a SEAM — two
+    /// neighbours at half coverage draw a lattice across the whole
+    /// screen. Cells sit on integer coordinates by construction, so
+    /// there is nothing to smooth. And an 80×24 grid is 1 920 records a
+    /// frame, 115 000 a second, for a picture that was already exact.
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
         self.cmd(|| DrawCmd::Rect { r: [x, y, w, h], color });
         self.rect_verts(x, y, w, h, color);
@@ -1033,7 +1464,10 @@ impl DrawList {
     /// builds every chart stroke out of `line_verts`, so a cap on the
     /// segment would double-draw at each joint, which is exactly what
     /// `ring`'s watertight band exists to avoid and what additive runs
-    /// show as a bright pip.
+    /// show as a bright pip. The corner of a PATH is a separate disc,
+    /// laid once by [`DrawList::joints`] where the path actually turns
+    /// (f3 §3.1) — never by the segment, which cannot know whether
+    /// anything follows it.
     pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, t: f32, color: Color) {
         self.cmd(|| DrawCmd::Line {
             from: [x0, y0],
@@ -1045,6 +1479,28 @@ impl DrawList {
     }
 
     fn line_verts(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, t: f32, color: Color) {
+        // f3 §K4 — THE DIAGONAL GOES TO THE FIELD, THE AXIS DOES NOT.
+        //
+        // An axis-aligned segment is a rectangle on the screen's own
+        // grid, and §2.7 has already ruled on those: a rule, an
+        // underline, a table guide and a grid line are the interface's
+        // own edges, the raster puts them exactly where they belong,
+        // and a coverage ramp could only smear them across two half-lit
+        // pixels. They stay quads, at four vertices and no record, bit
+        // for bit what they are today. That is most of this method's
+        // callers by count (`ui.rs`, `list.rs`, `tabs.rs`, `panel.rs`,
+        // the editor's grid) and all of its cheap ones.
+        //
+        // A DIAGONAL is the case the raster cannot hold: it has no
+        // representation on the grid at all, and what it draws is the
+        // staircase MSAA was covering for. Those go to the field — the
+        // tick and the cross of every checkbox, the menu's chevron, the
+        // sort arrow and the disclosure triangle of every list, the
+        // dashes of a focus ring on a slanted control, every icon and
+        // every chart a plugin draws through the ABI's `polyline`.
+        if self.vector && x0 != x1 && y0 != y1 && self.segment_verts([x0, y0], [x1, y1], t, color) {
+            return;
+        }
         let dx = x1 - x0;
         let dy = y1 - y0;
         let len = (dx * dx + dy * dy).sqrt().max(0.0001);
@@ -1078,6 +1534,63 @@ impl DrawList {
             let a = pts[pts.len() - 1];
             let b = pts[0];
             self.line_verts(a[0], a[1], b[0], b[1], t, color);
+        }
+        if self.vector {
+            self.joints(pts, t, color, closed);
+        }
+    }
+
+    /// The joints of a stroked path on the vector lane (f3 §3.1): one
+    /// disc of radius `t/2` at every corner where the field draws BOTH
+    /// sides of the turn.
+    ///
+    /// Two butt-capped segments meeting at an angle leave the outer
+    /// wedge empty. The hard raster left it empty too — it is the notch
+    /// on every triangle and every tick the toolkit draws — and
+    /// antialiasing does not hide it, it draws it accurately. The disc
+    /// closes it, and the union becomes the round join a stroked path
+    /// is supposed to have. Measured against the true stroke — the set
+    /// of points within `t/2` of the path — the bare pair is a whole
+    /// pixel short at the corner and the disc lands within a tenth
+    /// (`sdf::tests::a_joint_disc_closes_the_notch_the_two_segments_leave`).
+    ///
+    /// **Both sides, and the reason.** Where one arm is axis-aligned
+    /// its edge is hard and exactly on the grid; a disc would lay a
+    /// soft half-pixel halo along it and move a picture §2.7 promised
+    /// not to move. Those joints stay exactly as they are today. So do
+    /// straight ones — a disc on a path that does not turn is ink for
+    /// nothing.
+    ///
+    /// The disc DOES lie over the two segments it joins, and §3.1's
+    /// claim that nothing overlaps is not true of this decomposition.
+    /// For an opaque stroke that is invisible; for a translucent one it
+    /// is a bounded double blend — six square pixels of extra ink on a
+    /// seven-pixel stroke at half alpha, a sixth of the disc's own
+    /// area, all of it inside the silhouette. The alternative —
+    /// shortening each arm by `t/2` so nothing overlaps — leaves the
+    /// crescent between a flat cap and the circle tangent to it EMPTY,
+    /// at every angle, turn or no turn. The same test measures that
+    /// too: a hole is worse than a hot spot.
+    fn joints(&mut self, pts: &[[f32; 2]], t: f32, color: Color, closed: bool) {
+        let n = pts.len();
+        let diagonal = |a: [f32; 2], b: [f32; 2]| a[0] != b[0] && a[1] != b[1];
+        let mut corner = |a: [f32; 2], v: [f32; 2], b: [f32; 2]| {
+            if !diagonal(a, v) || !diagonal(v, b) {
+                return;
+            }
+            let (e0, e1) = ([v[0] - a[0], v[1] - a[1]], [b[0] - v[0], b[1] - v[1]]);
+            // A path that runs straight through has nothing to join.
+            if e0[0] * e1[1] - e0[1] * e1[0] == 0.0 {
+                return;
+            }
+            self.joint_verts(v, t, color);
+        };
+        for w in pts.windows(3) {
+            corner(w[0], w[1], w[2]);
+        }
+        if closed && n >= 3 {
+            corner(pts[n - 2], pts[n - 1], pts[0]);
+            corner(pts[n - 1], pts[0], pts[1]);
         }
     }
 
@@ -1154,6 +1667,22 @@ impl DrawList {
             stroke,
             color,
         });
+        if self.vector {
+            // The vector lane: STROKE alone, the band inward as ever —
+            // and if the bed under it was written by the `ring_fill`
+            // immediately before, this WELDS onto that record instead
+            // of writing a second one ([`Weld`], f3 §2.10). Nothing
+            // here decides that; `shape_verts` compares the resolved
+            // silhouettes and the caller never learns which happened.
+            self.shape_verts(&ShapeSpec {
+                rect: r,
+                corners: *c,
+                kind: ShapeKind::Box,
+                fill: None,
+                stroke: Some((stroke, color)),
+            });
+            return;
+        }
         self.ring_verts(r, c, segments, stroke, color);
     }
 
@@ -1213,6 +1742,32 @@ impl DrawList {
     /// `near == far` is not bit-for-bit `near`, so routing the flat ring
     /// through this one would move every existing frame's vertices by an
     /// ulp for no picture.
+    ///
+    /// # This one has no vector lane, and that is stated, not forgotten
+    ///
+    /// [`ring`](Self::ring) branches on `self.vector` and hands the stroke
+    /// to `shape_verts`; this does not, and cannot yet. A shape record
+    /// carries `stroke: Option<(f32, Color)>` — ONE colour on the band —
+    /// so a two-stop edge is not a thing the lane can be asked for, and
+    /// asking it anyway would flatten the gradient to its near stop with
+    /// no word about it. Tessellation is the only path that can draw what
+    /// the theme wrote, so a gradient ring takes it whichever way
+    /// `render.vector` is set.
+    ///
+    /// Two consequences, both bounded and neither reaching the shipping
+    /// picture, `render.vector = false` being the default it goes down
+    /// behind. With the lane ON, a gradient-edged surface does not WELD:
+    /// its bed writes a fill-only record and the ring lays a strip over
+    /// it, so that silhouette's outer edge blends twice — the dark rim R4
+    /// names, which the flat ring is welded precisely to avoid. And the
+    /// band is tessellated, so it is the one edge on the frame without the
+    /// lane's analytic coverage.
+    ///
+    /// Widening the record to a stop pair is K4's business, not a merge's:
+    /// it is a change to the 64-byte shape record and to `fs_shape`, on
+    /// the far side of a repository boundary, and it wants deciding
+    /// together with the NAMED `edge.gradient` slot the theme engine still
+    /// bakes no stops for.
     pub fn ring_grad(
         &mut self,
         r: Rect,
@@ -1297,6 +1852,22 @@ impl DrawList {
             corners: *c,
             color,
         });
+        if self.vector {
+            // The vector lane: FILL alone, the colour on the vertices
+            // as every fill before it, still on the ORIGINAL rect —
+            // the fill must reach the rect edge under the border. A
+            // wash laid straight over another fill of the same outline
+            // — the button's and the field's idiom — composites into
+            // that bed instead of writing a second record ([`Weld`]).
+            self.shape_verts(&ShapeSpec {
+                rect: r,
+                corners: *c,
+                kind: ShapeKind::Box,
+                fill: Some(color),
+                stroke: None,
+            });
+            return;
+        }
         if r.w <= 0.0 || r.h <= 0.0 {
             return;
         }
@@ -1328,6 +1899,598 @@ impl DrawList {
         self.scratch_a = pts;
     }
 
+    /// One shape of the vector family (f3 §2.11): bed and/or edge over
+    /// a Box silhouette, one record and one quad (6 vertices) whatever
+    /// the corners — where the ring generator spends up to 168. Kinds
+    /// beyond Box are recorded faithfully but the fragment shader draws
+    /// every record as its Box distance so far; the remaining kinds,
+    /// glow and shadow are still ahead.
+    pub fn shape(&mut self, s: &ShapeSpec) {
+        self.cmd(|| DrawCmd::Shape {
+            r: [s.rect.x, s.rect.y, s.rect.w, s.rect.h],
+            corners: s.corners,
+            kind: s.kind,
+            fill: s.fill,
+            stroke: s.stroke,
+        });
+        self.shape_verts(s);
+    }
+
+    /// The record and quads of [`DrawList::shape`] without the command —
+    /// ring/ring_fill's vector lane comes in here having recorded its
+    /// own name, because the register holds intent and their intent is
+    /// Ring/RingFill whatever tessellates them.
+    fn shape_verts(&mut self, s: &ShapeSpec) {
+        let mut r = s.rect;
+        if r.w <= 0.0 || r.h <= 0.0 {
+            return;
+        }
+        let stroke = s.stroke.filter(|&(w, _)| w > 0.0);
+        if s.fill.is_none() && stroke.is_none() {
+            return;
+        }
+        let snap = self.warp <= 1;
+        if snap {
+            // §2.7: an axis-aligned shape snaps its OUTER edges to the
+            // device pixel grid on the CPU, before the record is
+            // written — the vector lane must never smear a hard
+            // interface edge across two half-lit pixels. Off during a
+            // warp ride, where the screen grid does not correspond to
+            // the shape's anyway.
+            let x1 = (r.x + r.w).round();
+            let y1 = (r.y + r.h).round();
+            r.x = r.x.round();
+            r.y = r.y.round();
+            r.w = x1 - r.x;
+            r.h = y1 - r.y;
+            if r.w <= 0.0 || r.h <= 0.0 {
+                return;
+            }
+        }
+        // R9: sentinels resolve HERE — the buffer never sees a negative
+        // corner. `pill` is half the short side (corner_radius's one
+        // rule, sized like ring_points' own cap); `same_as_parent`
+        // takes the FIRST corner as its parent — the base every
+        // `[Corner { .. }; 4]` builder repeats — until K6 reads the
+        // per-corner tokens and a real cascade parent exists.
+        let cap = (r.w.min(r.h) * 0.5).max(0.0);
+        let same = crate::theme::expr::sentinel("same_as_parent").unwrap_or(-3.0);
+        let base = crate::theme::corner_radius(s.corners[0].size, r.w, r.h);
+        let resolve = |c: &Corner| -> f32 {
+            let sz = if c.size == same {
+                base
+            } else {
+                crate::theme::corner_radius(c.size, r.w, r.h)
+            };
+            debug_assert!(sz >= 0.0, "a sentinel reached the record: {sz}");
+            sz.min(cap)
+        };
+        // Corner radii are NOT snapped (§2.7): the curve does not lie
+        // on the grid to begin with.
+        let corner = [
+            resolve(&s.corners[0]),
+            resolve(&s.corners[1]),
+            resolve(&s.corners[2]),
+            resolve(&s.corners[3]),
+        ];
+        let (stroke_w, stroke_c) = match stroke {
+            // The baker's own hairline rule — `stroke.*` bakes as
+            // max(1, round(x·u)) — applied at the same moment as the
+            // edge snap, and skipped with it. `cap` is `ring_verts`'
+            // own ceiling: a band deeper than half the short side would
+            // meet itself, and the two lanes must agree on that too.
+            //
+            // §2.8, THE HAIRLINE, AND WHERE IT APPLIES. This rounding
+            // is also the answer to a question §2.8 asks of the shader:
+            // a band thinner than a pixel must not vanish or shimmer,
+            // so the plan spreads it to one pixel and dims it by
+            // `stroke / (floor·w)` to keep its integral. While the snap
+            // is on — every still frame, `warp <= 1` — no such band
+            // ever reaches the record: `round().max(1.0)` has already
+            // lifted 0.3 px to 1 px, at full strength, and the theme's
+            // baker lifted it once before that. The energy rule
+            // therefore governs the UNSNAPPED lane alone — a ride, and
+            // whatever K4 brings that is not axis-aligned — where a
+            // real 0.3 px band can exist because there is no pixel grid
+            // to round to. Two rules, two domains, and they cannot both
+            // fire on the same band.
+            Some((w, c)) => {
+                (if snap { w.round().max(1.0) } else { w }.min(cap), c.to_array())
+            }
+            None => (0.0, [0.0; 4]),
+        };
+        let mut flags = 0u32;
+        for (i, c) in s.corners.iter().enumerate() {
+            flags |= (c.style as u32) << (2 * i as u32);
+        }
+        flags |= (s.kind as u32) << Shape::KIND_SHIFT;
+        if s.fill.is_some() {
+            flags |= Shape::FILL;
+        }
+        if stroke.is_some() {
+            flags |= Shape::STROKE;
+        }
+        let half = [r.w * 0.5, r.h * 0.5];
+        let centre = [r.x + half[0], r.y + half[1]];
+        // §2.10: a part drawn over the bed that was just written is not
+        // a second shape. It is the same silhouette wearing another
+        // part, and the record has a bit — and a bed colour — for
+        // exactly that.
+        if let Some(bed) = self.weld.take() {
+            let fits = bed.verts == self.verts.len()
+                && bed.runs == self.runs.len()
+                && bed.idx + 1 == self.shapes.len()
+                && bed.centre == centre
+                && bed.half == half
+                && bed.corner == corner
+                && bed.bits == flags & Shape::SILHOUETTE;
+            if fits {
+                // A second fill goes into the quad that is already
+                // there. The record keeps its FILL bit — one bed, one
+                // colour, one edge.
+                let fill = match s.fill {
+                    Some(c) => {
+                        let mixed = fill_over(c.to_array(), bed.fill);
+                        for v in &mut self.verts[bed.from..bed.verts] {
+                            v.color = mixed;
+                        }
+                        mixed
+                    }
+                    None => bed.fill,
+                };
+                if stroke.is_some() {
+                    let rec = &mut self.shapes[bed.idx];
+                    rec.flags |= Shape::STROKE;
+                    rec.stroke = stroke_w;
+                    rec.stroke_c = stroke_c;
+                    // The band the bed's frame was cut for was the band
+                    // of a bed with no border; this one runs `stroke_w`
+                    // deeper, so the core has to give that back or the
+                    // fill path would shade pixels the field bends.
+                    // The layout is fixed, so this is a rewrite in
+                    // place — no vertex is added and none is dropped.
+                    if let Some(band) = bed.frame {
+                        self.respan_frame(&bed, band + stroke_w);
+                    }
+                    // The offer is NOT renewed: a fill arriving after a
+                    // band would have to sink under it here and stands
+                    // over it in the tessellated lane. It gets its own
+                    // record, and the picture stays the one the caller
+                    // asked for.
+                } else {
+                    self.weld = Some(Weld { fill, ..bed });
+                }
+                return;
+            }
+        }
+        let idx = self.shapes.len() as u32;
+        self.shapes.push(Shape {
+            half,
+            stroke: stroke_w,
+            feather: 0.0,
+            corner,
+            stroke_c,
+            flags,
+            arc_half: 0.0,
+            arc_dir: 0.0,
+            _pad: 0.0,
+        });
+        // The quad reaches one pixel past the silhouette so the AA ramp
+        // has somewhere to land (a feather would join this margin). The
+        // vertex colour is the fill's — or the stroke's when there is
+        // no fill, so §2.10's mix starts from the band's own colour and
+        // the band's inner AA edge cannot pick up a foreign tint.
+        let colour = s
+            .fill
+            .or(stroke.map(|(_, c)| c))
+            .unwrap_or(Color::WHITE)
+            .to_array();
+        let ext = [half[0] + AA_PAD, half[1] + AA_PAD];
+        let n = self.warp.max(1) as u32;
+        // f3 §7b, REMEDY 1 — THE RING OF QUADS. One quad over the whole
+        // shape asks the field for every pixel of the interior too,
+        // where the answer is known before it is computed: `cov` is 1,
+        // the band is 0, and `fs_shape` returns the vertex colour after
+        // spending a hundred instructions to find that out — against
+        // five on the ordinary fill path. So the interior is CUT OUT
+        // and drawn as what it is: a plain fill of the same colour, on
+        // the same vertices, through the path every solid rect in this
+        // file already takes. Only a band `reach + stroke + AA_PAD +
+        // CORE_PAD` deep along the perimeter still goes to the field.
+        //
+        // The picture does not move, and that is provable rather than
+        // hoped: `sdf::tests` rasterises both variants pixel by pixel
+        // and asserts the fragments are equal to the bit. See
+        // [`CORE_PAD`] for why the boundary sits where it does.
+        //
+        // THREE THINGS HOLD THE SPLIT BACK, each for its own reason:
+        //
+        // * **A ride** (`warp > 1`). The field's screen gradient is 1
+        //   only while one local px is one device px; under a
+        //   perspective ride it is not, the ramp widens in local units,
+        //   and the core's boundary could land inside it. Same
+        //   condition as the edge snap, and for the same reason.
+        // * **A kind past Box.** The shader draws every record as its
+        //   Box distance so far, so a Hex or a Chevron record would
+        //   split correctly TODAY and wrongly the day its silhouette
+        //   arrives. The cut is worth nothing on a shape whose
+        //   interior is not the box's.
+        // * **A core too small to pay for itself** ([`CORE_MIN`]).
+        //
+        // The cost of the cut is TWO runs more per shape, not one —
+        // MEASURED, after an adversary called the first figure out.
+        // The core samples the atlas and the strips read the shape
+        // buffer, so the pair is two pipelines; but the cut also BREAKS
+        // the merge of the runs on either side, which a row of plain
+        // shapes used to get for free. A band of twelve panels goes
+        // from 1 run to 24. Remedy 3 of the same section — merging
+        // shape runs on the host's side — is where that is answered,
+        // and it stops being optional; it is not answered here.
+        let split = (snap && s.kind == ShapeKind::Box)
+            .then(|| {
+                let reach = s
+                    .corners
+                    .iter()
+                    .zip(corner)
+                    .fold(0.0f32, |m, (c, k)| m.max(corner_reach(c.style, k)));
+                let band = reach + stroke_w + AA_PAD + CORE_PAD;
+                let core = core_half(half, band);
+                (core[0] * core[1] * 4.0 >= CORE_MIN).then_some((band, core))
+            })
+            .flatten();
+        let from;
+        match split {
+            Some((_, core)) => {
+                let frame = frame_rects(centre, ext, core);
+                // The core FIRST: it is the bed, it joins whatever
+                // ordinary run precedes it, and `from` has to be the
+                // record's first vertex for a wash to recolour all of
+                // them at once.
+                if s.fill.is_some() {
+                    self.run_for(None);
+                    from = self.verts.len();
+                    self.verts
+                        .extend_from_slice(&quad6(frame[0], None, colour, NO_SHAPE));
+                    self.seal();
+                } else {
+                    // A band with no bed leaves the interior EMPTY —
+                    // not filled, not shaded, not rasterised at all.
+                    // This is what makes a window frame cost its
+                    // perimeter instead of its area (f3 §7b, risk 1:
+                    // `winframe.rs:453` draws a border over the whole
+                    // window and nothing else).
+                    from = self.verts.len();
+                }
+                self.run_for(Some(SHAPE));
+                for r in &frame[1..] {
+                    self.verts
+                        .extend_from_slice(&quad6(*r, Some(centre), colour, idx));
+                }
+                self.seal();
+            }
+            None => {
+                self.run_for(Some(SHAPE));
+                from = self.verts.len();
+                let step = [ext[0] * 2.0 / n as f32, ext[1] * 2.0 / n as f32];
+                let (x0, y0) = (centre[0] - ext[0], centre[1] - ext[1]);
+                for j in 0..n {
+                    for i in 0..n {
+                        let xa = x0 + step[0] * i as f32;
+                        let xb = x0 + step[0] * (i + 1) as f32;
+                        let ya = y0 + step[1] * j as f32;
+                        let yb = y0 + step[1] * (j + 1) as f32;
+                        let v = |x: f32, y: f32| Vertex {
+                            pos: [x, y],
+                            uv: [x - centre[0], y - centre[1]],
+                            color: colour,
+                            shape: idx,
+                        };
+                        self.verts.extend_from_slice(&[
+                            v(xa, ya),
+                            v(xb, ya),
+                            v(xb, yb),
+                            v(xa, ya),
+                            v(xb, yb),
+                            v(xa, yb),
+                        ]);
+                    }
+                }
+                self.seal();
+            }
+        }
+        // A BARE BED is left open — a fill with no band of its own.
+        // `ring_fill` (then another `ring_fill`) then `ring` is how
+        // every panel, field, menu and button in the toolkit spells a
+        // framed surface, and it is what §2.10 exists to weld. Anything
+        // else drawn first closes the offer, because the guard above
+        // will find `verts` or `runs` moved. A record that already
+        // carries a band offers nothing: see the take.
+        //
+        // WHAT THE OFFER HAS TO COVER, measured rather than assumed —
+        // the census of the twelve shape-drawing sites of the toolkit
+        // (2026-08-17; the probe armed this lane, called the real entry
+        // points on the live theme and read `shapes()` back):
+        //
+        // * TWO sites lay a fill over a fill: `button::dress`
+        //   (`button.rs:109` plate, `:114` state wash, `:116` border)
+        //   and `text_input::draw` (`text_input.rs:953`, `:967`,
+        //   `:977`). Three calls each; before the fill weld they wrote
+        //   two records and the R4 rim was real and visible on every
+        //   button, every drop-down row (through `dropdown.rs:337`) and
+        //   every field. Now: one record, three calls, one edge.
+        // * NINE sites are the plain bed+border pair and were already
+        //   one record with the border weld alone: `window::frame`
+        //   (`window.rs:187`/`:189`), `menu.rs:445`/`:448`,
+        //   `tooltip.rs:266`/`:269`, `elev::Level::draw`
+        //   (`elev.rs:121`/`:127`), `view::surface` (`surface.rs:418`/
+        //   `:423`), `paint`'s pill (`paint.rs:559`/`:561`) and
+        //   scrollbar thumb (`:695`/`:700`), and the cells of
+        //   `segmented.rs:149`/`:153` and `tabs.rs:353`/`:362`.
+        // * ONE site draws borders and no fill at all: `winframe`
+        //   (`winframe.rs:453` the frame, `:495` the four button
+        //   plates) — five records, five silhouettes, nothing to weld.
+        //   2 + 9 + 1 = the twelve.
+        //
+        // Three further sites were measured as CONTROLS, outside that
+        // census, because they draw fills that are NOT one silhouette
+        // and must never weld: the meter's track and its bar on a
+        // shorter rect (`paint.rs:483`/`:491`), the slider's three
+        // (`slider.rs:60`/`:78`/`:89`), and a list's row plates
+        // (`list.rs:354`) — one per row. The geometry check refuses
+        // them by itself; nothing here has to know their names.
+        // * The GLASS pair (`window.rs:181`/`:184`, `elev.rs:113`/
+        //   `:116`) is one record too, but for a different reason and
+        //   not a good one: `glass_fill` is a tessellated fan on the
+        //   `GLASS_RANK_*` lane, not a shape record at all, so it has
+        //   no AA edge to double — and none to smooth either. See the
+        //   note on [`DrawList::glass_fill`].
+        self.weld = (flags & (Shape::FILL | Shape::STROKE) == Shape::FILL).then_some(Weld {
+            idx: idx as usize,
+            from,
+            verts: self.verts.len(),
+            runs: self.runs.len(),
+            centre,
+            half,
+            corner,
+            bits: flags & Shape::SILHOUETTE,
+            fill: colour,
+            frame: split.map(|(band, _)| band),
+        });
+    }
+
+    /// One FILLED shape of the vector family read in an oriented frame
+    /// (f3 §K4) — the entry the whole diagonal lane is built out of.
+    ///
+    /// The record is the Box family's, untouched: the shader takes the
+    /// fragment's local position out of `uv` and knows nothing about
+    /// any frame. What makes this a diagonal is where the four vertices
+    /// are put and what they carry — position through the frame, uv the
+    /// local corner they were built from — and the rasteriser inverts
+    /// the map for free. **The renderer needed no change for K4 at
+    /// all**; see [`crate::sdf::Frame`] for why, and for why the
+    /// antialiasing survives the rotation.
+    ///
+    /// Three of `shape_verts`' mechanisms are deliberately absent:
+    ///
+    /// * **No snap** (§2.7). There is no pixel grid to snap a diagonal
+    ///   to; rounding its ends would move the path the caller drew.
+    /// * **No split** (§7b). The frame of five rectangles is
+    ///   axis-aligned, and a stroke has no interior to save — its core
+    ///   is a pixel wide and [`CORE_MIN`] would refuse it anyway.
+    /// * **No weld** (§2.10). The offer compares centre, half sizes and
+    ///   corners, which the two arms of a CROSS share exactly
+    ///   (`checkbox.rs:70-71` draws that very pair) — and they are not
+    ///   the same silhouette. An oriented record neither joins one nor
+    ///   offers itself, and it closes any offer standing, which is what
+    ///   drawing anything at all does.
+    ///
+    /// The frame must be ORTHONORMAL: the padding below is stated in
+    /// local units and spent as screen pixels, which is the same number
+    /// only when a local unit is a pixel and the axes are square to
+    /// each other. Everything [`Frame`] builds is; a sheared frame
+    /// would have to divide the pad by the sine of its own angle.
+    fn oriented_fill(&mut self, f: Frame, half: [f32; 2], corners: [Corner; 4], colour: Color) {
+        debug_assert!(
+            (f.ux[0] * f.ux[0] + f.ux[1] * f.ux[1] - 1.0).abs() < 1e-3
+                && (f.ux[0] * f.uy[0] + f.ux[1] * f.uy[1]).abs() < 1e-3,
+            "an oriented frame must be orthonormal"
+        );
+        if !(half[0] > 0.0) || !(half[1] > 0.0) {
+            return;
+        }
+        // The same ceiling `ring_verts` and `shape_verts` keep: a
+        // corner deeper than the short half side would meet itself.
+        let cap = half[0].min(half[1]);
+        let mut flags = ((ShapeKind::Box as u32) << Shape::KIND_SHIFT) | Shape::FILL;
+        let mut corner = [0.0f32; 4];
+        for (i, c) in corners.iter().enumerate() {
+            flags |= (c.style as u32) << (2 * i as u32);
+            corner[i] = c.size.clamp(0.0, cap);
+        }
+        let idx = self.shapes.len() as u32;
+        self.shapes.push(Shape {
+            half,
+            stroke: 0.0,
+            feather: 0.0,
+            corner,
+            stroke_c: [0.0; 4],
+            flags,
+            arc_half: 0.0,
+            arc_dir: 0.0,
+            _pad: 0.0,
+        });
+        let ext = [half[0] + AA_PAD, half[1] + AA_PAD];
+        let l = [
+            [-ext[0], -ext[1]],
+            [ext[0], -ext[1]],
+            [ext[0], ext[1]],
+            [-ext[0], ext[1]],
+        ];
+        let col = colour.to_array();
+        self.run_for(Some(SHAPE));
+        let v = |i: usize| Vertex {
+            pos: f.to_screen(l[i]),
+            uv: l[i],
+            color: col,
+            shape: idx,
+        };
+        self.verts
+            .extend_from_slice(&[v(0), v(1), v(2), v(0), v(2), v(3)]);
+        self.seal();
+        self.weld = None;
+    }
+
+    /// The vector lane's straight segment (f3 §3.1): the oriented box
+    /// [`DrawList::line`] has always drawn, given the field that makes
+    /// its two long edges analytic instead of quantised.
+    ///
+    /// Ends stay CUT SQUARE across the path — `line`'s own contract,
+    /// and the reason a polyline can be built out of these at all. The
+    /// cap that a stroke needs at a corner is a separate disc, laid by
+    /// [`DrawList::polyline`], because a cap on the segment would be
+    /// drawn twice at every joint.
+    ///
+    /// `false` where there is no segment to speak of, so the caller can
+    /// fall back to the geometry it would have drawn.
+    fn segment_verts(&mut self, a: [f32; 2], b: [f32; 2], t: f32, color: Color) -> bool {
+        if !(t > 0.0) {
+            return false;
+        }
+        let Some((f, len)) = Frame::along(a, b) else {
+            return false;
+        };
+        // §2.8's energy rule, in the one domain where it fires: the
+        // snapped lane has already rounded every sub-pixel band away,
+        // and a diagonal has no grid to round to. See [`thin_band`].
+        let (w, dim) = thin_band(t);
+        self.oriented_fill(
+            f,
+            [len * 0.5, w * 0.5],
+            [Corner::SQUARE; 4],
+            color.fade(dim),
+        );
+        true
+    }
+
+    /// The disc that closes one joint of a polyline (f3 §3.1): radius
+    /// `t/2` at the corner, tangent to both segments' long edges, so
+    /// the union is the round join a stroked path is supposed to have.
+    ///
+    /// It is a Box record with round corners as big as its own half
+    /// size — `d_round(p, [r, r], r)` IS `|p| − r`, proved in
+    /// [`crate::sdf`] — so a joint costs one record and one quad and
+    /// the shader learns nothing. It does NOT go through `shape_verts`,
+    /// which would snap it to the pixel grid: a corner sits where the
+    /// path put it, and moving it half a pixel would bend the line.
+    ///
+    /// It takes the same [`thin_band`] treatment as the arms it joins,
+    /// and for the arms' reason rather than its own: a disc's mass goes
+    /// as the square of its radius, not as its width, so this dims the
+    /// joint slightly further than its area alone would ask. Matching
+    /// the strokes it belongs to is what a joint is for, and both
+    /// numbers are under a pixel wherever the rule fires at all.
+    fn joint_verts(&mut self, at: [f32; 2], t: f32, color: Color) {
+        let (w, dim) = thin_band(t);
+        let r = w * 0.5;
+        self.oriented_fill(
+            Frame::upright(at),
+            [r, r],
+            [Corner::round(r); 4],
+            color.fade(dim),
+        );
+    }
+
+    /// Re-cuts a welded bed's frame at a deeper band (f3 §7b): the core
+    /// shrinks by exactly the border that just joined the record, and
+    /// the four strips grow to meet it.
+    ///
+    /// A rewrite rather than an emission, because the layout is fixed —
+    /// core, top, bottom, left, right, six vertices each — and every
+    /// vertex keeps the colour and the record index it already had.
+    /// Only positions and the uv that trails them move. Where the new
+    /// band swallows the shape whole the core collapses to nothing and
+    /// the two horizontal strips meet on the centre line, which is the
+    /// unsplit quad again: correct, and five quads where one would have
+    /// done. That costs four degenerate triangles on a shape whose
+    /// border is half its size, and it buys the invariant that a bed
+    /// never has to guess how deep a border it has not seen yet will be.
+    fn respan_frame(&mut self, bed: &Weld, band: f32) {
+        debug_assert_eq!(bed.verts - bed.from, 30, "a frame is five quads");
+        let ext = [bed.half[0] + AA_PAD, bed.half[1] + AA_PAD];
+        let frame = frame_rects(bed.centre, ext, core_half(bed.half, band));
+        for (i, r) in frame.iter().enumerate() {
+            let at = bed.from + i * 6;
+            let (colour, shape) = (self.verts[at].color, self.verts[at].shape);
+            let local = (i > 0).then_some(bed.centre);
+            self.verts[at..at + 6].copy_from_slice(&quad6(*r, local, colour, shape));
+        }
+    }
+
+    /// How many shape records the list has written — the host's marker
+    /// for a post-emission transform, the twin of `verts.len()`
+    /// (f3 §2.9).
+    pub fn shape_len(&self) -> usize {
+        self.shapes.len()
+    }
+
+    /// The frame's shape records, in emission order — what the renderer
+    /// uploads beside the vertices.
+    pub fn shapes(&self) -> &[Shape] {
+        &self.shapes
+    }
+
+    /// The records from `range` on, mutably: a board ride dims
+    /// `stroke_c` here exactly as it dims vertex colours, or the two
+    /// fall out of step mid-flight (f3 §2.9, R8).
+    pub fn shapes_mut(&mut self, range: std::ops::RangeFrom<usize>) -> &mut [Shape] {
+        &mut self.shapes[range]
+    }
+
+    /// Splits every following BOX shape quad into an n×n grid for the
+    /// duration of a post-emission transform (f3 §2.3): the affine
+    /// interpolation error of a perspective ride falls as 1/n². 1 = one
+    /// quad, and §2.7's edge snap applies only there. Nothing outside
+    /// shapes is affected. Reset to 1 by [`DrawList::clear`].
+    ///
+    /// NOT every shape, and the word BOX above is the whole of it: the
+    /// oblique lane (capsule, disc, polygon) emits its own geometry
+    /// from a local frame and does not read this at all. On a ride, a
+    /// dash of a focus ring or a plugin's diagonal wire therefore
+    /// carries the affine error this call exists to remove. Measured
+    /// and left standing on purpose — the ride dims and moves whole
+    /// panels, and a hairline inside one is below the error of the
+    /// panel's own corner — but it is a limit, not a property.
+    pub fn set_warp(&mut self, n: u8) {
+        self.warp = n.max(1);
+        // The quads of an open bed were emitted under the old grid; a
+        // border welded onto it after the change would ride them. The
+        // geometry check would catch it — the snap differs — but not
+        // for a rect already on the grid, so the offer is withdrawn
+        // here rather than left to a coincidence.
+        self.weld = None;
+    }
+
+    /// Arms the vector lane: ring/ring_fill emit one SDF record and one
+    /// quad instead of tessellating. The application sets this from the
+    /// theme's `render.vector`; the list itself reads no tokens.
+    ///
+    /// **Nothing but tests calls this yet, and that is not an
+    /// oversight.** A reader has to be someone who owns a list and
+    /// knows the frame boundary, and in this library nobody does: every
+    /// production `DrawList` belongs to the host, which builds one per
+    /// screen, clears it per frame and hands `shapes()` to the
+    /// renderer. Reading the token in `clear()` would put the answer in
+    /// the right file and the wrong place — it would make a MODE into
+    /// frame state and re-read the theme sixty times a second for a
+    /// value that changes when a theme is loaded. The host's three
+    /// anchors and the condition are written down in
+    /// `.gap-program/f3-vector-svg.md` §6 K3; they are not touched here
+    /// because `nacelle-desktop` is another crew's tree today.
+    pub fn set_vector(&mut self, on: bool) {
+        self.vector = on;
+        self.weld = None;
+    }
+
     /// The blurred scene behind a SHAPE — [`DrawList::blur`]'s corner-aware
     /// counterpart, and the first emitter the `GLASS_RANK_*` handles ever
     /// had. `blur()` emits a rectangle, and the renderer's scissor is a
@@ -1340,6 +2503,32 @@ impl DrawList {
     /// `rank` picks the pyramid depth the renderer serves (clamped there to
     /// what the frame actually wrote); 0 is not a rank — a surface with no
     /// glass simply does not call this.
+    ///
+    /// **This is NOT on the shape lane, and K3's acceptance criterion
+    /// needs it to be.** The plan's condition for flipping
+    /// `render.vector` reads "smooth corners; no dark rim on a
+    /// translucent panel over glass" (`.gap-program/f3-vector-svg.md`,
+    /// §6 K3), and glass is exactly what stands between the panel and
+    /// its wash in that sentence. What the 2026-08-17 census measured:
+    /// `window.rs:181`/`:184` and `elev.rs:113`/`:116` emit ONE shape
+    /// record, not two — the wash and the border weld, and the fan
+    /// below them is not a record at all. So R4, the dark rim, is not
+    /// what is wrong here. What is wrong is the other half of the
+    /// criterion: this fan is a TESSELLATED polygon with hard edges, so
+    /// after the flip a frosted surface would wear a smooth wash and a
+    /// smooth border over a frost whose own corners are still
+    /// stair-stepped, and the mismatch shows precisely where the eye
+    /// goes — the arc. Today it does not show, because everything on
+    /// screen is equally hard.
+    ///
+    /// The fix is not a weld: the fan reads a blurred target through a
+    /// different pipeline, so it cannot join a record that reads none.
+    /// It is the `SHAPE_GLASS_*` lane the [`SHAPE`] handle's note
+    /// already names — the tint on the record, the wash on the vertex,
+    /// the blurred sample and both layers composed in one fragment with
+    /// one coverage. **It belongs to K3**, not after it, because K3 is
+    /// the step that makes the mismatch visible; the plan carries this
+    /// as a named sub-step.
     pub fn glass_fill(&mut self, r: Rect, c: &[Corner; 4], segments: u8, depth: f32, tint: Color) {
         let depth = depth.clamp(1.0, 3.0);
         self.cmd(|| DrawCmd::GlassFill {
@@ -1510,6 +2699,17 @@ impl DrawList {
     /// CLOSED — rim[k−1] joins rim[0]: hexagons, reticles, radial washes
     /// (r1 §6.3, 3·k verts). An open wedge is quad_c's job; closing is what
     /// makes a k-gon k triangles. Fewer than 3 rim points draw nothing.
+    ///
+    /// **Nothing calls this.** f3 §3.2 planned a `fringe()` for the fan,
+    /// `quad_c` and `rect_grad`; K4's census (2026-08-17, grep across
+    /// libnacelle, nacelle-desktop, nacelle-addons and nacelle-ai) found
+    /// ZERO production callers of all three — the only mentions outside
+    /// this file's own tests are the command register's formatting and
+    /// this documentation. A silhouette nobody draws cannot be graded
+    /// against anything, so K4 leaves the three of them exactly as they
+    /// are rather than antialiasing a picture that is not on screen.
+    /// The hexagon a reticle would want has a home already: it is
+    /// `ShapeKind::Hex`, waiting on K6.
     pub fn fan_c(&mut self, centre: [f32; 2], rim: &[[f32; 2]], c_centre: Color, c_rim: &[Color]) {
         self.cmd(|| DrawCmd::FanC {
             centre,
@@ -1620,6 +2820,34 @@ impl DrawList {
     /// raw. The renderer binds ADD_ATLAS since r1 P7, so both forms
     /// RENDER; only an actual texture miss still drops the run — the
     /// glow is then absent, never wrong.
+    ///
+    /// **This stays tessellated, and deliberately (f3 §2.6, R7).** The
+    /// vector lane took the bed, the wash over it and the border
+    /// because those SHARE a silhouette and drawing it twice — or three
+    /// times — was a defect: R4's dark rim.
+    /// A glow shares no edge with anything: it is strictly outside the
+    /// path and it composes additively, so nothing about it blocks
+    /// `render.vector`. Moving it would buy vertices and cost three
+    /// things this step cannot pay for:
+    ///
+    /// * an ADDITIVE shape pipeline in the renderer — a second pipeline
+    ///   object, a fourth `RunKind`, a fifth reserved handle — none of
+    ///   which any test in that repo can exercise, because every test
+    ///   there is CPU-side (naga, scissors, rank tables). It would ship
+    ///   unproven.
+    /// * R7's fill-rate answer. A glow quad grows by `glow.<class>.radius`
+    ///   (up to 4u), every fragment of it running through `grade()`; the
+    ///   plan says MEASURE that in K3 and choose between one quad and a
+    ///   ring of four. Measuring wants a device and a display.
+    /// * the profile itself. §2.6 asks for `bake_masks`' own gauss
+    ///   (σ = r/3, hard zero at r) so the picture does not change
+    ///   CHARACTER — and "same character" is a judgement made on a
+    ///   screen, not in a test.
+    ///
+    /// The cost of leaving it is R6, knowingly: panels antialias before
+    /// their glows do. `fs_shape_glass` waits behind the same door and
+    /// on one more question — the record has no rank field, so a glass
+    /// silhouette would need one or a per-run binding.
     pub fn glow_ring(
         &mut self,
         r: Rect,
@@ -2178,6 +3406,12 @@ mod tests {
     use super::*;
     use std::fmt::Write as _;
 
+    /// Vertices a split shape rasterises through (f3 §7b): the core the
+    /// ordinary fill path draws, then the four strips of the frame the
+    /// field draws — six vertices each, and every one of them cheaper
+    /// than the fragments it saves.
+    const FRAME: usize = 30;
+
     /// The two shipped track corners, drawn. `slider.track_corner` says
     /// `@corner.pill` and `slider.knob_corner` says `@corner.none`, and
     /// until `Corner::sized` existed both reached the vertex list as the
@@ -2716,6 +3950,702 @@ mod tests {
             assert!(px + (y + h - py) >= x + cut - e, "bottom-left corner leaks");
             assert!((x + w - px) + (y + h - py) >= cut - e, "bottom-right corner leaks");
         }
+    }
+
+    // -----------------------------------------------------------------
+    // The vector lane (f3 §2).
+
+    /// Level A survives the switch: the register holds intent, and the
+    /// intent of ring/ring_fill does not move when their tessellation
+    /// becomes one record and one quad each. The vertices move, the
+    /// dump does not — and the SHAPE run exists only on the new lane.
+    #[test]
+    fn the_vector_switch_moves_the_vertices_and_not_the_register() {
+        let scene = |vector: bool| {
+            let mut dl = DrawList::recording();
+            dl.set_vector(vector);
+            let r = Rect::new(10.0, 20.0, 200.0, 100.0);
+            dl.ring(r, &[Corner::round(8.0); 4], 6, 2.0, ink());
+            dl.ring_fill(r, &[Corner::round(8.0); 4], 6, wash());
+            dl
+        };
+        let (old, new) = (scene(false), scene(true));
+        assert_eq!(dump(&old), dump(&new));
+        assert_ne!(old.verts.len(), new.verts.len());
+        assert_eq!(old.shape_len(), 0);
+        assert_eq!(new.shape_len(), 2);
+        assert!(old.runs.iter().all(|r| r.image != Some(SHAPE)));
+        assert!(new.runs.iter().any(|r| r.image == Some(SHAPE)));
+        // And the lane is opt-in: a fresh list tessellates.
+        let mut dl = DrawList::new();
+        dl.ring_fill(Rect::new(0.0, 0.0, 10.0, 10.0), &[Corner::SQUARE; 4], 6, ink());
+        assert_eq!(dl.shape_len(), 0);
+    }
+
+    /// R3's control: a frame at warp 1, a 4×4 grid of WHOLE quads at
+    /// warp 4 — 30 and 96 vertices — every shape-lane vertex carrying
+    /// the same record index, so a ride's transform bends the grid and
+    /// the record stays one.
+    ///
+    /// The ride is the case §7b's split stays out of (the field's
+    /// screen gradient is no longer one), so warp 4 is also the control
+    /// that shows what the unsplit geometry still looks like.
+    #[test]
+    fn a_shape_quad_splits_into_the_warp_grid() {
+        let spec = ShapeSpec {
+            rect: Rect::new(0.0, 0.0, 100.0, 50.0),
+            corners: [Corner::round(6.0); 4],
+            kind: ShapeKind::Box,
+            fill: Some(ink()),
+            stroke: None,
+        };
+        let mut dl = DrawList::new();
+        dl.shape(&spec);
+        assert_eq!(dl.verts.len(), FRAME, "core plus four strips");
+        assert_eq!(dl.shape_len(), 1);
+        let mut dl = DrawList::new();
+        dl.set_warp(4);
+        dl.shape(&spec);
+        assert_eq!(dl.verts.len(), 96, "a ride does not split the interior out");
+        assert_eq!(dl.shape_len(), 1, "a grid is one shape, not sixteen");
+        assert!(dl.verts.iter().all(|v| v.shape == 0));
+    }
+
+    /// Level D (§2.7): an axis-aligned INTEGER rect with
+    /// a 1 px stroke passes the snap untouched — same edges, same
+    /// stroke — and a fractional one lands on the grid: edges rounded,
+    /// the stroke on the baker's own max(1, round) rule, corner radii
+    /// never rounded. The centre is recoverable from any vertex as
+    /// pos − uv, which is also the uv contract itself.
+    #[test]
+    fn an_integer_rect_survives_the_snap_and_a_fractional_one_lands_on_it() {
+        let shape_of = |r: Rect, w: f32| {
+            let mut dl = DrawList::new();
+            dl.set_vector(true);
+            dl.ring(r, &[Corner::round(4.3); 4], 6, w, ink());
+            (dl.shapes()[0], dl.verts.clone())
+        };
+        let (s, verts) = shape_of(Rect::new(10.0, 20.0, 200.0, 100.0), 1.0);
+        assert_eq!(s.half, [100.0, 50.0]);
+        assert_eq!(s.stroke, 1.0);
+        assert_eq!(s.corner, [4.3; 4], "radii are never snapped");
+        for v in &verts {
+            assert_eq!([v.pos[0] - v.uv[0], v.pos[1] - v.uv[1]], [110.0, 70.0]);
+        }
+        let (s, verts) = shape_of(Rect::new(10.4, 19.6, 200.2, 100.1), 0.4);
+        assert_eq!(s.half, [100.5, 50.0], "10..211 by 20..120");
+        assert_eq!(s.stroke, 1.0, "a hairline never drops under one device px");
+        for v in &verts {
+            assert_eq!([v.pos[0] - v.uv[0], v.pos[1] - v.uv[1]], [110.5, 70.0]);
+        }
+    }
+
+    /// R9: sentinels resolve on the CPU and the record never holds a
+    /// negative corner — pill is half the short side, same_as_parent
+    /// the first corner's own resolved size, and any other absence is
+    /// zero, exactly corner_radius's rule.
+    #[test]
+    fn sentinels_resolve_before_the_record() {
+        let pill = crate::theme::expr::sentinel("pill").unwrap();
+        let same = crate::theme::expr::sentinel("same_as_parent").unwrap();
+        let auto = crate::theme::expr::sentinel("auto").unwrap();
+        let mut dl = DrawList::new();
+        dl.shape(&ShapeSpec {
+            rect: Rect::new(0.0, 0.0, 200.0, 8.0),
+            corners: [
+                Corner::round(pill),
+                Corner::round(same),
+                Corner::round(3.0),
+                Corner::round(auto),
+            ],
+            kind: ShapeKind::Box,
+            fill: Some(ink()),
+            stroke: None,
+        });
+        assert_eq!(dl.shapes()[0].corner, [4.0, 4.0, 3.0, 0.0]);
+    }
+
+    /// The record carries what the call meant: ring is STROKE alone
+    /// with its colour in stroke_c, ring_fill FILL alone with the
+    /// colour on the vertex; the corner styles pack two bits each in
+    /// ring_points' order; Box contributes no kind bits. clear() drops
+    /// the records and rests the warp back to one — while the vector
+    /// switch, a mode rather than frame state, survives it.
+    #[test]
+    fn the_record_carries_the_flags_and_clear_resets_the_frame() {
+        let r = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let c = [
+            Corner::SQUARE,
+            Corner::round(4.0),
+            Corner::chamfer(6.0),
+            Corner::round(2.0),
+        ];
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.set_warp(4);
+        dl.ring(r, &c, 6, 2.0, ink());
+        dl.ring_fill(r, &c, 6, wash());
+        let (ring, fill) = (dl.shapes()[0], dl.shapes()[1]);
+        let styles = (1u32 << 2) | (2 << 4) | (1 << 6);
+        assert_eq!(ring.flags, styles | Shape::STROKE);
+        assert_eq!(ring.stroke_c, ink().to_array());
+        assert_eq!(ring.stroke, 2.0);
+        assert_eq!(fill.flags, styles | Shape::FILL);
+        assert_eq!(fill.stroke, 0.0);
+        dl.clear();
+        assert_eq!(dl.shape_len(), 0);
+        dl.ring_fill(r, &c, 6, wash());
+        assert_eq!(dl.verts.len(), FRAME, "the warp did not reset to one");
+        assert_eq!(dl.shape_len(), 1, "the vector switch must survive clear()");
+    }
+
+    /// §2.10 / R4, the reason the switch stayed false: a bed and the
+    /// border over it are ONE silhouette, so on the vector lane they are
+    /// one record — one quad, one coverage, one blend of the shared
+    /// outer edge. Two records would compose `1 − (1 − a)²` there and
+    /// grow the dark rim on a translucent panel over glass.
+    ///
+    /// Nothing at the call site changes: this is `ring_fill` then
+    /// `ring`, which is how every framed surface in the toolkit is
+    /// spelled, and the register still reports both.
+    #[test]
+    fn a_bed_and_the_border_over_it_are_one_record() {
+        let r = Rect::new(10.0, 20.0, 200.0, 100.0);
+        let c = [Corner::round(8.0), Corner::chamfer(6.0), Corner::SQUARE, Corner::round(2.0)];
+        let mut dl = DrawList::recording();
+        dl.set_vector(true);
+        dl.ring_fill(r, &c, 6, wash());
+        dl.ring(r, &c, 6, 2.0, ink());
+        assert_eq!(dl.shape_len(), 1, "the pair wrote two records");
+        assert_eq!(dl.verts.len(), FRAME, "the border drew a second frame");
+        let s = dl.shapes()[0];
+        assert_eq!(s.flags & (Shape::FILL | Shape::STROKE), Shape::FILL | Shape::STROKE);
+        assert_eq!(s.stroke, 2.0);
+        assert_eq!(s.stroke_c, ink().to_array());
+        // The quads' colour is the BED's — §2.10's mix starts from the
+        // fill and the band's own colour rides the record — and that
+        // holds for the core cut out of the middle as much as for the
+        // strips: it is the same fill, drawn where the field had
+        // nothing left to say (§7b).
+        assert!(dl.verts.iter().all(|v| v.color == wash().to_array()));
+        assert!(dl.verts[..6].iter().all(|v| v.shape == NO_SHAPE), "the core");
+        assert!(dl.verts[6..].iter().all(|v| v.shape == 0), "the strips");
+        // Level A: the register is untouched. What the frame MEANT is
+        // still a fill and a ring; only the triangles moved.
+        let mut tess = DrawList::recording();
+        tess.ring_fill(r, &c, 6, wash());
+        tess.ring(r, &c, 6, 2.0, ink());
+        assert_eq!(dump(&dl), dump(&tess));
+    }
+
+    /// …and only that pair. The weld is offered by the bed and taken by
+    /// the very next call, on the resolved silhouette, with nothing
+    /// between: a different rect, a different corner, a clip in the way,
+    /// anything drawn in between, or a second border, and the border
+    /// gets a record of its own. Each case here would be a wrong picture
+    /// if it welded.
+    #[test]
+    fn only_the_border_that_shares_the_bed_s_silhouette_welds() {
+        let r = Rect::new(10.0, 20.0, 200.0, 100.0);
+        let c = [Corner::round(8.0); 4];
+        let armed = || {
+            let mut dl = DrawList::new();
+            dl.set_vector(true);
+            dl.ring_fill(r, &c, 6, wash());
+            dl
+        };
+        // A border on another rect.
+        let mut dl = armed();
+        dl.ring(Rect::new(10.0, 20.0, 200.0, 99.0), &c, 6, 2.0, ink());
+        assert_eq!(dl.shape_len(), 2, "a different rect welded");
+        // A border on another corner treatment.
+        let mut dl = armed();
+        dl.ring(r, &[Corner::chamfer(8.0); 4], 6, 2.0, ink());
+        assert_eq!(dl.shape_len(), 2, "a different corner welded");
+        // A clip pushed in between: the border belongs to a different
+        // scissor and cannot ride the bed's own quad.
+        let mut dl = armed();
+        dl.push_clip(0.0, 0.0, 50.0, 50.0);
+        dl.ring(r, &c, 6, 2.0, ink());
+        assert_eq!(dl.shape_len(), 2, "a clip change welded");
+        // Anything drawn in between: the border would sink under it.
+        let mut dl = armed();
+        dl.rect(0.0, 0.0, 4.0, 4.0, ink());
+        dl.ring(r, &c, 6, 2.0, ink());
+        assert_eq!(dl.shape_len(), 2, "a draw in between welded");
+        // A second border on the same outline — two bands, two records.
+        let mut dl = armed();
+        dl.ring(r, &c, 6, 2.0, ink());
+        dl.ring(r, &c, 6, 4.0, wash());
+        assert_eq!(dl.shape_len(), 2, "the second band welded onto the first");
+        assert_eq!(dl.shapes()[0].stroke, 2.0);
+        assert_eq!(dl.shapes()[1].stroke, 4.0);
+        // The other order — a bed laid over a border — is two shapes and
+        // stays two: the bed would bury the band it welded to.
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.ring(r, &c, 6, 2.0, ink());
+        dl.ring_fill(r, &c, 6, wash());
+        assert_eq!(dl.shape_len(), 2);
+        // And a ride withdraws the offer: the bed's quads were laid out
+        // on the old grid.
+        let mut dl = armed();
+        dl.set_warp(4);
+        dl.ring(r, &c, 6, 2.0, ink());
+        assert_eq!(dl.shape_len(), 2, "the warp change welded");
+    }
+
+    /// The half of R4 that the border weld alone left standing, and the
+    /// commonest shape in the whole interface: a plate with a state
+    /// wash over it and a border over both — `button::dress`
+    /// (`button.rs:109`/`:114`/`:116`), `text_input::draw`
+    /// (`text_input.rs:953`/`:967`/`:977`), and through `dropdown.rs`
+    /// every row of every drop-down. Three calls, ONE silhouette, so
+    /// one record, one quad and one antialiased edge; the wash rides
+    /// the bed's own vertices, composited.
+    #[test]
+    fn a_wash_over_the_bed_joins_it_and_the_border_still_welds() {
+        let r = Rect::new(10.0, 20.0, 200.0, 100.0);
+        let c = [Corner::round(8.0); 4];
+        let plate = Color::rgb8(20, 30, 40);
+        let over = Color::rgba8(200, 60, 90, 102);
+        let mut dl = DrawList::recording();
+        dl.set_vector(true);
+        dl.ring_fill(r, &c, 6, plate);
+        dl.ring_fill(r, &c, 6, over);
+        dl.ring(r, &c, 6, 2.0, ink());
+        assert_eq!(dl.shape_len(), 1, "the wash wrote a second record");
+        assert_eq!(dl.verts.len(), FRAME, "the wash drew a second frame");
+        let s = dl.shapes()[0];
+        assert_eq!(s.flags & (Shape::FILL | Shape::STROKE), Shape::FILL | Shape::STROKE);
+        assert_eq!(s.stroke, 2.0);
+        assert_eq!(s.stroke_c, ink().to_array());
+        // The bed's colour is the wash over the plate — worked out here
+        // from the blend equation, not read back from `fill_over`.
+        let a = over.a;
+        let want = [
+            over.r * a + plate.r * (1.0 - a),
+            over.g * a + plate.g * (1.0 - a),
+            over.b * a + plate.b * (1.0 - a),
+            1.0,
+        ];
+        for v in &dl.verts {
+            for k in 0..4 {
+                assert!(
+                    (v.color[k] - want[k]).abs() < 1e-6,
+                    "channel {k}: {} vs {}",
+                    v.color[k],
+                    want[k]
+                );
+            }
+        }
+        // Level A: the register still reports three calls, in order.
+        let mut tess = DrawList::recording();
+        tess.ring_fill(r, &c, 6, plate);
+        tess.ring_fill(r, &c, 6, over);
+        tess.ring(r, &c, 6, 2.0, ink());
+        assert_eq!(dump(&dl), dump(&tess));
+    }
+
+    /// …and the composite is not merely plausible: for every background
+    /// it lands where the two blends it replaces would have landed.
+    /// This is the identity the weld rests on — one source over an
+    /// unknown destination, matched coefficient by coefficient — so it
+    /// is checked against a simulation of the hardware rather than
+    /// against the formula that produced it.
+    #[test]
+    fn the_welded_bed_blends_where_the_two_fills_would_have() {
+        let r = Rect::new(0.0, 0.0, 40.0, 20.0);
+        let c = [Corner::SQUARE; 4];
+        let cases = [
+            (Color::rgba8(200, 60, 90, 255), Color::rgba8(20, 200, 40, 64)),
+            (Color::rgba8(200, 60, 90, 128), Color::rgba8(20, 200, 40, 128)),
+            (Color::rgba8(10, 10, 10, 0), Color::rgba8(240, 240, 240, 200)),
+            (Color::rgba8(240, 240, 240, 200), Color::rgba8(10, 10, 10, 0)),
+            (Color::rgba8(90, 90, 90, 30), Color::rgba8(30, 30, 30, 20)),
+        ];
+        for (bed, top) in cases {
+            let mut dl = DrawList::new();
+            dl.set_vector(true);
+            dl.ring_fill(r, &c, 6, bed);
+            dl.ring_fill(r, &c, 6, top);
+            assert_eq!(dl.shape_len(), 1);
+            let got = dl.verts[0].color;
+            for dst in [0.0f32, 0.37, 1.0] {
+                for k in 0..3 {
+                    let ch = |c: Color| [c.r, c.g, c.b][k];
+                    // Two blends, as the tessellated lane would do them.
+                    let d1 = ch(bed) * bed.a + dst * (1.0 - bed.a);
+                    let d2 = ch(top) * top.a + d1 * (1.0 - top.a);
+                    // One blend, as the welded record does it.
+                    let one = got[k] * got[3] + dst * (1.0 - got[3]);
+                    assert!(
+                        (d2 - one).abs() < 1e-6,
+                        "bed {bed:?} top {top:?} dst {dst} channel {k}: {d2} vs {one}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The fill weld obeys the same fence as the border weld, and one
+    /// more of its own: a fill arriving after a BAND would have to sink
+    /// underneath it, so it gets a record of its own. Each case here
+    /// would be a wrong picture if it welded.
+    #[test]
+    fn only_the_wash_that_shares_the_bed_s_silhouette_welds() {
+        let r = Rect::new(10.0, 20.0, 200.0, 100.0);
+        let c = [Corner::round(8.0); 4];
+        let armed = || {
+            let mut dl = DrawList::new();
+            dl.set_vector(true);
+            dl.ring_fill(r, &c, 6, ink());
+            dl
+        };
+        // A wash on another rect.
+        let mut dl = armed();
+        dl.ring_fill(Rect::new(10.0, 20.0, 200.0, 99.0), &c, 6, wash());
+        assert_eq!(dl.shape_len(), 2, "a different rect welded");
+        // A wash on another corner treatment.
+        let mut dl = armed();
+        dl.ring_fill(r, &[Corner::chamfer(8.0); 4], 6, wash());
+        assert_eq!(dl.shape_len(), 2, "a different corner welded");
+        // A clip in between: a different scissor cannot ride the bed.
+        let mut dl = armed();
+        dl.push_clip(0.0, 0.0, 50.0, 50.0);
+        dl.ring_fill(r, &c, 6, wash());
+        assert_eq!(dl.shape_len(), 2, "a clip change welded");
+        // Anything drawn in between: the wash would sink under it.
+        let mut dl = armed();
+        dl.rect(0.0, 0.0, 4.0, 4.0, ink());
+        dl.ring_fill(r, &c, 6, wash());
+        assert_eq!(dl.shape_len(), 2, "a draw in between welded");
+        // A wash after the border: the band is over the bed, and this
+        // fill is over the band. Its own record, and the picture keeps
+        // the order the caller wrote.
+        let mut dl = armed();
+        dl.ring(r, &c, 6, 2.0, ink());
+        dl.ring_fill(r, &c, 6, wash());
+        assert_eq!(dl.shape_len(), 2, "a fill welded onto a banded record");
+        assert_eq!(dl.shapes()[0].flags & Shape::STROKE, Shape::STROKE);
+        assert_eq!(dl.shapes()[1].flags & Shape::STROKE, 0);
+        // Three fills are still one bed: the offer survives its own
+        // weld, and `elev`'s glass wash over a plate over a fill is
+        // spelled exactly this way.
+        let mut dl = armed();
+        dl.ring_fill(r, &c, 6, Color::rgba8(0, 0, 255, 100));
+        dl.ring_fill(r, &c, 6, Color::rgba8(255, 0, 0, 100));
+        dl.ring(r, &c, 6, 1.0, wash());
+        assert_eq!(dl.shape_len(), 1, "the third fill wrote a record");
+        assert_eq!(dl.verts.len(), FRAME);
+        assert_eq!(dl.shapes()[0].stroke, 1.0);
+    }
+
+    /// f3 §7b, remedy 1: the core of a split shape is not "like" an
+    /// ordinary fill — it IS one, vertex for vertex. Read the core's
+    /// bounds back off the frame, draw `rect()` over them, and the six
+    /// vertices agree in every field: position, the atlas's white
+    /// pixel, colour, and `NO_SHAPE`.
+    ///
+    /// That is the whole safety argument stated as code. The interior
+    /// is where `fs_shape` computes `cov = 1`, `a_band = 0` and returns
+    /// the vertex colour it was handed; `fs_main` over the white pixel
+    /// returns the same colour by a shorter road. `sdf::tests` proves
+    /// the two roads meet at every pixel.
+    #[test]
+    fn the_core_of_a_frame_is_the_quad_a_rect_would_have_drawn() {
+        let r = Rect::new(10.0, 20.0, 200.0, 100.0);
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.ring_fill(r, &[Corner::round(8.0); 4], 6, wash());
+        assert_eq!(dl.verts.len(), FRAME);
+        let core = &dl.verts[..6];
+        let (x0, y0) = (core[0].pos[0], core[0].pos[1]);
+        let (x1, y1) = (core[2].pos[0], core[2].pos[1]);
+        // The band is corner + AA_PAD + CORE_PAD deep, with no border
+        // on the record yet.
+        assert_eq!([x0, y0, x1, y1], [21.0, 31.0, 199.0, 109.0]);
+        let mut plain = DrawList::new();
+        plain.rect(x0, y0, x1 - x0, y1 - y0, wash());
+        assert_eq!(plain.verts.len(), 6);
+        for (a, b) in core.iter().zip(&plain.verts) {
+            assert_eq!(a.pos, b.pos);
+            assert_eq!(a.uv, b.uv);
+            assert_eq!(a.color, b.color);
+            assert_eq!(a.shape, b.shape);
+            assert_eq!(a.shape, NO_SHAPE);
+        }
+        // The core is on an ORDINARY run — the one every solid rect
+        // draws through — and the strips on the shape lane. Two runs,
+        // which is what the cut costs (§7b, remedy 3 is where that is
+        // answered).
+        assert_eq!(dl.runs.len(), 2);
+        assert_eq!(dl.runs[0].image, None);
+        assert_eq!(dl.runs[0].end, 6);
+        assert_eq!(dl.runs[1].image, Some(SHAPE));
+        assert_eq!(dl.runs[1].end, FRAME as u32);
+    }
+
+    /// …and when a border welds onto that bed, the core gives back
+    /// exactly the border's width on every side. The geometry was laid
+    /// out for a bed with no border — nothing could have known one was
+    /// coming — so the frame is re-cut in place: same vertex count,
+    /// same colours, same record indices, deeper strips.
+    ///
+    /// Without this the border's own band would run under the core, and
+    /// the fill path would paint over the part of it nearest the
+    /// inside: a border that thins by a pixel or two wherever the core
+    /// begins.
+    #[test]
+    fn a_border_welding_on_re_cuts_the_core_it_landed_in() {
+        let r = Rect::new(10.0, 20.0, 200.0, 100.0);
+        let c = [Corner::round(8.0); 4];
+        let core_of = |t: Option<f32>| {
+            let mut dl = DrawList::new();
+            dl.set_vector(true);
+            dl.ring_fill(r, &c, 6, wash());
+            if let Some(t) = t {
+                dl.ring(r, &c, 6, t, ink());
+            }
+            assert_eq!(dl.verts.len(), FRAME);
+            assert_eq!(dl.shape_len(), 1);
+            let v = &dl.verts[..6];
+            ([v[0].pos, v[2].pos], dl.verts[6..].to_vec())
+        };
+        let (bare, _) = core_of(None);
+        for t in [1.0f32, 4.0] {
+            let (cut, strips) = core_of(Some(t));
+            assert_eq!(cut[0], [bare[0][0] + t, bare[0][1] + t], "{t} px");
+            assert_eq!(cut[1], [bare[1][0] - t, bare[1][1] - t], "{t} px");
+            // The strips still reach the padded bounds outward and
+            // still carry the record and the bed's colour.
+            assert!(strips.iter().all(|v| v.shape == 0));
+            assert!(strips.iter().all(|v| v.color == wash().to_array()));
+            let left = strips.iter().fold(f32::MAX, |m, v| m.min(v.pos[0]));
+            assert_eq!(left, r.x - 1.0, "the AA margin moved");
+            // The uv contract survives the re-cut: pos − uv is the
+            // record's centre for every strip vertex.
+            for v in &strips {
+                assert_eq!([v.pos[0] - v.uv[0], v.pos[1] - v.uv[1]], [110.0, 70.0]);
+            }
+            // And the re-cut lands where a caller who said both parts
+            // AT ONCE would have landed. Two roads to one record, and
+            // to one frame around it.
+            let mut once = DrawList::new();
+            once.shape(&ShapeSpec {
+                rect: r,
+                corners: c,
+                kind: ShapeKind::Box,
+                fill: Some(wash()),
+                stroke: Some((t, ink())),
+            });
+            let mut pair = DrawList::new();
+            pair.set_vector(true);
+            pair.ring_fill(r, &c, 6, wash());
+            pair.ring(r, &c, 6, t, ink());
+            assert_eq!(once.shapes(), pair.shapes(), "{t} px");
+            for (a, b) in once.verts.iter().zip(&pair.verts) {
+                assert_eq!((a.pos, a.uv, a.color, a.shape), (b.pos, b.uv, b.color, b.shape));
+            }
+            assert_eq!(once.verts.len(), pair.verts.len());
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // K4 — the diagonal lane (f3 §3.1).
+
+    /// The half of §2.7 that K4 must not break: an axis-aligned segment
+    /// is drawn by the same four vertices on both lanes, in the same
+    /// run, with no record at all. Rules, underlines, table guides, tab
+    /// underlines and the editor's grid all come through here, and the
+    /// vector switch must be invisible to every one of them.
+    #[test]
+    fn an_axis_aligned_rule_is_the_same_quad_on_both_lanes() {
+        let draw = |vector: bool| {
+            let mut dl = DrawList::recording();
+            dl.set_vector(vector);
+            dl.line(10.0, 20.5, 90.0, 20.5, 2.0, ink());
+            dl.line(10.25, 4.0, 10.25, 40.0, 1.0, wash());
+            // A closed path on the grid: four axis-aligned arms and
+            // four right-angle joints, and not one disc among them.
+            dl.polyline(
+                &[[0.0, 0.0], [30.0, 0.0], [30.0, 20.0], [0.0, 20.0]],
+                1.0,
+                ink(),
+                true,
+            );
+            dl
+        };
+        let (old, new) = (draw(false), draw(true));
+        assert_eq!(dump(&old), dump(&new), "the register moved");
+        assert_eq!(new.shape_len(), 0, "an axis-aligned segment took the field");
+        assert_eq!(old.verts.len(), new.verts.len());
+        for (a, b) in old.verts.iter().zip(&new.verts) {
+            assert_eq!((a.pos, a.uv, a.color, a.shape), (b.pos, b.uv, b.color, b.shape));
+        }
+        assert!(new.runs.iter().all(|r| r.image != Some(SHAPE)));
+    }
+
+    /// One diagonal, one record, one quad — and the uv contract that
+    /// makes the shader's job free: every vertex carries the LOCAL
+    /// coordinate of the corner it sits on, so `to_screen(uv)` returns
+    /// the position it was built from and the rasteriser hands each
+    /// fragment its own local point without a matrix.
+    #[test]
+    fn a_diagonal_is_one_record_read_along_its_own_axes() {
+        let (a, b) = ([12.0f32, 30.0], [60.0, 66.0]);
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.line(a[0], a[1], b[0], b[1], 3.0, ink());
+        assert_eq!(dl.shape_len(), 1);
+        assert_eq!(dl.verts.len(), 6, "one quad");
+        assert_eq!(dl.runs.last().unwrap().image, Some(SHAPE));
+        let rec = dl.shapes()[0];
+        // 48 × 36 → a 60 px path; the band is the stroke, across it.
+        assert_eq!(rec.half, [30.0, 1.5]);
+        assert_eq!(rec.corner, [0.0; 4]);
+        assert_eq!(rec.flags, Shape::FILL, "square corners, kind Box, fill only");
+        assert_eq!(rec.stroke, 0.0);
+        let (f, len) = Frame::along(a, b).unwrap();
+        assert_eq!(len, 60.0);
+        for v in &dl.verts {
+            assert_eq!(v.shape, 0);
+            // The padded local corner, and the screen point it maps to.
+            assert_eq!(v.uv.map(f32::abs), [31.0, 2.5]);
+            let want = f.to_screen(v.uv);
+            assert!(
+                (v.pos[0] - want[0]).abs() <= 1e-3 && (v.pos[1] - want[1]).abs() <= 1e-3,
+                "{:?} is not to_screen({:?}) = {want:?}",
+                v.pos,
+                v.uv
+            );
+        }
+    }
+
+    /// **The weld trap, and why an oriented record never offers itself.**
+    /// The two arms of a cross — `checkbox.rs:70-71`, drawn on every
+    /// unchecked box in the "cross" tick style — share their centre,
+    /// their half sizes, their corners and their flags exactly. §2.10's
+    /// offer compares those four things, so a bed left open would have
+    /// swallowed the second arm and drawn a single diagonal.
+    #[test]
+    fn the_two_arms_of_a_cross_stay_two_shapes() {
+        let m = Rect::new(20.0, 40.0, 16.0, 16.0);
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.polyline(&[[m.x, m.y], [m.right(), m.bottom()]], 2.0, ink(), false);
+        dl.polyline(&[[m.right(), m.y], [m.x, m.bottom()]], 2.0, ink(), false);
+        assert_eq!(dl.shape_len(), 2, "the second arm welded onto the first");
+        assert_eq!(dl.verts.len(), 12);
+        assert_eq!(dl.shapes()[0], dl.shapes()[1], "the trap: identical records");
+        // Different frames, same record: the two quads do not overlap
+        // in the uv they carry, which is the whole difference.
+        assert_ne!(dl.verts[0].pos, dl.verts[6].pos);
+        // …and a shape drawn after a diagonal cannot weld onto it
+        // either: the offer is closed, not merely unmatched.
+        let r = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.ring_fill(r, &[Corner::SQUARE; 4], 6, wash());
+        dl.line(0.0, 0.0, 10.0, 7.0, 1.0, ink());
+        dl.ring(r, &[Corner::SQUARE; 4], 6, 1.0, ink());
+        assert_eq!(dl.shape_len(), 3, "the border welded across a diagonal");
+    }
+
+    /// A disc lands where the path TURNS and both arms are on the field
+    /// — and nowhere else. The tick of a checkbox turns once, the
+    /// disclosure triangle three times, a straight run not at all, and
+    /// a corner with an axis-aligned arm keeps the picture §2.7
+    /// promised it.
+    #[test]
+    fn a_path_gets_a_disc_where_it_turns_and_nowhere_else() {
+        let count = |pts: &[[f32; 2]], closed: bool| {
+            let mut dl = DrawList::new();
+            dl.set_vector(true);
+            dl.polyline(pts, 2.0, ink(), closed);
+            (dl.shape_len(), dl.verts.len())
+        };
+        // The tick: two diagonal arms, one corner. Three records.
+        let tick = [[10.0f32, 25.0], [18.0, 33.0], [34.0, 12.0]];
+        assert_eq!(count(&tick, false), (3, 18));
+        // A closed triangle with no arm on the grid: three arms, three
+        // corners, six records.
+        let tri = [[10.0f32, 10.0], [26.0, 18.0], [12.0, 26.0]];
+        assert_eq!(count(&tri, true), (6, 36));
+        // The disclosure triangle the toolkit actually draws
+        // (`paint.rs:657`) closes on a VERTICAL edge: two diagonal arms
+        // and one quad, and the two corners that edge touches keep
+        // today's picture — 2 records for the arms, 1 for the single
+        // joint between them, and the vertical arm still a plain quad.
+        let disclosure = [[10.0f32, 10.0], [26.0, 18.0], [10.0, 26.0]];
+        assert_eq!(count(&disclosure, true), (3, 24));
+        // A path that runs straight through its middle point: two
+        // segments, no turn, no disc.
+        let straight = [[0.0f32, 0.0], [10.0, 5.0], [20.0, 10.0]];
+        assert_eq!(count(&straight, false), (2, 12));
+        // One arm on the grid: that corner keeps today's picture.
+        let bent = [[0.0f32, 0.0], [20.0, 0.0], [30.0, 14.0]];
+        assert_eq!(count(&bent, false), (1, 12), "a mixed joint grew a disc");
+        // The disc itself: a Box record with round corners as big as
+        // its own half size, which `sdf` proves is the circle exactly.
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.polyline(&tick, 2.0, ink(), false);
+        let joint = dl.shapes()[2];
+        assert_eq!(joint.half, [1.0, 1.0]);
+        assert_eq!(joint.corner, [1.0; 4]);
+        assert_eq!(joint.flags & Shape::SILHOUETTE, 0b01_01_01_01);
+        // …centred on the corner the path turns at, to the pixel it was
+        // given — no snap: a snapped joint would bend the line.
+        let centre = [
+            dl.verts[12].pos[0] - dl.verts[12].uv[0],
+            dl.verts[12].pos[1] - dl.verts[12].uv[1],
+        ];
+        assert_eq!(centre, tick[1]);
+    }
+
+    /// §2.8 where it actually fires. The snap lifts every sub-pixel
+    /// band on the axis-aligned lane before the record is written; a
+    /// diagonal has no grid to round to, and a single coverage ramp
+    /// over-reads a slab thinner than the filter. So a 0.4 px stroke is
+    /// drawn one pixel wide at 0.4 of its alpha — same mass, no
+    /// shimmer, no fattening — and a stroke at or above a pixel is
+    /// untouched.
+    #[test]
+    fn a_sub_pixel_diagonal_dims_instead_of_fattening() {
+        let record = |t: f32| {
+            let mut dl = DrawList::new();
+            dl.set_vector(true);
+            dl.line(0.0, 0.0, 30.0, 40.0, t, Color::rgba8(255, 255, 255, 128));
+            (dl.shapes()[0], dl.verts[0].color[3])
+        };
+        let (thin, alpha) = record(0.4);
+        assert_eq!(thin.half, [25.0, 0.5], "the band did not reach a pixel");
+        let full = Color::rgba8(255, 255, 255, 128).a;
+        assert!((alpha - full * 0.4).abs() <= 1e-6, "alpha {alpha} of {full}");
+        let (fat, alpha) = record(3.0);
+        assert_eq!(fat.half, [25.0, 1.5]);
+        assert_eq!(alpha, full, "a stroke above a pixel was dimmed");
+    }
+
+    /// The register holds INTENT, and a lane is not one: a polyline is
+    /// a polyline whichever geometry carries it. The twin of
+    /// `the_vector_switch_moves_the_vertices_and_not_the_register`, for
+    /// the primitives K4 moves.
+    #[test]
+    fn the_diagonal_lane_moves_the_vertices_and_not_the_register() {
+        let draw = |vector: bool| {
+            let mut dl = DrawList::recording();
+            dl.set_vector(vector);
+            dl.line(4.0, 5.0, 44.0, 35.0, 2.0, ink());
+            dl.polyline(&[[0.0, 0.0], [12.0, 9.0], [30.0, 2.0]], 1.5, wash(), false);
+            dl
+        };
+        let (old, new) = (draw(false), draw(true));
+        assert_eq!(dump(&old), dump(&new));
+        assert_eq!(old.shape_len(), 0);
+        assert_eq!(new.shape_len(), 4, "two segments, one joint, and the line");
+        assert_ne!(old.verts.len(), new.verts.len());
     }
 
     // -----------------------------------------------------------------
