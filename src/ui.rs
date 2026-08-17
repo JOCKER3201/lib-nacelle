@@ -12,6 +12,7 @@
 //! literal here would be a literal everywhere.
 
 use crate::font::{Figures, FontSystem, FONT_UI};
+use crate::num;
 use crate::theme::{self, Color, TokenId};
 use crate::view::paint;
 use crate::view::surface::{CtxSurface, Surface};
@@ -502,8 +503,15 @@ pub fn blink_factor(id: &str, t: f64) -> f32 {
 /// the host's way in — `pub(crate)` because the script host centres rows
 /// of its own, and a second guess at a cap height there is how the whole
 /// program came to have two of them.
-pub(crate) fn center_line_y(ctx: &mut Ctx, y: f32, box_h: f32, px: f32, leading: f32) -> f32 {
-    paint::center_line_y(&mut CtxSurface::new(ctx), y, box_h, px, leading)
+pub(crate) fn center_line_y(
+    ctx: &mut Ctx,
+    face: u8,
+    y: f32,
+    box_h: f32,
+    px: f32,
+    leading: f32,
+) -> f32 {
+    paint::center_line_y_in(&mut CtxSurface::new(ctx), face, y, box_h, px, leading)
 }
 
 /// Top edge for a block of known natural height, centred vertically in
@@ -710,8 +718,8 @@ pub fn rows_label_value(ctx: &mut Ctx, r: Rect, rows: &[RowItem], st: &RowsStyle
         let cell_w = (r.w - gap * (cells_on_line as f32 - 1.0)) / cells_on_line as f32;
         let cx = r.x + (cell_w + gap) * j as f32;
         let y = top + row_h * line as f32;
-        let lty = center_line_y(ctx, y, row_h, lpx, st.label_role.leading());
-        let vty = center_line_y(ctx, y, row_h, vpx, st.value_role.leading());
+        let lty = center_line_y(ctx, lface, y, row_h, lpx, st.label_role.leading());
+        let vty = center_line_y(ctx, vface, y, row_h, vpx, st.value_role.leading());
         ctx.dl.text_fig(ctx.fonts, lface, lpx, cx, lty, &row.label, label_c, ltrack, &lfig);
         let vc = row.sev.map(sev_text).unwrap_or(value_c);
         match st.label_width {
@@ -951,10 +959,12 @@ pub fn gauge_grid(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
             continue;
         }
         let text = gauge_value(*v, st.value_fmt);
+        let u = unit_run(ctx, face, px, &text);
         // Measured under the role's OWN figure box: the readout is drawn
         // through it, and a contrast flip decided on a proportional width
-        // fires at a different fill for `11%` than for `88%`.
-        let tw = ctx.fonts.measure_fig(face, px, &text, track, &fig);
+        // fires at a different fill for `11%` than for `88%`. The unit
+        // run is part of that width — it stands on the same fill.
+        let tw = reading_w(ctx, face, px, track, &fig, &text, &u);
         let fill_w = (gw - 2.0 * bw) * (v / 100.0).clamp(0.0, 1.0);
         // The number sits at the far END of the gauge, where the fill
         // arrives last. On the near end — where it used to be — every
@@ -962,18 +972,153 @@ pub fn gauge_grid(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
         // pixels of fill that were the whole point of the gauge.
         let swallowed = fill_w >= gw - 2.0 * bw - tw - clearance;
         let c = if swallowed { on_fill_c } else { text_c };
-        let ty = center_line_y(ctx, gy, gh, px, leading);
-        ctx.dl.text_right_fig(
-            ctx.fonts, face, px, gx + gw - inset, ty, &text, c, track, &fig,
+        let ty = center_line_y(ctx, face, gy, gh, px, leading);
+        // On the fill the unit gives up its own step-back colour: the
+        // step back exists so the number reads first against the panel,
+        // and against the fill both halves need the contrast ink.
+        let unit_c = swallowed.then_some(on_fill_c);
+        draw_reading_right(
+            ctx,
+            face,
+            px,
+            track,
+            &fig,
+            gx + gw - inset,
+            ty,
+            &text,
+            c,
+            unit_c,
+            &u,
         );
     }
 }
 
-fn gauge_value(v: f32, fmt: GaugeValueFmt) -> String {
+/// A gauge's readout, written down under the theme's number policy.
+///
+/// `format!("{v:.0}%")` was the whole of it until 2026-08-17: the places,
+/// the decimal mark and the unit's letters were all decided here, in
+/// Rust, while `[num]` declared fourteen keys nobody read. A gauge is the
+/// master's own example of "where room is tight", so the places are
+/// `num.decimals_compact` and not `num.decimals`.
+fn gauge_value(v: f32, fmt: GaugeValueFmt) -> num::Reading {
     match fmt {
-        GaugeValueFmt::Percent => format!("{v:.0}%"),
-        GaugeValueFmt::Raw => format!("{v:.0}"),
+        GaugeValueFmt::Percent => num::Reading::compact(v as f64, "%"),
+        GaugeValueFmt::Raw => num::Reading::compact(v as f64, ""),
     }
+}
+
+/// The unit suffix's own typography — the six `num.unit.*` keys, resolved
+/// against the px of the number it follows.
+///
+/// A unit is a SECOND RUN, and that is the whole reason this struct
+/// exists: `TB` set at 0.72 of the number's size, a step back in colour so
+/// the number reads first, its own tracking and its own baseline can none
+/// of them be expressed by appending characters to a string. The master
+/// has described that run since the block was written; nothing drew it.
+struct UnitRun {
+    px: f32,
+    track: f32,
+    /// Distance between the number and the unit, already zero where the
+    /// reading is attached (`num.unit.percent_attached`).
+    gap: f32,
+    /// Baseline offset, positive DOWN — the master's `0.0em` default says
+    /// units sit on the baseline and are never superscript.
+    shift: f32,
+    color: Color,
+    width: f32,
+}
+
+impl UnitRun {
+    /// Nothing to draw: the reading is a bare number.
+    const NONE: UnitRun = UnitRun {
+        px: 0.0,
+        track: 0.0,
+        gap: 0.0,
+        shift: 0.0,
+        color: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
+        width: 0.0,
+    };
+}
+
+/// The unit half of `reading`, measured in the face the value's role
+/// names — a unit belongs to its number's run and does not get a face of
+/// its own to be set in.
+fn unit_run(ctx: &mut Ctx, face: u8, value_px: f32, reading: &num::Reading) -> UnitRun {
+    static SCALE: OnceLock<TokenId> = OnceLock::new();
+    static GAP: OnceLock<TokenId> = OnceLock::new();
+    static TRACKING: OnceLock<TokenId> = OnceLock::new();
+    static SHIFT: OnceLock<TokenId> = OnceLock::new();
+    static COLOR: OnceLock<TokenId> = OnceLock::new();
+    if reading.unit.is_empty() {
+        return UnitRun::NONE;
+    }
+    let t = theme::resolved();
+    // `unit.scale` is a fraction of the VALUE's px and `unit.tracking` /
+    // `unit.baseline_shift` are ems of the unit's own — which is what
+    // "the unit suffix's px as a fraction of the value's px" and "letter
+    // spacing inside the unit suffix" say in the master.
+    let px = (value_px * t.px(tok(&SCALE, "num.unit.scale"))).max(0.0);
+    let gap = if reading.attached() { 0.0 } else { value_px * t.px(tok(&GAP, "num.unit.gap")) };
+    let track = px * t.px(tok(&TRACKING, "num.unit.tracking"));
+    let shift = px * t.px(tok(&SHIFT, "num.unit.baseline_shift"));
+    let width = ctx.fonts.measure(face, px, &reading.unit, track);
+    UnitRun { px, track, gap, shift, color: col(&COLOR, "num.unit.color"), width }
+}
+
+/// How wide the whole reading is: the number under its figure box, plus
+/// the joint and the unit run.
+///
+/// One function, because a readout measured one way and drawn another is
+/// how a contrast flip comes to fire at a different fill for `11%` than
+/// for `88%` — the very defect the figure box was introduced here to fix.
+fn reading_w(
+    ctx: &mut Ctx,
+    face: u8,
+    px: f32,
+    track: f32,
+    fig: &Figures,
+    reading: &num::Reading,
+    u: &UnitRun,
+) -> f32 {
+    ctx.fonts.measure_fig(face, px, &reading.number, track, fig) + u.gap + u.width
+}
+
+/// Draws `reading` with its right edge at `right`, the number under the
+/// role's figure box and the unit in its own run.
+///
+/// `unit_c` is `None` where the caller has no opinion and the unit takes
+/// `num.unit.color`; a gauge whose fill has swallowed the readout passes
+/// the on-fill ink for BOTH halves, because the unit is standing on the
+/// same fill the number is.
+#[allow(clippy::too_many_arguments)]
+fn draw_reading_right(
+    ctx: &mut Ctx,
+    face: u8,
+    px: f32,
+    track: f32,
+    fig: &Figures,
+    right: f32,
+    y: f32,
+    reading: &num::Reading,
+    number_c: Color,
+    unit_c: Option<Color>,
+    u: &UnitRun,
+) {
+    let mut edge = right;
+    if !reading.unit.is_empty() {
+        ctx.dl.text_right(
+            ctx.fonts,
+            face,
+            u.px,
+            edge,
+            y + u.shift,
+            &reading.unit,
+            unit_c.unwrap_or(u.color),
+            u.track,
+        );
+        edge -= u.width + u.gap;
+    }
+    ctx.dl.text_right_fig(ctx.fonts, face, px, edge, y, &reading.number, number_c, track, fig);
 }
 
 /// The `Row` gauge form: label + thin track + value per cell, flowed into
@@ -988,6 +1133,8 @@ fn gauge_rows(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
     static VALUE_GAP: OnceLock<TokenId> = OnceLock::new();
     static BAR_H: OnceLock<TokenId> = OnceLock::new();
     static TEXT_C: OnceLock<TokenId> = OnceLock::new();
+    static LABEL_ALIGN: OnceLock<TokenId> = OnceLock::new();
+    static VALUE_ALIGN: OnceLock<TokenId> = OnceLock::new();
     let t = theme::resolved();
     let cols = st.cols.max(1);
     let rows = values.len().div_ceil(cols);
@@ -1036,9 +1183,16 @@ fn gauge_rows(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
         let val = gauge_value(*v, st.value_fmt);
         // Measured under the box it is DRAWN under, so the column is
         // sized at the width the readings really occupy.
-        value_w = value_w.max(ctx.fonts.measure_fig(vface, vpx, &val, vtrack, &vfig));
+        let u = unit_run(ctx, vface, vpx, &val);
+        value_w = value_w.max(reading_w(ctx, vface, vpx, vtrack, &vfig, &val, &u));
     }
     let label_col = if label_w > 0.0 { label_w + lgap } else { 0.0 };
+    // Where the two halves sit inside the columns just measured. Both
+    // are the theme's to say and neither had a reader: the label was
+    // flushed left and the reading right because that is what the code
+    // was written to do, whatever `[rhythm]` asked for.
+    let label_align = rhythm_align(&LABEL_ALIGN, "rhythm.label_align");
+    let value_align = rhythm_align(&VALUE_ALIGN, "rhythm.value_align");
     for (i, v) in values.iter().enumerate() {
         let gx = r.x + (i % cols) as f32 * (gw + gap);
         let gy = r.y + (i / cols) as f32 * (gh + gap);
@@ -1046,11 +1200,15 @@ fn gauge_rows(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
         // row in its OWN leading, which is what put a `rows` line's key
         // and value on one optical centre and what a single shared px
         // could not say.
-        let lty = center_line_y(ctx, gy, gh, lpx, llead);
-        let vty = center_line_y(ctx, gy, gh, vpx, vlead);
+        let lty = center_line_y(ctx, lface, gy, gh, lpx, llead);
+        let vty = center_line_y(ctx, vface, gy, gh, vpx, vlead);
         let label = label_of(i);
         if !label.is_empty() {
-            ctx.dl.text(ctx.fonts, lface, lpx, gx, lty, &label, text_c, ltrack);
+            // Inside the shared label column, which is what makes an
+            // alignment mean anything: `right` is flush with the track's
+            // left edge, `left` is flush with the block's.
+            let lx = align_in(gx, label_w, ctx.fonts.measure(lface, lpx, &label, ltrack), label_align);
+            ctx.dl.text(ctx.fonts, lface, lpx, lx, lty, &label, text_c, ltrack);
         }
         let bar = Rect::new(
             gx + label_col,
@@ -1062,9 +1220,51 @@ fn gauge_rows(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
         // A row always has room for its number, so the number is always
         // drawn — item 4 of the cpu inventory stops being conditional.
         let val = gauge_value(*v, st.value_fmt);
-        ctx.dl.text_right_fig(
-            ctx.fonts, vface, vpx, gx + gw, vty, &val, text_c, vtrack, &vfig,
+        let u = unit_run(ctx, vface, vpx, &val);
+        let vw = reading_w(ctx, vface, vpx, vtrack, &vfig, &val, &u);
+        // The reading is drawn from its RIGHT edge whichever way it is
+        // aligned — the run is laid out right to left because the unit
+        // hangs off the number's end — so the alignment moves that edge
+        // inside the value column rather than the pen.
+        let right = align_in(gx + gw - value_w, value_w, vw, value_align) + vw;
+        draw_reading_right(
+            ctx, vface, vpx, vtrack, &vfig, right, vty, &val, text_c, None, &u,
         );
+    }
+}
+
+/// `rhythm.label_align` / `rhythm.value_align` — how a run sits in the
+/// column reserved for it.
+///
+/// The master declares `left | right` at both keys and this reads the
+/// WORD, for the reason every other enum reader in the file does: an
+/// index memoised across two keys names a different word in each. A word
+/// the pair does not name is a defect in the theme and is said out loud
+/// once, not silently taken for `left`.
+///
+/// TWO arms and not three: `center` is a word the master does not declare
+/// at either key, and `tests/enum_vocabulary_declared.rs` is the reason a
+/// theme writing it would not get it anyway. An arm for a word no theme
+/// can legally spell is dead code held open for a look nobody asked for —
+/// when a column wants centring, the master's line grows the word first.
+fn rhythm_align(cell: &'static OnceLock<TokenId>, name: &'static str) -> Align {
+    with_theme_word(tok(cell, name), |w| match w {
+        "left" => Align::Left,
+        "right" => Align::Right,
+        other => {
+            warn_once(name, &format!("{name} = {other} names no alignment — drawing it left"));
+            Align::Left
+        }
+    })
+}
+
+/// Where a run of width `run` starts inside a column of width `col` that
+/// begins at `x`.
+fn align_in(x: f32, col: f32, run: f32, align: Align) -> f32 {
+    match align {
+        Align::Left => x,
+        Align::Right => x + (col - run).max(0.0),
+        Align::Center => x + (col - run).max(0.0) / 2.0,
     }
 }
 
@@ -2026,11 +2226,11 @@ pub fn group_header(ctx: &mut Ctx, r: Rect, label: &str, shrink: f32) {
     let role = bound_role(&ROLE, "script.group_label_role");
     let px = role.px(ctx, shrink);
     let track = role.tracking_px(px);
-    let ty = center_line_y(ctx, r.y, r.h, px, role.leading());
     // The group caption is a section label like any other, so it is set in
     // the face its role names — a header is not a place the toolkit gets
     // to pick a family.
     let face = role.font();
+    let ty = center_line_y(ctx, face, r.y, r.h, px, role.leading());
     let fig = role.figures(ctx.fonts, face, px);
     ctx.dl.text_fig(
         ctx.fonts, face, px, r.x, ty, label,

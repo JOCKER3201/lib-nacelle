@@ -20,6 +20,7 @@ use crate::ui;
 use crate::view::surface::{CtxSurface, Surface};
 use crate::widget::Chrome;
 use crate::{Ctx, Rect};
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -213,22 +214,96 @@ fn report_step(panel: usize, step: u8) {
 /// edge glow, then the title band from `chrome`, and the same rect this
 /// returns must be the one `click` and `wheel` later receive (u2 §4.1).
 pub fn draw(ctx: &mut Ctx, r: Rect, chrome: &Chrome, panel_idx: usize) -> Rect {
-    static LEVEL: OnceLock<elev::Level> = OnceLock::new();
-
-    // Material, ring, and family A's bloom over the ring — Elev 2, read
-    // as a whole rung rather than key by key. `elev.panel.glass.rank` is
-    // 0 in every shipped theme, so the body is the fill; the glass pair
-    // joins when the renderer's blur ranks do (Appendix B R3/R6), and it
-    // joins for every rung at once because there is one reader.
-    LEVEL.get_or_init(|| elev::Level::of("elev.panel")).draw(ctx, r);
-
     let titled = chrome.title.is_some() || chrome.right.is_some();
     let placed = place(r, titled);
+
+    // Material, ring, and family A's bloom over the ring — read as a
+    // whole rung rather than key by key, and the rung is the one
+    // `panel.elev` NAMES. `elev.panel.glass.rank` is 0 in every shipped
+    // theme, so the body is the fill; the glass pair joins when the
+    // renderer's blur ranks do (Appendix B R3/R6), and it joins for every
+    // rung at once because there is one reader.
+    rung().draw_glassed(ctx, r, glass_box(r, placed.content));
+
     report_step(panel_idx, placed.step);
     if let Some((band, collapsed)) = placed.band {
         draw_band(ctx, band, collapsed, r, chrome, panel_idx);
     }
+    // Where the baseline grid stands for everything drawn into this
+    // panel, when the theme measures it from the content and not from the
+    // screen (`rhythm.snap_origin`). Published here because this is the
+    // one place a content box is settled — see
+    // [`crate::view::paint::set_grid_origin`].
+    crate::view::paint::set_grid_origin(placed.content.y);
     placed.content
+}
+
+/// The elevation rung a resting panel draws its material from —
+/// `panel.elev`.
+///
+/// The name was `"elev.panel"`, written here, which made the key a
+/// promise the file could not keep: a theme moving a panel up or down the
+/// ladder (a board of `elev.raised` cards, a dock at `elev.fixture`) got
+/// the same surface it started with. The rung is now the WORD the token
+/// stands at.
+///
+/// Memoised per (content epoch, word): a `Level` is a dozen name lookups
+/// and this is a per-panel, per-frame path, but the answer has to move
+/// when the theme does — and a theme swap renumbers the open word set,
+/// which is why the epoch is half the key.
+///
+/// The CONTENT epoch, because a `Level` holds token ids and enum indices
+/// and no resolved value at all (see [`elev::Level`]'s own note), so
+/// nothing in it moves when the viewport does. Keyed on [`theme::epoch`]
+/// it missed on every frame of a desktop with two monitor heights, which
+/// is the exact shape of the bug [`theme::content_epoch`] was added for.
+fn rung() -> elev::Level {
+    static ELEV: OnceLock<TokenId> = OnceLock::new();
+    thread_local! {
+        static CACHE: RefCell<Option<(u32, u16, elev::Level)>> = const { RefCell::new(None) };
+    }
+    let id = tok(&ELEV, "panel.elev");
+    let word = theme::resolved().enum_of(id);
+    let epoch = theme::content_epoch();
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if let Some((e, w, level)) = c.as_ref() {
+            if *e == epoch && *w == word {
+                return *level;
+            }
+        }
+        let level = elev::Level::of(&format!("elev.{}", ui::theme_word(id)));
+        *c = Some((epoch, word, level));
+        level
+    })
+}
+
+/// Which rectangle the glass quad fills — `panel.glass.rect` — pulled in
+/// by `panel.glass.inset`.
+///
+/// `border_box` frosts the whole container, title band included;
+/// `content_box` frosts the body alone and leaves the band standing on
+/// the bed, which is the reading of image 7 the key was written for.
+/// Neither had a reader: the quad was laid on the widget box whatever the
+/// theme said.
+fn glass_box(r: Rect, content: Rect) -> Rect {
+    static RECT: OnceLock<TokenId> = OnceLock::new();
+    static INSET: OnceLock<TokenId> = OnceLock::new();
+    let t = theme::resolved();
+    let base = if ui::theme_word(tok(&RECT, "panel.glass.rect")) == "content_box" {
+        content
+    } else {
+        r
+    };
+    // A negative inset would grow the quad past the ring it is poured
+    // into, which is not a shrink and not what the key says.
+    let inset = t.px(tok(&INSET, "panel.glass.inset")).max(0.0);
+    Rect::new(
+        base.x + inset,
+        base.y + inset,
+        (base.w - 2.0 * inset).max(0.0),
+        (base.h - 2.0 * inset).max(0.0),
+    )
 }
 
 /// The title band: left text, right text trimmed from the LEFT to the

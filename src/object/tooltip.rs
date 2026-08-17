@@ -396,7 +396,7 @@ mod tests {
             "tooltip.border",
         );
         let mut now = DrawList::recording();
-        Tooltips::level().draw_in(&mut now, t, r, AT_REST);
+        Tooltips::level().draw_in(&mut now, t, r, r, AT_REST);
         same_picture(&was, &now);
     }
 

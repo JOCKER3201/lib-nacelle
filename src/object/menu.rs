@@ -845,7 +845,7 @@ mod tests {
             "menu.border",
         );
         let mut now = DrawList::recording();
-        MenuState::level().draw_in(&mut now, t, r, AT_REST);
+        MenuState::level().draw_in(&mut now, t, r, r, AT_REST);
         same_picture(&was, &now);
     }
 

@@ -418,9 +418,12 @@ fn engine() -> Engine {
     engine.register_fn("uptime", |n: i64| fmt_uptime(n.max(0) as u64));
     engine.register_fn("upper", |s: &str| s.to_uppercase());
     engine.register_fn("lower", |s: &str| s.to_lowercase());
+    // `round(v, places)` says HOW MANY places, which is the script's
+    // business; what the mark between them is, and whether the thousands
+    // are grouped, is the theme's (§5.17). The clamp matches the master's
+    // own 0..6 range on `num.decimals`.
     engine.register_fn("round", |n: f64, places: i64| {
-        let p = places.clamp(0, 6) as usize;
-        format!("{n:.p$}")
+        crate::num::format(n, places.clamp(0, 6) as usize)
     });
     engine
 }
@@ -1982,7 +1985,7 @@ fn draw_stack(
                     // other object on this line uses. It used to guess a
                     // cap height of 1.3 here, which was a look no theme
                     // file could account for.
-                    let ty = ui::center_line_y(ctx, y, met.row_h, lpx, role.leading());
+                    let ty = ui::center_line_y(ctx, role.font(), y, met.row_h, lpx, role.leading());
                     // The label is the rows label, in the rows label's
                     // role: the same string on the same line above or
                     // below a `rows` element must be set the same way,
@@ -2067,8 +2070,8 @@ fn draw_stack(
                 // each is measured by its own. The primitive is the
                 // shared one, so the theme's centring mode reaches here
                 // as it reaches every other line in the program.
-                let lty = ui::center_line_y(ctx, y, met.row_h, lpx, label_role.leading());
-                let vty = ui::center_line_y(ctx, y, met.row_h, vpx, value_role.leading());
+                let lty = ui::center_line_y(ctx, lfont, y, met.row_h, lpx, label_role.leading());
+                let vty = ui::center_line_y(ctx, vfont, y, met.row_h, vpx, value_role.leading());
                 ctx.dl.text_fig(
                     ctx.fonts, lfont, lpx, r.x, lty, &label,
                     col(&LABEL, "component.script.label"), lsp, &lfig,
@@ -2527,6 +2530,13 @@ mod tests {
         let first = r[0].read_lock::<Array>().unwrap();
         assert_eq!(first[1].to_string(), "01:01:01");
         let meter = out[2].read_lock::<Map>().unwrap();
+        // Since 2026-08-17 the byte formatter writes its reading through
+        // `[num]`, so the spelling is now the theme's — and the master
+        // says `unit.case = none`, because a unit SYMBOL is not a label:
+        // the small `i` of GiB is what makes it the IEC binary prefix and
+        // the small `s` of MB/s is the second. A theme that wants shouty
+        // units writes `upper` and gets it everywhere at once, which is
+        // the whole point of the key having a reader.
         assert_eq!(str_of(&meter, "value"), "2.00 GiB");
         assert!((f32_of(&meter, "fraction", 0.0) - 0.25).abs() < 0.001);
     }

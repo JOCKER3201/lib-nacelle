@@ -2631,15 +2631,16 @@ tabular_set               = "0123456789"      # the characters a tabular role ad
 tabular_punct             = true              # also fix the advance of . , : + - space % · 1 · bool · no derivation; without it 21:57:30 still shivers on the colon
 align                     = decimal           # how a numeric column lines its rows up · 1, 9 · enum: decimal | right | left · decimal uses ui::column_numeric, which right-aligns the integer part to digits x figure_advance with no measuring
 decimal_sep               = "."               # the character between integer and fraction · 1, 7 · text, one character · THE THEME DECIDES, not a locale guess - a theme must render identically on every machine
-group_sep                 = " "               # the character between thousands groups · 1, 7 · text, one character (this is U+2009 thin space) · validated at load; a face lacking the character falls back to ' ' with a warning
+group_sep                 = " "               # the character between thousands groups · 1, 7 · text, one character (this is U+2009 thin space) · NO substitution: the character named here is the character drawn, and a face without U+2009 draws its notdef inside the number. That is the governing principle's raw look and the theme's own doing - this line used to promise "validated at load, falls back to ' ' with a warning" and nothing anywhere did either
 group                     = 3                 # digits per group · 1 · n, 2 .. 4 · no derivation
 group_min                 = 5                 # shortest integer that gets grouped at all · 1 · n, 3 .. 9 · 1234 is not grouped; 12 345 is
 decimals                  = 2                 # decimal places a value carries · 1, 7 · n, 0 .. 6 · cpu.rhai:2's round(load1, 2); precision is typography and the rest of this block already owns it
 decimals_compact          = 0                 # decimal places where room is tight: temperatures, gauge readouts · 1 · n, 0 .. 6 · cpu.rhai:6's round(temp, 0)
 unit.scale                = 0.72              # the unit suffix's px as a fraction of the value's px · 1, 7 · f, 0.4 .. 1.0 · x the value's resolved px
 unit.gap                  = 0.18em            # space between the number and its unit · 1, 7 · em, 0em .. 1em · no derivation
+unit.text_gap             = " "               # what stands between value and unit where the two are ONE STRING · 1, 7 · text · unit.gap is a DISTANCE and a string carries none; a script's cell, a table value and a tooltip are characters only, so the same joint needs a character here. Set it empty to close the gap up everywhere at once
 unit.tracking             = 0.060em           # letter spacing inside the unit suffix · 1, 7 · em · no derivation
-unit.case                 = upper             # case transform applied to the unit suffix · 1, 7 · enum: none | upper | lower | smallcaps · TB, GBPS, PS all read as instrument units
+unit.case                 = none              # case transform applied to the unit suffix · 1, 7 · enum: none | upper | lower | smallcaps · none, because a unit SYMBOL is not a label: the small i of GiB is what makes it the IEC binary prefix, and the small s of MB/s is the second. Upper-casing them writes GIB and MB/S, which name nothing. This key shipped `upper` on the strength of "TB, GBPS, PS all read as instrument units" while the whole block was dead; the moment it got a reader (2026-08-17) the byte and rate formatters started printing those two. A theme that wants shouty units still writes `upper` and gets it everywhere at once
 unit.color                = @text.muted       # the unit suffix's colour · 1, 7 · colour · a step back from @text.primary so the number reads first
 unit.baseline_shift       = 0.0em             # vertical offset of the unit suffix · 1, 7 · em · units sit on the baseline, NEVER superscript
 unit.percent_attached     = true              # suppress unit.gap before a percent sign · 1, 7, 9 · bool · 85% with no gap; 60 / 89ps keeps its gap
@@ -4289,6 +4290,13 @@ title.role = title.panel            # the type role the title text is set in · 
 glass.rect = border_box             # which rectangle the glass quad fills · image 7 · enum: border_box | content_box · -
 glass.inset = @space.0              # shrink the glass quad inside the border · image 7 · len (u) · @space.0 = 0u
 elev = panel                        # which Elev level a resting panel draws its material from · images 1-10 · elev ref · elev.panel (5.12)
+# TODO(panel.button): the six `button.*` keys below have NO reader, and
+#   batch 7 of the 2026-08-17 audit did not give them one although Z25
+#   named them. They are not a wiring job: a panel draws no controls at
+#   all today, so closing them means building the control row first — and
+#   that row is the same row `[winframe]` already declares, which under
+#   the one-window-model rule belongs in ONE place rather than being grown
+#   twice. Carried OUT of batch 7 explicitly, not counted as closed.
 button.size = 0.62x @titlebar.h     # drawn size of a panel's own window control · images 1,7 put `_ ✕` and `_ □ ✕` ON panels · rat of @titlebar.h · 17.4 px
 button.pad = 0.30x @titlebar.h      # padding around that control · images 1,7 · rat of @titlebar.h · 8.4 px
 button.gap = 0.22x @titlebar.h      # gap between two panel controls · images 1,7 · rat of @titlebar.h · 6.2 px
@@ -5187,7 +5195,22 @@ debounce_ms = 200ms                 # how long after the last keystroke the sear
 [rhythm]
 label_col_frac = 0.34               # label-column share of a settings row until auto measurement lands · 1 · frac · was content.w * 0.34 in settings.rs
 baseline = 1u                       # the vertical grid text baselines snap to · images 1-10 · len (u) · 5.4 px
-snap_baseline = true                # whether that snapping happens at all · images 1-6 · bool · false for family B, where cards float over a live background and the grid has nothing to lock to
+snap_baseline = false               # whether that snapping happens at all · images 1-6 · bool · false for family B, where cards float over a live background and the grid has nothing to lock to
+# TODO(rhythm): shipped OFF as of 2026-08-17, and the value is the only
+#   thing here that is provisional — the grid itself now has a reader
+#   (view/paint.rs snap_baseline, which lays a line's BASELINE on it and
+#   measures it from snap_origin). It is off because A GRID ONLY HOLDS
+#   WHEN EVERY ROW PITCH IS A MULTIPLE OF IT, and this file's are not:
+#   `row` is 4.8u and `row_compact` 3.6u against a `baseline` of 1u, and
+#   `list.row_h`, `menu.row_h` and the rest never asked. Switched on as
+#   the file stands, consecutive rows land 5u and then 4u apart — the
+#   text jitters inside boxes of one height instead of marching down them.
+#   Both keys already SAY "snapped at bake"; nothing snaps them. Deciding
+#   the pitch is a decision about the whole toolkit's rhythm, so it waits
+#   for the owner, and this switch honours it the moment the numbers line up.
+#   SAY IT PLAINLY: `baseline` and `snap_origin` are read only INSIDE this
+#   switch, so under the file as shipped their live readers are the tests
+#   and nothing else. They have a reader; they do not yet have a picture.
 snap_origin = panel_content_top     # what the grid is measured from · images 1-10 · enum: panel_content_top | screen_top · -
 row = 4.8u                          # the standard row height, snapped at bake · images 1,7 · len (u) · 27.0 px; today px*1.9
 row_compact = 3.6u                  # the dense row height, snapped at bake · image 9 · len (u) · 19.4 px
