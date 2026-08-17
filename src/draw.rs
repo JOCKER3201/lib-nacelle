@@ -1976,11 +1976,15 @@ impl DrawList {
         //   interior is not the box's.
         // * **A core too small to pay for itself** ([`CORE_MIN`]).
         //
-        // The cost of the cut is one RUN more per shape: the core
-        // samples the atlas and the strips read the shape buffer, and
-        // those are two pipelines. Remedy 3 of the same section —
-        // merging shape runs on the host's side — is where that is
-        // answered; it is not answered here.
+        // The cost of the cut is TWO runs more per shape, not one —
+        // MEASURED, after an adversary called the first figure out.
+        // The core samples the atlas and the strips read the shape
+        // buffer, so the pair is two pipelines; but the cut also BREAKS
+        // the merge of the runs on either side, which a row of plain
+        // shapes used to get for free. A band of twelve panels goes
+        // from 1 run to 24. Remedy 3 of the same section — merging
+        // shape runs on the host's side — is where that is answered,
+        // and it stops being optional; it is not answered here.
         let split = (snap && s.kind == ShapeKind::Box)
             .then(|| {
                 let reach = s
@@ -2301,11 +2305,20 @@ impl DrawList {
         &mut self.shapes[range]
     }
 
-    /// Splits every following shape quad into an n×n grid for the
+    /// Splits every following BOX shape quad into an n×n grid for the
     /// duration of a post-emission transform (f3 §2.3): the affine
     /// interpolation error of a perspective ride falls as 1/n². 1 = one
     /// quad, and §2.7's edge snap applies only there. Nothing outside
     /// shapes is affected. Reset to 1 by [`DrawList::clear`].
+    ///
+    /// NOT every shape, and the word BOX above is the whole of it: the
+    /// oblique lane (capsule, disc, polygon) emits its own geometry
+    /// from a local frame and does not read this at all. On a ride, a
+    /// dash of a focus ring or a plugin's diagonal wire therefore
+    /// carries the affine error this call exists to remove. Measured
+    /// and left standing on purpose — the ride dims and moves whole
+    /// panels, and a hairline inside one is below the error of the
+    /// panel's own corner — but it is a limit, not a property.
     pub fn set_warp(&mut self, n: u8) {
         self.warp = n.max(1);
         // The quads of an open bed were emitted under the old grid; a
