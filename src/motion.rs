@@ -53,7 +53,7 @@
 
 use crate::theme::parse::State;
 use crate::theme::{self, Color, TokenId};
-use crate::ui::{theme_word, warn_once};
+use crate::ui::{warn_once, with_theme_word};
 use crate::view::surface::StateInk;
 use crate::Rect;
 use std::cell::{Cell, RefCell};
@@ -273,8 +273,11 @@ impl Effect {
     /// theme's WORD — never a cached index. `sine` is policed here.
     pub fn one_shot_easing(&self) -> Easing {
         let t = theme::resolved();
-        let word = theme_word(self.easing);
-        let e = easing_of(&word, t.px(self.duty), t.px(self.floor), self.bezier_points());
+        // Borrowed, not cloned: this runs on every frame of every fade,
+        // and a clone here is an allocation per control per frame.
+        let e = with_theme_word(self.easing, |word| {
+            easing_of(word, t.px(self.duty), t.px(self.floor), self.bezier_points())
+        });
         if e == Easing::Sine {
             warn_once(
                 &format!("motion-sine:#{}", self.easing.index()),
@@ -346,7 +349,7 @@ impl Effect {
             return 1.0;
         }
         let phase = ((now * 1000.0).rem_euclid(p as f64) / p as f64) as f32;
-        if theme_word(self.easing) == "sine" {
+        if with_theme_word(self.easing, |w| w == "sine") {
             0.5 - 0.5 * (std::f32::consts::TAU * phase).cos()
         } else if phase < t.px(self.duty) {
             1.0

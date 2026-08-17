@@ -62,6 +62,28 @@ pub(crate) fn theme_word(token: TokenId) -> String {
     word_of(token)
 }
 
+/// The same word, LENT rather than handed over.
+///
+/// `theme_word` clones out of the cache, which is right for a caller that
+/// keeps the string — and wrong for the ones that only compare it. Motion
+/// asks for the easing word on every frame of every fade, so a clone there
+/// is an allocation per control per frame; borrowing inside the map's own
+/// borrow costs nothing and cannot outlive it.
+pub(crate) fn with_theme_word<R>(token: TokenId, f: impl FnOnce(&str) -> R) -> R {
+    thread_local! {
+        static WORDS: RefCell<HashMap<(u32, usize, u16), String>> = RefCell::new(HashMap::new());
+    }
+    let i = theme::resolved().enum_of(token);
+    let epoch = theme::epoch();
+    WORDS.with(|w| {
+        let mut w = w.borrow_mut();
+        let word = w
+            .entry((epoch, token.index(), i))
+            .or_insert_with(|| theme::enum_word_of(token).unwrap_or_default());
+        f(word)
+    })
+}
+
 fn word_of(token: TokenId) -> String {
     thread_local! {
         static WORDS: RefCell<HashMap<(u32, usize, u16), String>> = RefCell::new(HashMap::new());
