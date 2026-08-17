@@ -61,6 +61,11 @@ pub(crate) struct Level {
     /// Where each cut's word sits in `corner`'s vocabulary — see
     /// [`crate::corner::Cuts`], which is the one reader of it.
     words: Cuts,
+    /// The four `shape.<preset>.corners_tl/tr/br/bl` PAIRS a preset gets
+    /// the last word with, as `[style, length]` ids in `ring_points`'
+    /// order, or `None` for a rung no preset was pointed at
+    /// ([`Level::shaped_by`]).
+    per: Option<[TokenId; 8]>,
     /// `edge.mode`'s index for the word `gradient`.
     mode_gradient: Option<u16>,
     /// `edge.axis`'s indices for `x, y, diag_down, diag_up`, in that
@@ -104,6 +109,7 @@ impl Level {
             glass_tint: id("glass.tint"),
             glass_wash: id("glass.wash"),
             words: Cuts::of(corner),
+            per: None,
             mode_gradient: theme::enum_index(edge_mode, "gradient"),
             axis_words: [
                 theme::enum_index(edge_axis, AXES[0].0),
@@ -163,6 +169,58 @@ impl Level {
         self
     }
 
+    /// The `shape.*` preset that gets the LAST WORD on this rung's four
+    /// corners, one corner at a time (f3 K6).
+    ///
+    /// **This is where `shape.<preset>.corners_tl/tr/br/bl` reach the
+    /// screen.** Sixteen presets have carried the four keys since the
+    /// theme engine was written, each with a comment saying it overrides
+    /// one corner; [`crate::view::paint::preset`] gave them a reader, and
+    /// a reader nobody calls changes no picture — the key was still dead
+    /// where it counts. A rung named here is drawn through them, so a
+    /// theme writing `shape.panel.corners_tl = [ chamfer, 2u ]` cuts one
+    /// corner of every window frame and leaves the other three where they
+    /// were.
+    ///
+    /// It is stated by the CONSUMER, next to `worn_as`, and for the same
+    /// reason: which preset is the same surface as which rung is a fact
+    /// about the theme's vocabulary, not one the ladder can derive from a
+    /// rung's name — `shape.window` exists as well, and the frame is
+    /// `[elev.panel]` wearing `shape.panel`. Deriving it here would make
+    /// that a coincidence of spelling.
+    ///
+    /// The rung's own `corner` / `radius` stay the BASE all four start
+    /// from, so this ADDS a say rather than moving one. Each per-corner
+    /// key is a PAIR whose two slots inherit separately, so a slot left
+    /// at `same_as_parent` — which is every slot the master ships but
+    /// `button_alt`'s and `tab`'s — answers exactly the corner that
+    /// arrived, and the shipped picture is bit for bit what it was.
+    ///
+    /// A preset that declares no such keys keeps the base on all four and
+    /// says so once: reading a token that is not there gives zero, and
+    /// zero is a square corner nobody asked for.
+    pub(crate) fn shaped_by(mut self, preset: &str) -> Level {
+        let mut ids = [TokenId::MISSING; 8];
+        for (i, slot) in ["tl", "tr", "br", "bl"].iter().enumerate() {
+            for (j, part) in ["[0]", "[1]"].iter().enumerate() {
+                ids[2 * i + j] = theme::id(&format!("{preset}.corners_{slot}{part}"))
+                    .unwrap_or(TokenId::MISSING);
+            }
+        }
+        if ids.iter().any(|id| *id == TokenId::MISSING) {
+            crate::ui::warn_once(
+                &format!("shaped_by:{preset}"),
+                &format!(
+                    "\"{preset}\" declares no corners_tl/tr/br/bl pair: its corners \
+                     cannot be set one at a time"
+                ),
+            );
+            return self;
+        }
+        self.per = Some(ids);
+        self
+    }
+
     /// The far end of a two-stop ring and the direction it travels, or
     /// `None` for the flat ring every rung draws by default.
     ///
@@ -219,11 +277,67 @@ impl Level {
     /// word about a box ("as round as this one can be") and bakes to a
     /// negative sentinel, so a floor at zero answers a master writing
     /// `pill` with the square it wrote to avoid.
+    ///
+    /// Four corners and not one repeated: [`Level::shaped_by`] may have
+    /// given a `shape.*` preset the last word on each of them
+    /// separately. The count comes from the biggest ARC on the ring
+    /// ([`super::window::round_reach`]) rather than from the base,
+    /// because one count serves all four and reading it off the base
+    /// alone would under-tessellate a corner the preset made rounder.
     pub(crate) fn cut(&self, t: &theme::ResolvedTheme, r: Rect) -> ([Corner; 4], u8) {
         static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
         let style = self.words.read(t, self.corner);
-        let c = Corner::sized(style, t.px(self.radius), r);
-        ([c; 4], super::window::corner_segments(t, &SEGMENTS, c.size))
+        let c = self.per_corner(t, Corner::sized(style, t.px(self.radius), r), r);
+        (c, super::window::corner_segments(t, &SEGMENTS, super::window::round_reach(&c)))
+    }
+
+    /// `base` with each corner passed under the preset's own say, if a
+    /// preset was named ([`Level::shaped_by`]) and `base` unchanged four
+    /// times if none was.
+    ///
+    /// The RULE — what a half-stated pair means — is
+    /// [`crate::view::paint::override_corner`] and is not repeated here:
+    /// the surface layer reads the same four keys for anything drawing
+    /// through the plugin ABI, and two answers to one question is the
+    /// drift every shared reader in this crate was pulled out to end.
+    /// What is local is only HOW the readings are taken, which on this
+    /// side is a memoised token and a borrowed word rather than a string
+    /// key and an allocation.
+    ///
+    /// The WORD is asked for only once the style slot's scalar says a
+    /// style was stated at all — a sentinel bakes to its own negative
+    /// whatever kind of slot it sits in, so the question can be put to
+    /// the number first. That is what keeps the master's own picture, in
+    /// which all thirty-two slots inherit, free of a vocabulary lookup
+    /// per corner per frame. It is compared as a WORD and not as an enum
+    /// index because a preset's style slot carries no `enum:` list in the
+    /// master: its word table grows out of the values a theme actually
+    /// loaded, and an index memoised against the master's own table would
+    /// name someone else's word after a swap.
+    ///
+    /// The word comes out of the PUBLISHED vocabulary, which is the only
+    /// place words are kept — a `ResolvedTheme` holds the index and the
+    /// engine's schema holds what the index is called. So `t` decides
+    /// every NUMBER here and the schema decides every NAME, and the two
+    /// are one theme in every drawing path there is. They part only for
+    /// a theme baked and never published, which is a test's arrangement
+    /// and not a program's.
+    fn per_corner(&self, t: &theme::ResolvedTheme, base: Corner, r: Rect) -> [Corner; 4] {
+        let Some(ids) = self.per else { return [base; 4] };
+        let inherit = crate::view::paint::inherits();
+        let mut out = [base; 4];
+        for (i, corner) in out.iter_mut().enumerate() {
+            let (word, len) = (ids[2 * i], ids[2 * i + 1]);
+            let (scalar, stated) = (t.px(word), t.px(len));
+            *corner = if scalar == inherit {
+                crate::view::paint::override_corner(base, r, scalar, "", stated)
+            } else {
+                crate::ui::with_theme_word(word, |w| {
+                    crate::view::paint::override_corner(base, r, scalar, w, stated)
+                })
+            };
+        }
+        out
     }
 
     /// Material, ring, and family A's bloom over the ring.
@@ -683,5 +797,74 @@ pub(crate) mod tests {
         assert!(!dl.verts.is_empty(), "the ring drew nothing to measure");
         assert!((left - near.r).abs() < 1e-6, "left end {left} is not edge.color");
         assert!((right - 1.0).abs() < 1e-6, "right end {right} is not edge.color2");
+    }
+
+    // ------------------------------------------- the per-corner say
+    //
+    // f3 K6 lands HERE and not in `window.rs`, because a surface is
+    // drawn in one place and a corner is part of a surface. What the
+    // frame states is only WHICH preset (`shaped_by`); the reading is
+    // the rung's, so every consumer that names one gets it, including
+    // the ones written after this line. The whole road — the master's
+    // own file through the shipped emitter — is
+    // `tests/shape_preset_reaches_the_frame.rs`; what is proved here is
+    // the part only this file can break.
+
+    /// The panel rung wearing the preset the window frame points it at.
+    fn framed() -> Level {
+        Level::of("elev.panel").shaped_by("shape.panel")
+    }
+
+    /// A stated LENGTH on one corner moves that corner and no other,
+    /// with the style slot left inheriting — the half-stated pair, which
+    /// is the whole reason these keys are pairs and not single words.
+    ///
+    /// The LENGTH half and not the style half, and the reason is a real
+    /// limit rather than an omission: a `bake_over_master` theme builds
+    /// its own `Schema` and does not publish it, while WORDS
+    /// live in the published one — `ui::with_theme_word` can
+    /// only ever answer out of that. A style word this theme is the
+    /// first to use is therefore unreadable from here whatever the
+    /// reader does. Scalars have no such split, so the length slot is
+    /// the part a rung can be put on trial for in isolation; the style
+    /// word is proved on a theme that is actually LOADED, in
+    /// `tests/shape_preset_reaches_the_frame.rs`.
+    #[test]
+    fn a_stated_length_cuts_one_corner_of_the_rung() {
+        let t = theme::bake_over_master(
+            "[shape.panel]\ncorners_bl = [ same_as_parent, 0.6u ]\n",
+        );
+        let (c, _) = framed().cut(&t, box_());
+        assert!(c[0].size > 0.0, "the rung's own radius arrived as nothing: {:?}", c[0]);
+        assert_eq!(c[..3], [c[0]; 3], "a corner the theme did not name moved: {c:?}");
+        assert_eq!(c[3].style, c[0].style, "the inheriting slot lost the rung's own cut");
+        assert!(c[3].size < c[0].size, "the stated length never reached the corner: {c:?}");
+    }
+
+    /// The say is the CONSUMER's to give: a rung nobody pointed at a
+    /// preset reads the same overlay and does not move.
+    ///
+    /// `shape.*` has sixteen presets and the audit's §7.2 leaves open
+    /// whether every object moves onto them, so a rung must not acquire
+    /// one by standing next to it — `Level::of("elev.panel")` alone is
+    /// still four corners of one answer.
+    #[test]
+    fn a_rung_no_preset_was_named_for_keeps_its_four_equal_corners() {
+        let t = theme::bake_over_master(
+            "[shape.panel]\ncorners_bl = [ same_as_parent, 0.6u ]\n",
+        );
+        let (c, _) = Level::of("elev.panel").cut(&t, box_());
+        assert_eq!(c, [c[0]; 4], "an unshaped rung read a preset nobody gave it: {c:?}");
+    }
+
+    /// The master's own picture does not move: all thirty-two slots of
+    /// `shape.panel` inherit, so the rung answers exactly the four equal
+    /// corners it answered before it could be asked for anything else —
+    /// tessellation included, which now comes off `round_reach` rather
+    /// than off the base.
+    #[test]
+    fn the_preset_the_master_ships_moves_no_corner() {
+        let t = theme::resolved();
+        assert_eq!(framed().cut(t, box_()), Level::of("elev.panel").cut(t, box_()));
     }
 }

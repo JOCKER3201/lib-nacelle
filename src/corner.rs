@@ -72,11 +72,24 @@ pub const WORDS: [(&str, CornerStyle); 3] = [
 /// The cut a WORD names. Anything outside [`WORDS`] is Square — see the
 /// header for why that is silent.
 pub fn cut(word: &str) -> CornerStyle {
+    cut_or(word, CornerStyle::Square)
+}
+
+/// The same table, with the caller naming what "anything else" means.
+///
+/// The two readings genuinely differ, which is why the fallback is not
+/// settled here. On a preset's own `corners` an unknown word is Square —
+/// the raw look of an unstyled rect. On a PER-CORNER key
+/// (`shape.<preset>.corners_tl` and its three kin) it is the corner that
+/// ARRIVED, because a word there may name a whole silhouette (`chevron`,
+/// `hexagon`) and one corner of a hexagon is not a shape. Collapsing the
+/// two would answer a question the key exists to ask.
+pub fn cut_or(word: &str, fallback: CornerStyle) -> CornerStyle {
     WORDS
         .iter()
         .find(|(w, _)| *w == word)
         .map(|(_, style)| *style)
-        .unwrap_or(CornerStyle::Square)
+        .unwrap_or(fallback)
 }
 
 /// The number this cut travels as across the plugin ABI —

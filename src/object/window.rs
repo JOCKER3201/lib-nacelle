@@ -46,6 +46,22 @@ pub(crate) fn vocabulary(mode: TokenId) -> (Option<u16>, Option<u16>) {
     (theme::enum_index(mode, "round"), theme::enum_index(mode, "chamfer"))
 }
 
+/// The largest ARC on a ring, which is the only thing its tessellation
+/// count has to answer for.
+///
+/// [`crate::draw::ring_points`] takes ONE count for all four corners, so
+/// something has to reconcile four sizes into it, and the honest reducer
+/// is the largest one that is actually curved: a square corner is a
+/// point and a chamfer is a single straight cut, and neither is improved
+/// by a finer arc. Reading the plain maximum instead would let a theme
+/// that chamfers one corner deeply raise the segment count of the three
+/// round ones it never mentioned — a change to a corner it did not name.
+pub(crate) fn round_reach(c: &[Corner; 4]) -> f32 {
+    c.iter()
+        .filter(|k| k.style == CornerStyle::Round)
+        .fold(0.0f32, |m, k| m.max(k.size))
+}
+
 /// [`corner_style`] with the vocabulary already in hand.
 pub(crate) fn cut_of(
     t: &theme::ResolvedTheme,
@@ -172,16 +188,27 @@ pub fn backdrop(ctx: &mut Ctx, _alpha: f32) {
 /// into the desktop and a window of an outside application are drawn by
 /// this one function, so a rule stated here cannot reach one of them and
 /// miss the other.
+///
+/// `shape.panel` is named as well, and it is the only thing this file
+/// still says about a corner: it is the preset that gets the LAST word
+/// on the rung's four corners, one at a time (f3 K6). The rung settles
+/// what all four are — `panel.corner_mode` and `panel.corner`, above —
+/// and the preset may then move any one of them without touching the
+/// other three. `shape.panel` and `[elev.panel]` are the same surface
+/// under two spellings, which is why the pairing is stated once here
+/// rather than guessed from the rung's own name inside the ladder.
 fn level() -> &'static super::elev::Level {
     static LEVEL: OnceLock<super::elev::Level> = OnceLock::new();
     LEVEL.get_or_init(|| {
-        super::elev::Level::of("elev.panel").worn_as(
-            "component.panel.fill",
-            "panel.corner_mode",
-            "panel.corner",
-            "component.panel.border",
-            "panel.border",
-        )
+        super::elev::Level::of("elev.panel")
+            .worn_as(
+                "component.panel.fill",
+                "panel.corner_mode",
+                "panel.corner",
+                "component.panel.border",
+                "panel.border",
+            )
+            .shaped_by("shape.panel")
     })
 }
 
