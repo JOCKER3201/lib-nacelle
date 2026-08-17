@@ -53,6 +53,7 @@ fn the_motion_resolver_answers_for_the_theme() {
     a_crossfade_retargets_without_jumping();
     an_unknown_effect_is_reported_and_ignored();
     the_a11y_switch_reaches_the_scale();
+    a_breath_swings_about_the_number_the_theme_wrote();
 }
 
 /// The master's `menu_unfold`: 150 ms of `ease_out`, run on a hand-wound
@@ -284,4 +285,63 @@ fn the_a11y_switch_reaches_the_scale() {
     assert!(motion::reduce_motion());
     master();
     assert!(!motion::reduce_motion(), "the master's own file suppresses motion");
+}
+
+/// `cyclic_amplitude` — the SECOND cyclic path, and the reason it is a
+/// second one: a blink freezes fully visible, a breath freezes at its
+/// mean. `glow_pulse` is the only entry in the catalogue that declares an
+/// amplitude, and neither the key nor the arithmetic had a reader.
+fn a_breath_swings_about_the_number_the_theme_wrote() {
+    let _ = motion::set_platform_reduce_motion(false);
+
+    // The master ships the pulse OFF, so the multiplier is exactly one at
+    // every clock — not approximately one.
+    master();
+    let e = Effect::of("glow_pulse");
+    for i in 0..40 {
+        assert_eq!(e.cyclic_amplitude(i as f64 * 0.11), 1.0, "a disabled breath moved");
+    }
+
+    // Turned on, with the master's 1600 ms of sine at amplitude 0.25:
+    // the floor at the start of a period, the ceiling in the middle, and
+    // EXACTLY the mean at each quarter — which is what makes a picture
+    // drawn there identical to a frozen one.
+    skin("[motion.glow_pulse]\nenabled = true\n");
+    let e = Effect::of("glow_pulse");
+    assert!((e.cyclic_amplitude(0.0) - 0.75).abs() < 1e-5, "the floor is 1 - amplitude");
+    assert!((e.cyclic_amplitude(0.8) - 1.25).abs() < 1e-5, "the ceiling is 1 + amplitude");
+    assert_eq!(e.cyclic_amplitude(0.4), 1.0, "a quarter through, the swing is the mean");
+    assert_eq!(e.cyclic_amplitude(1.2), 1.0, "and three quarters through");
+    // …and it stays inside the band all the way round, which is what an
+    // alpha multiplier has to promise.
+    let mut sum = 0.0f64;
+    for i in 0..1600 {
+        let v = e.cyclic_amplitude(i as f64 / 1000.0);
+        assert!((0.75..=1.25).contains(&v), "the breath left its band at {i} ms: {v}");
+        sum += v as f64;
+    }
+    assert!((sum / 1600.0 - 1.0).abs() < 1e-3, "the breath is not centred on one");
+
+    // The blinks do not share this path and cannot have moved.
+    assert_eq!(Effect::of("value_blink").cyclic(0.25), 1.0);
+    assert_eq!(Effect::of("value_blink").cyclic(0.75), 0.0);
+
+    // Every freeze answers the MEAN, which is one: reduced motion by
+    // either road, and an amplitude of nothing.
+    skin("[motion.glow_pulse]\nenabled = true\n\n[motion]\nscale = 0.0\n");
+    for t in [0.0, 0.4, 0.8] {
+        assert_eq!(Effect::of("glow_pulse").cyclic_amplitude(t), 1.0, "scale = 0 breathed");
+    }
+    skin("[motion.glow_pulse]\nenabled = true\n\n[a11y]\nreduced_motion = on\n");
+    for t in [0.0, 0.4, 0.8] {
+        assert_eq!(Effect::of("glow_pulse").cyclic_amplitude(t), 1.0, "reduced motion breathed");
+    }
+    skin("[motion.glow_pulse]\nenabled = true\namplitude = 0.0\n");
+    assert_eq!(Effect::of("glow_pulse").cyclic_amplitude(0.0), 1.0, "a swing of nothing swung");
+    assert_eq!(Effect::of("glow_pulse").amplitude(), 0.0, "the raw key is readable too");
+
+    // A period of zero is no cycle to stand on: the mean again.
+    skin("[motion.glow_pulse]\nenabled = true\nperiod_ms = 0ms\n");
+    assert_eq!(Effect::of("glow_pulse").cyclic_amplitude(0.3), 1.0, "a zero period breathed");
+    master();
 }

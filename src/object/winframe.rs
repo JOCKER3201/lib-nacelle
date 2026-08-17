@@ -496,7 +496,7 @@ impl Frame {
         let corners = [Corner { style, size: m.cut }; 4];
         let seg = corner_segments(t, &SEGMENTS, m.cut);
         ctx.dl.ring(outer, &corners, seg, m.border, line);
-        panel_edge_glow(ctx.dl, t, outer, &corners, seg, line);
+        panel_edge_glow(ctx.dl, t, outer, &corners, seg, line, ctx.t);
         // The title bar's floor.
         ctx.dl.line(
             outer.x + m.border,

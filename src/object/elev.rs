@@ -125,7 +125,7 @@ impl Level {
         let width = t.px(self.edge_width).max(0.0);
         if edge.a > 0.0 && width > 0.0 {
             ctx.dl.ring(r, &c, seg, width, edge);
-            super::window::panel_edge_glow(ctx.dl, t, r, &c, seg, edge);
+            super::window::panel_edge_glow(ctx.dl, t, r, &c, seg, edge, ctx.t);
         }
         (c, seg)
     }

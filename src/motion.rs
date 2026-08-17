@@ -422,23 +422,71 @@ impl Effect {
         if scale <= 0.0 || !t.flag(self.enabled) {
             return 1.0;
         }
+        self.cyclic_curve(now, t, scale).unwrap_or(1.0)
+    }
+
+    /// The 0..1 curve of a RUNNING cyclic source — the arithmetic
+    /// [`Effect::cyclic`] and [`Effect::cyclic_amplitude`] share, with
+    /// neither freeze rule inside it, because the two freeze at different
+    /// values and only the caller knows which. `None` when there is no
+    /// cycle to stand on.
+    fn cyclic_curve(&self, now: f64, t: &theme::ResolvedTheme, scale: f32) -> Option<f32> {
         let p = t.px(self.period_ms) * scale;
         if p <= 0.0 {
-            return 1.0;
+            return None;
         }
         let phase = ((now * 1000.0).rem_euclid(p as f64) / p as f64) as f32;
-        if with_theme_word(self.easing, |w| w == "sine") {
+        Some(if with_theme_word(self.easing, |w| w == "sine") {
             0.5 - 0.5 * (std::f32::consts::TAU * phase).cos()
         } else if phase < t.px(self.duty) {
             1.0
         } else {
             t.px(self.floor).clamp(0.0, 1.0)
+        })
+    }
+
+    /// The MULTIPLIER a breathing source applies to the property it
+    /// breathes: `1 ± amplitude` swung over `period_ms`, for `glow_pulse`,
+    /// whose `amplitude` key §5.22 describes as "± swing applied to
+    /// glow_alpha" and which had no reader at all.
+    ///
+    /// A SECOND cyclic path rather than a widening of [`Effect::cyclic`],
+    /// and the difference is the freeze: a blink freezes at **1.0, fully
+    /// visible**, because a caret that never comes back is a usability
+    /// failure; a breath freezes at its **mean**, because a halo held at
+    /// its brightest is a theme the author did not write. Both numbers are
+    /// 1.0 here — the mean of `1 ± amplitude` is exactly 1 — which is the
+    /// happy accident that lets the two share `cyclic_curve` without
+    /// sharing a rule. `caret_blink`, `term_cursor_blink` and
+    /// `value_blink` do not touch this path and cannot move.
+    ///
+    /// Frozen (so: exactly 1.0, the property untouched) under reduced
+    /// motion, a disabled effect, a zero period, and — the case the master
+    /// actually ships — a zero `amplitude`: an effect declared with no
+    /// swing is an effect that multiplies by one, and saying so first
+    /// keeps a theme that turns the pulse on with the default 0.00 from
+    /// paying for a phase nobody can see.
+    pub fn cyclic_amplitude(&self, now: f64) -> f32 {
+        let t = theme::resolved();
+        let amp = t.px(self.amplitude).clamp(0.0, 1.0);
+        if amp <= 0.0 || !t.flag(self.enabled) {
+            return 1.0;
+        }
+        let scale = motion_scale();
+        if scale <= 0.0 {
+            return 1.0;
+        }
+        match self.cyclic_curve(now, t, scale) {
+            // The curve is 0..1 and the swing is about the middle of it:
+            // 1 - amp at the bottom, 1 + amp at the top, 1 on average.
+            Some(f) => 1.0 + amp * (2.0 * f - 1.0),
+            None => 1.0,
         }
     }
 
-    /// `amplitude` — the ± swing of a cyclic source around its mean
-    /// (`glow_pulse`). No consumer yet; the glow stone reads it here so
-    /// the key does not grow a second resolver.
+    /// `amplitude` — the ± swing of a cyclic source around its mean, raw.
+    /// [`Effect::cyclic_amplitude`] is what applies it; this is for a
+    /// caller that wants the number itself.
     pub fn amplitude(&self) -> f32 {
         theme::resolved().px(self.amplitude)
     }

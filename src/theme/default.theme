@@ -3849,12 +3849,12 @@ enabled     = true                    # run this effect at all; -; bool; the the
 [motion.glow_pulse]
 duration_ms = 0ms                     # unused - glow_pulse is cyclic; -; ms; -
 period_ms   = 1600ms                  # one breath of the panel-edge halo; images 2,7; ms, 200ms .. 8000ms; -
-amplitude   = 0.25                    # +/- swing applied to glow_alpha; images 2,7; 0..1; freezes at its mean under reduced motion
+amplitude   = 0.25                    # +/- swing applied to glow_alpha; images 2,7; 0..1; freezes at its mean under reduced motion — motion::Effect::cyclic_amplitude, a path of its own precisely because a BLINK freezes fully visible and a BREATH freezes at the middle
 floor       = 0.00                    # unused outside step easing; -; 0..1; -
 duty        = 0.00                    # unused outside step easing; -; 0..1; -
 easing      = sine                    # curve · images 2,7 · enum: linear | ease_out | ease_in | ease_in_out | sine | step | custom · sine is legal on cyclic effects only
 easing_p    = [0.25, 0.10, 0.25, 1.00] # bezier points for easing = custom; -; 4 x f; TODO(default): chosen here, spec silent
-enabled     = false                   # OFF in default, like every glow class (5.13); -; bool; costs one of motion.idle_cap sources when on
+enabled     = false                   # OFF in default, like every glow class (5.13); -; bool; costs one of motion.idle_cap sources when on — and a theme must ask TWICE before anything moves, because object/window.rs's panel_edge_glow returns on glow.panel_edge.enabled before it ever asks the clock
 
 # ---- alarm_blink · cyclic alarm emphasis (CYCLIC SOURCE) -----------------
 [motion.alarm_blink]
