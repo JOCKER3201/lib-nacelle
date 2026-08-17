@@ -1348,6 +1348,99 @@ mod tests {
         assert_eq!(tracked(), 0);
     }
 
+    /// §5.22's header states an ARITHMETIC — so many effects, so many
+    /// keys each — and a header that states arithmetic is a header that
+    /// can be wrong. It was: it read `18 effects x 8 keys + 2 globals =
+    /// 146` while the body declared 152, because `board_ride` carries six
+    /// numbers no other entry has and the shape's multiplication does not
+    /// know about them.
+    ///
+    /// The six are NOT a leak in a closed catalogue. Every one of them has
+    /// a reader — `perspective`, `gesture_frac`, `rubber_gain`,
+    /// `rubber_max` and `epsilon` in nacelle-desktop's `main.rs`, `void` in
+    /// this crate's `deco.rs` — and they are named in the table below by
+    /// hand, so growing a seventh means editing this test and saying why.
+    ///
+    /// Read from the FILE, not from a resolved theme: the baker fills
+    /// every declared token whether the file wrote it or not, so a
+    /// resolved theme cannot tell a key the master declares from a key the
+    /// schema invented. The count is a fact about the document.
+    #[test]
+    fn the_catalogue_is_closed_and_counted() {
+        /// The eight keys §5.22 says EVERY entry carries.
+        const SHAPE: [&str; 8] = [
+            "duration_ms",
+            "period_ms",
+            "amplitude",
+            "floor",
+            "duty",
+            "easing",
+            "easing_p",
+            "enabled",
+        ];
+        /// The one entry that carries more, and exactly what more.
+        const RIDE_EXTRAS: [&str; 6] = [
+            "perspective",
+            "gesture_frac",
+            "rubber_gain",
+            "rubber_max",
+            "epsilon",
+            "void",
+        ];
+        /// `[motion]` itself: the two globals, which are not an effect.
+        const GLOBALS: [&str; 2] = ["scale", "idle_cap"];
+
+        let mut section = String::new();
+        let mut seen: Vec<(String, Vec<String>)> = Vec::new();
+        for line in crate::theme::master_source().lines() {
+            let s = line.trim();
+            if let Some(rest) = s.strip_prefix('[') {
+                section = rest.split(']').next().unwrap_or_default().to_string();
+                if section == "motion" || section.starts_with("motion.") {
+                    seen.push((section.clone(), Vec::new()));
+                }
+                continue;
+            }
+            if s.starts_with('#') || !s.contains('=') {
+                continue;
+            }
+            if section == "motion" || section.starts_with("motion.") {
+                let key = s.split('=').next().unwrap_or_default().trim().to_string();
+                seen.last_mut().expect("a key outside every section").1.push(key);
+            }
+        }
+
+        let globals = seen.iter().find(|(s, _)| s == "motion").expect("[motion] itself");
+        assert_eq!(globals.1, GLOBALS, "the two globals are scale and idle_cap");
+        let effects: Vec<_> = seen.iter().filter(|(s, _)| s != "motion").collect();
+        assert_eq!(effects.len(), 18, "the catalogue is CLOSED at eighteen effects");
+
+        for (name, keys) in &effects {
+            let id = name.strip_prefix("motion.").expect("an effect is motion.<id>");
+            let mut want: Vec<&str> = SHAPE.to_vec();
+            if id == "board_ride" {
+                want.extend(RIDE_EXTRAS);
+            }
+            assert_eq!(
+                keys.iter().map(String::as_str).collect::<Vec<_>>(),
+                want,
+                "motion.{id} does not carry §5.22's keys, in §5.22's order"
+            );
+        }
+
+        let total: usize = seen.iter().map(|(_, k)| k.len()).sum();
+        assert_eq!(
+            total,
+            18 * 8 + RIDE_EXTRAS.len() + GLOBALS.len(),
+            "the catalogue's key count moved; §5.22's header says 152"
+        );
+        assert_eq!(total, 152, "and 152 is the number the header prints");
+        assert!(
+            crate::theme::master_source().contains("+ 2 globals = 152"),
+            "the header's arithmetic no longer matches the body it describes"
+        );
+    }
+
     /// Retargeting mid-flight does not move the sampled value at the
     /// moment of the retarget — the pure-arithmetic half of the contract
     /// (the themed half runs in `tests/motion_effects.rs`, where the

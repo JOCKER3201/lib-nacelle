@@ -109,6 +109,19 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// (§1.1(8), §5.0b), and it is the schema (see the module docs).
 const DEFAULT_THEME: &str = include_str!("default.theme");
 
+/// The master's own text, for the tests that read it as a DOCUMENT rather
+/// than through the engine.
+///
+/// A resolved theme cannot answer "how many keys does §5.22 declare": the
+/// baker fills every declared token whether the file wrote it or not, and
+/// a section's own arithmetic is a fact about the FILE. The one reader is
+/// `motion::tests::the_catalogue_is_closed_and_counted`, which is what
+/// keeps §5.22's header count and §5.22's body from parting again.
+#[cfg(test)]
+pub(crate) fn master_source() -> &'static str {
+    DEFAULT_THEME
+}
+
 // --------------------------------------------------------------- diagnostics
 
 /// Everything about a loaded theme that is a **string**, published as its own
