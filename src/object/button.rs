@@ -6,6 +6,7 @@ use super::focus_ring;
 use crate::focus::{Caps, FocusId};
 use crate::draw::Corner;
 use crate::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
+use crate::motion;
 use crate::ui;
 use crate::view::surface::StateInk;
 use crate::{Ctx, Rect};
@@ -190,6 +191,116 @@ pub fn draw_focusable(ctx: &mut Ctx, r: Rect, label: &str, st: ButtonState, id: 
     // `motion.focus`, and a call made only while focused would have
     // nothing left on screen to fade away.
     focus_ring::draw_quad_faded(ctx, quad(&r), f.map_or(false, |f| f.ring));
+}
+
+// ------------------------------------------------------- hold to confirm
+
+/// A button that must be HELD, not clicked — `motion.hold`'s reader, and
+/// the shape image 5's SYSTEM LOCKDOWN wants.
+///
+/// `down` is the caller's answer to "is the pointer (or the keyboard's
+/// activation) still on this control", asked EVERY frame: releasing it is
+/// what cancels, and a hold is not resumable. The answer is true on the
+/// one frame the ramp completes, so the caller acts on it exactly once.
+///
+/// # What it draws, and why it needs no token of its own
+///
+/// The plate is the button's own [`dress`] in the state the caller asked
+/// for, and the readout is the class's PRESS ring swept round the same
+/// outline, one arc-length at a time. The two rungs are the ones the theme
+/// already distinguishes — `[state] press.edge` against whatever the
+/// control is resting on — so a control that is half-held is drawn half in
+/// the colour of a held control, which is the statement being made. There
+/// is no `hold.*` anything: the closed catalogue's `motion.hold` owns the
+/// TIME and `[state]` owns the LOOK, which is where each of them lives for
+/// every other control in this file.
+///
+/// A theme whose press rung has no ring — `press.edge_width` at zero, or a
+/// transparent `press.edge` — draws no readout, exactly as [`dress`] draws
+/// no ring in that case. That is the house rule about fallbacks, applied
+/// to a control that would otherwise be the one place with a hard-coded
+/// colour in it.
+///
+/// WHERE the sweep starts is layout, not theme (§5.22's own line): it
+/// begins at the outline's top-left and runs clockwise, because that is
+/// where [`crate::draw::ring_points`] starts and a ring has to start
+/// somewhere.
+pub fn draw_hold(ctx: &mut Ctx, r: Rect, label: &str, st: ButtonState, id: &str, down: bool) -> bool {
+    static CLASS: OnceLock<Option<u16>> = OnceLock::new();
+    // A control being held IS pressed. Forcing it here rather than asking
+    // the caller keeps the two from disagreeing: a button under a finger
+    // that does not look pressed is wrong however it got that way.
+    let held = motion::hold(id, r, down, ctx.t);
+    draw(ctx, r, label, ButtonState { flash: st.flash || down, ..st });
+    if held.progress <= 0.0 {
+        return held.fired;
+    }
+    let t = theme::resolved();
+    let cls = *CLASS.get_or_init(|| theme::class_id("button"));
+    let press: StateStyle = match cls {
+        Some(c) => t.class_state(c, State::Press),
+        None => StateStyle::RAW,
+    };
+    let width = press.edge_width.max(0.0);
+    let ink = col(press.edge);
+    if width > 0.0 && ink.a > 0.0 {
+        let (corners, seg) = corners(t);
+        let mut path = Vec::new();
+        // The stroke is centred on its path, so the path is the ring's own
+        // centreline — half a width inside the box, which is where the
+        // solid ring `dress` drew has its middle. Otherwise the readout
+        // sits a hair outside the ring it is filling in.
+        let h = width * 0.5;
+        let c = Rect::new(r.x + h, r.y + h, (r.w - width).max(0.0), (r.h - width).max(0.0));
+        crate::draw::ring_points(c, &[corners[0].inset(h); 4], seg, &mut path);
+        if let Some(swept) = prefix(&path, held.progress) {
+            ctx.dl.polyline(&swept, width, ink, false);
+        }
+    }
+    held.fired
+}
+
+/// The first `f` of a closed outline's LENGTH, as an open polyline.
+///
+/// By arc length rather than by point count: a rounded corner is a dozen
+/// short segments and a side is one long one, so a readout stepped by
+/// index would race round the corners and crawl along the edges — the ramp
+/// would be linear in time and visibly not linear on screen.
+///
+/// The outline is closed, so the return leg back to the first point is
+/// part of the length; `None` for a degenerate box with no perimeter.
+fn prefix(path: &[[f32; 2]], f: f32) -> Option<Vec<[f32; 2]>> {
+    if path.len() < 2 {
+        return None;
+    }
+    let leg = |a: [f32; 2], b: [f32; 2]| ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+    let total: f32 = path
+        .iter()
+        .zip(path.iter().cycle().skip(1))
+        .take(path.len())
+        .map(|(a, b)| leg(*a, *b))
+        .sum();
+    if !(total > 0.0) {
+        return None;
+    }
+    let mut budget = total * f.clamp(0.0, 1.0);
+    let mut out = vec![path[0]];
+    for i in 0..path.len() {
+        let (a, b) = (path[i], path[(i + 1) % path.len()]);
+        let d = leg(a, b);
+        if d <= 0.0 {
+            continue;
+        }
+        if budget >= d {
+            budget -= d;
+            out.push(b);
+            continue;
+        }
+        let k = budget / d;
+        out.push([a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k]);
+        break;
+    }
+    Some(out)
 }
 
 // ---------------------------------------------------------------------

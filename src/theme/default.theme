@@ -3803,12 +3803,12 @@ enabled     = true                    # run this effect at all; -; bool; a rigid
 
 # ---- hold · hold-to-confirm, today's HOLD_SECS ---------------------------
 [motion.hold]
-duration_ms = 5000ms                  # how long a destructive control must be held; image 5's SYSTEM LOCKDOWN; ms, 1500ms .. 8000ms; clamped to that range
+duration_ms = 5000ms                  # how long a destructive control must be held; image 5's SYSTEM LOCKDOWN; ms, 1500ms .. 8000ms; clamped to that range — object/button.rs draw_hold through motion::hold, which runs it on UNSCALED wall time: this ramp is the interlock, and motion.scale = 0 must not make it a click
 period_ms   = 0ms                     # unused - one-shot ramp; -; ms; -
 amplitude   = 0.00                    # unused outside cyclic effects; -; 0..1; -
 floor       = 0.00                    # unused outside step easing; -; 0..1; -
 duty        = 0.00                    # unused outside step easing; -; 0..1; -
-easing      = linear                  # curve · - · enum: linear | ease_out | ease_in | ease_in_out | sine | step | custom · linear because the ring IS the progress readout
+easing      = linear                  # curve · - · enum: linear | ease_out | ease_in | ease_in_out | sine | step | custom · linear because the ring IS the progress readout — and NOT honoured: motion::hold runs linear whatever the word says, because `step` with duty 0 and an overshooting `custom` both reach 1.0 early, and this number is the interlock
 easing_p    = [0.25, 0.10, 0.25, 1.00] # bezier points for easing = custom; -; 4 x f; TODO(default): chosen here, spec silent
 enabled     = true                    # run this effect at all; -; bool; setting false makes the control fire immediately - a safety decision
 

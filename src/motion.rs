@@ -870,6 +870,11 @@ const SWEEP_FLOOR: usize = 2048;
 struct Fades {
     tracks: HashMap<Key, Track>,
     gates: HashMap<Key, Gate>,
+    /// The hold-to-confirm ramps ([`hold`]). A third map rather than a
+    /// third field on `Gate`: a hold is not a fade — it does not retarget,
+    /// it does not obey `motion.scale`, and it answers an EVENT as well as
+    /// a value.
+    holds: HashMap<Key, Hold>,
     swept: f64,
     /// The size at which the next sweep is forced whatever the clock
     /// says. Raised to twice what SURVIVED the last sweep, so a map that
@@ -888,6 +893,7 @@ impl Fades {
         Fades {
             tracks: HashMap::new(),
             gates: HashMap::new(),
+            holds: HashMap::new(),
             swept: f64::NEG_INFINITY,
             sweep_at: SWEEP_FLOOR,
             until: f64::NEG_INFINITY,
@@ -926,14 +932,20 @@ impl Fades {
     /// stops charging by the frame.
     fn sweep(&mut self, now: f64) {
         let by_clock = now - self.swept >= KEEP_SECS;
-        if !by_clock && self.tracks.len() + self.gates.len() < self.sweep_at {
+        if !by_clock && self.live() < self.sweep_at {
             return;
         }
         self.tracks.retain(|_, t| now - t.seen < KEEP_SECS);
         self.gates.retain(|_, g| now - g.seen < KEEP_SECS);
+        self.holds.retain(|_, h| now - h.seen < KEEP_SECS);
         self.swept = now;
-        let live = self.tracks.len() + self.gates.len();
+        let live = self.live();
         self.sweep_at = live.saturating_mul(2).max(SWEEP_FLOOR);
+    }
+
+    /// Everything the registry is keeping, across all three maps.
+    fn live(&self) -> usize {
+        self.tracks.len() + self.gates.len() + self.holds.len()
     }
 }
 
@@ -1173,6 +1185,140 @@ pub fn gate(name: &str, r: Rect, on: bool, effect: &'static str, now: f64) -> f3
     })
 }
 
+// -------------------------------------------------------------- the hold
+
+/// Where a hold-to-confirm control stands, and whether this is the ask
+/// that completed it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Held {
+    /// How far round the ramp is, 0..1. 0 whenever the control is not
+    /// being held: a hold is not resumable, which is the whole of its
+    /// safety argument.
+    pub progress: f32,
+    /// True on the ask that first reaches 1.0, and on any further ask at
+    /// that same `now` — one frame asked twice is one event, not two.
+    /// False again from the next frame on, until the control is released
+    /// and held afresh.
+    pub fired: bool,
+}
+
+/// One tracked hold.
+struct Hold {
+    /// When the current press began; `NEG_INFINITY` while nothing is held.
+    since: f64,
+    /// The `now` at which this press completed, if it has.
+    fired_at: Option<f64>,
+    seen: f64,
+}
+
+/// The ramp of a HOLD-TO-CONFIRM control: `motion.hold`'s `duration_ms`,
+/// clamped to §5.22's own 1500..8000 ms, run from the moment `down`
+/// became true.
+///
+/// # THIS ONE IGNORES `motion.scale`, AND MUST
+///
+/// Every other reader in this module treats `motion.scale <= 0` as "jump
+/// to the end state", which is right for a fade: reduced motion removes
+/// the travel, not the destination. Here the travel IS the safeguard.
+/// `motion.hold` is what stands between a click and image 5's SYSTEM
+/// LOCKDOWN, and a control that jumps to its end state fires that on the
+/// first frame the button is down — one click, no hold, for the user who
+/// asked for less animation. The most safety-critical control in the
+/// program would be least safe for the person most likely to need it.
+///
+/// So the hold runs on unscaled wall time. Written here, once, with the
+/// reason attached, because the next reader who notices the missing
+/// `motion_scale()` call will otherwise "fix" it.
+///
+/// # And the curve is LINEAR by contract
+///
+/// `motion.hold.easing` is `linear` in the master, and its comment says
+/// why: the ring IS the progress readout. The curve is not honoured here
+/// even so, and a theme that writes another word is told once. Two
+/// reasons, and only the first is cosmetic: an eased ring lies about how
+/// much longer the finger must stay down; and this number is also the
+/// interlock, so `step` with a zero duty reaches 1.0 on the first frame
+/// and `custom` with an overshoot reaches it early. A safety threshold is
+/// not a place to let a theme file be creative. `enabled = false` remains
+/// the ONE way a theme may make the control immediate, because the master
+/// declares that plainly as a safety decision rather than a curve.
+///
+/// # Ask every frame
+///
+/// Like everything else in this registry, a key that stops being asked
+/// about is reclaimed after [`KEEP_SECS`] — that is what "the control left
+/// the screen" looks like from in here. For a hold that is a
+/// CANCELLATION, and it is the safe way round: a control that vanished for
+/// half a second and came back is a control the user has lost sight of,
+/// and it starts again from nothing.
+pub fn hold(name: &str, r: Rect, down: bool, now: f64) -> Held {
+    let e = Effect::of("hold");
+    let t = theme::resolved();
+    with_theme_word(e.easing, |w| {
+        if w != "linear" && !w.is_empty() {
+            warn_once(
+                "motion-hold-easing",
+                &format!(
+                    "motion.hold.easing = {w} — a hold runs linear whatever the theme says: \
+                     the ramp is a progress readout AND the interlock (5.22)"
+                ),
+            );
+        }
+    });
+    // The master's own range, stated at the key. A theme outside it is
+    // brought back rather than refused: the control still works, and the
+    // bound is what makes "1500 ms at least" true however the file reads.
+    let dur_ms = if t.flag(e.enabled) { t.px(e.duration_ms).clamp(1500.0, 8000.0) } else { 0.0 };
+
+    FADES.with(|cell| {
+        let mut f = cell.borrow_mut();
+        f.sweep(now);
+        let key = key_of(name, r);
+        let fades = &mut *f;
+        // Born NOT holding, whatever `down` says. A control that appears
+        // under a finger already on the button starts its hold now — the
+        // born-settled rule's safety-critical twin, and the reason a
+        // window opening under the pointer cannot confirm anything.
+        let h = fades.holds.entry(key).or_insert(Hold {
+            since: f64::NEG_INFINITY,
+            fired_at: None,
+            seen: now,
+        });
+        if !down {
+            h.since = f64::NEG_INFINITY;
+            h.fired_at = None;
+            h.seen = now;
+            return Held { progress: 0.0, fired: false };
+        }
+        if h.since == f64::NEG_INFINITY {
+            h.since = now;
+            h.fired_at = None;
+        }
+        h.seen = now;
+        let progress = if dur_ms <= 0.0 {
+            // `enabled = false`: the master's documented immediate fire.
+            1.0
+        } else {
+            (((now - h.since) * 1000.0 / dur_ms as f64).clamp(0.0, 1.0)) as f32
+        };
+        let fired = progress >= 1.0
+            && match h.fired_at {
+                None => {
+                    h.fired_at = Some(now);
+                    true
+                }
+                Some(t0) => t0 == now,
+            };
+        // A ramp in flight is a frame owed, exactly like a fade: this is
+        // the ONE place in the module that asks for redraws on a clock the
+        // theme's scale cannot switch off.
+        if progress < 1.0 {
+            fades.until = fades.until.max(now + dur_ms as f64 / 1000.0);
+        }
+        Held { progress, fired }
+    })
+}
+
 // ------------------------------------------------------------ the host's two
 
 /// Whether any fade started so far will still be moving at `now` — "the
@@ -1209,10 +1355,7 @@ pub fn pending(now: f64) -> bool {
 /// a control which left the screen leaves nothing behind. Not a number
 /// any drawing code has business reading.
 pub fn tracked() -> usize {
-    FADES.with(|cell| {
-        let f = cell.borrow();
-        f.tracks.len() + f.gates.len()
-    })
+    FADES.with(|cell| cell.borrow().live())
 }
 
 /// Forgets every fade in flight, as if nothing had been drawn yet.
