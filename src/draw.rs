@@ -1343,6 +1343,36 @@ impl DrawList {
     }
 
     /// Arbitrary quadrilateral (vertices along the perimeter).
+    ///
+    /// **K4 leaves this hard, and the census is the argument** (f3 §3.2,
+    /// counted across libnacelle, nacelle-desktop and nacelle-addons on
+    /// 2026-08-17). A filled polygon is not in the vector family: its
+    /// silhouette is a LIST OF POINTS, not a formula, so the field
+    /// cannot draw it and §3.2's answer is a different mechanism
+    /// altogether — a one-pixel `fringe()` band along the true boundary,
+    /// alpha 1 inside and 0 out, Gouraud-interpolated by the rasteriser.
+    /// That mechanism was not built, and these are the reasons:
+    ///
+    /// * **The live callers are TRAPEZOIDS**, which no affine frame can
+    ///   reach: `winframe.rs:415` (the title band's 45° shoulders) and
+    ///   `:432` (the body below it). A parallelogram would have been
+    ///   free — an affine image of a box is still a box read in oblique
+    ///   axes, and [`crate::sdf::Frame`] already carries one — but a
+    ///   trapezoid's two ends are not parallel and there is no such map.
+    /// * **The parallelogram callers are switched OFF in the shipped
+    ///   theme**: `tabs.rs:351` and `focus_ring.rs:139` draw one only
+    ///   when `tab.skew` or `button.skew` is a length, and the master
+    ///   sets both to `0u` (`default.theme:4401`, `:4602`) — a slanted
+    ///   control is a theme's choice and nobody's default.
+    /// * **The remaining caller is the ABI tunnel** (`plugin.rs:99`),
+    ///   where the toolkit cannot know what the polygon means.
+    ///
+    /// So the shape that would pay for a fringe is drawn by nobody, and
+    /// the shape that is drawn cannot use one. The mechanism waits for
+    /// a caller that needs it — and when it comes, the parallelogram is
+    /// the cheap half and the trapezoid the one that needs the band.
+    /// Meanwhile the OUTLINE of a slanted control is already smooth:
+    /// `polyline` strokes it, and every diagonal arm of it is a shape.
     pub fn quad(&mut self, p: [[f32; 2]; 4], color: Color) {
         self.cmd(|| DrawCmd::Quad { p, color });
         self.quad_verts(p, color);
@@ -2515,6 +2545,17 @@ impl DrawList {
     /// CLOSED — rim[k−1] joins rim[0]: hexagons, reticles, radial washes
     /// (r1 §6.3, 3·k verts). An open wedge is quad_c's job; closing is what
     /// makes a k-gon k triangles. Fewer than 3 rim points draw nothing.
+    ///
+    /// **Nothing calls this.** f3 §3.2 planned a `fringe()` for the fan,
+    /// `quad_c` and `rect_grad`; K4's census (2026-08-17, grep across
+    /// libnacelle, nacelle-desktop, nacelle-addons and nacelle-ai) found
+    /// ZERO production callers of all three — the only mentions outside
+    /// this file's own tests are the command register's formatting and
+    /// this documentation. A silhouette nobody draws cannot be graded
+    /// against anything, so K4 leaves the three of them exactly as they
+    /// are rather than antialiasing a picture that is not on screen.
+    /// The hexagon a reticle would want has a home already: it is
+    /// `ShapeKind::Hex`, waiting on K6.
     pub fn fan_c(&mut self, centre: [f32; 2], rim: &[[f32; 2]], c_centre: Color, c_rim: &[Color]) {
         self.cmd(|| DrawCmd::FanC {
             centre,
