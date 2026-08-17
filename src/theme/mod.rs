@@ -2009,20 +2009,37 @@ decor.enabled    = false
     }
 
     /// ŻYCZENIE 1. The settings window's three columns are three SHADES of
-    /// one colour, and no new colour was invented to get them: the three
-    /// tokens point at three rungs of the surface ladder, which is already
-    /// one hue at six lightnesses.
+    /// one colour, and no new colour was invented to get them: the bands
+    /// point at three rungs of the surface ladder, which is already one hue
+    /// at six lightnesses.
     ///
-    /// The folded case is in the same claim: `settings.page_fill` is the
-    /// rung the window body itself stands on, so a window with no columns
-    /// paints its own bed over itself and there is nothing to stripe.
+    /// THREE BANDS, TWO NAMES. The page's rung is not named in `[settings]`
+    /// and must not be: the page's bed IS the window body, `panel.fill`,
+    /// which `window::frame` lays over that whole area. A third name
+    /// pointed at the same rung could only be painted as a SECOND coat, and
+    /// the rung is translucent — so the third rung this measures is
+    /// `component.panel.fill`, which is what the window really shows where
+    /// the page is.
+    ///
+    /// The folded case is in the same claim: with no columns there is
+    /// nothing to stripe, and the interior is the body — the rung the page
+    /// was on all along.
     #[test]
     fn the_three_settings_bands_are_three_shades_of_one_hue() {
         let (schema, _, t) = baked("");
         let band = |n: &str| lch(t.color(schema.id(n).expect(n)));
         let rail = band("component.settings.rail_fill");
         let sub = band("component.settings.sub_fill");
-        let page = band("component.settings.page_fill");
+        let page = band("component.panel.fill");
+
+        // FAIL-CLOSED ON THE NAME. A `settings.page_fill` back in the
+        // master would be a token no reader honours — a theme could move
+        // it and see nothing move — because the only reader available to
+        // it is a second coat over the body it duplicates.
+        assert!(
+            schema.id("component.settings.page_fill").is_none(),
+            "the page's bed was named a second time; the body's `panel.fill` is it"
+        );
 
         // ONE HUE — the three sit on @surface.hue, which is @hue.accent.
         let accent = lch(t.color(schema.id("palette.accent").unwrap()));
@@ -2042,17 +2059,20 @@ decor.enabled    = false
         assert!(a > 0.03 && b > 0.03, "two bands too close to tell apart: {a} and {b}");
         assert!((a - b).abs() < 0.02, "the ladder is uneven: {a} then {b}");
 
-        // The page keeps the window body's own rung, which is what makes a
-        // FOLDED window (no columns, one bed) look exactly as it does now.
-        let body = lch(t.color(schema.id("component.panel.fill").unwrap()));
-        assert!((page.l - body.l).abs() < 1e-4 && hue_gap(page.h, body.h) < 0.5);
+        // THE TOP RUNG IS TRANSLUCENT, which is the whole reason the page
+        // is not bedded a second time: two coats of it are not one coat.
+        let raw = t.color(schema.id("component.panel.fill").unwrap());
+        assert!(raw.a < 1.0, "the body's rung went opaque; a second coat would be free");
 
         // And a theme moves them: the seed alone re-skins all three...
         let (s2, _, t2) = baked("[palette]\naccent = #FF2A35\n");
         let red = ThemeColor::from_hex("#FF2A35").unwrap().to_linear().to_oklch().h;
-        for n in ["rail", "sub", "page"] {
-            let name = format!("component.settings.{n}_fill");
-            let c = lch(t2.color(s2.id(&name).unwrap()));
+        for name in [
+            "component.settings.rail_fill",
+            "component.settings.sub_fill",
+            "component.panel.fill",
+        ] {
+            let c = lch(t2.color(s2.id(name).unwrap()));
             assert!(hue_gap(c.h, red) < 3.0, "{name} did not follow the seed: {}", c.h);
         }
         // ...and one band can be re-pointed on its own, which is the whole
@@ -2062,6 +2082,21 @@ decor.enabled    = false
         let one = lch(t3.color(s3.id("component.settings.rail_fill").unwrap()));
         let other = lch(t3.color(s3.id("component.settings.sub_fill").unwrap()));
         assert!(one.l > other.l, "the theme could not lift one band alone");
+
+        // THE PAGE'S BAND MOVES ALONE TOO — through the token that IS the
+        // page's bed. Nothing is lost by not naming it twice: an author
+        // re-shades the page by re-shading the body it is a part of, and
+        // the two columns stay exactly where this theme left them.
+        let (s4, _, t4) = baked("[component]\npanel.fill = @surface.void\n");
+        let moved = lch(t4.color(s4.id("component.panel.fill").unwrap()));
+        let void = lch(t4.color(s4.id("surface.void").unwrap()));
+        assert!((moved.l - void.l).abs() < 1e-4, "the page's bed did not follow panel.fill");
+        for (name, was) in
+            [("component.settings.rail_fill", rail), ("component.settings.sub_fill", sub)]
+        {
+            let now = lch(t4.color(s4.id(name).unwrap()));
+            assert!((now.l - was.l).abs() < 1e-4, "{name} moved with the body it is beside");
+        }
     }
 
     /// ŻYCZENIE 2b, MEASURED. After BASIC's HUE slider has moved, a column's
