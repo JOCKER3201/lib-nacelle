@@ -1875,7 +1875,7 @@ reflect.fade         = 2.0                    # exponent of the reflection's alp
 # -------------------------------------------------------------------------
 [elev.fixture]
 # glass — two quads; skipped entirely while rank is 0
-glass.rank           = 0                      # frost rank of the fixture sheet: 0 emits no blur() run at all · - · n, 0..3 (softness rank, NOT a mip index) · no derivation — raise to 1..3 for a family-B glass sheet; clamped by Gfx::glass_ranks()
+glass.rank           = 1                      # frost rank of the fixture sheet: 0 emits no blur() run at all, and lays `fill` instead · - · n, 0..3 (softness rank, NOT a mip index) · 1 and not 0 because the shipped fixture IS frosted: until 2026-08-17 deco::fixture_glass blurred whatever this key said, so the key said one thing and the screen showed another. The key decides now, and it has to say what the picture already showed. On this path 1..3 are one picture — a full-screen sheet takes the flat blur() run, whose softness is the renderer's single blur target, while the pyramid's three ranks are glass_fill's; clamped by Gfx::glass_ranks()
 glass.tint           = #FFFFFF / 1.0          # multiply tint of the blur quad; its alpha is the frost coverage · 7,8,10 · colour, straight alpha 0..1 · no derivation — white at 1.0 is an identity multiply
 glass.wash           = none                   # alpha-over wash on the frost; the theme's own light · 7,8,10 · colour or none · none = the second quad is not drawn; user BlurOpacity scales this alpha
 # body, shape

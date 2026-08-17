@@ -72,15 +72,61 @@ pub fn ride_void() -> Color {
     col(theme::resolved().bed(tok(&VOID, "motion.board_ride.void")))
 }
 
-/// A fixture's face: frosted glass over whatever sits beneath, plus
-/// the theme's own wash. `wash_scale` is the USER's opacity setting —
-/// a multiplier on the wash's alpha, nothing else (the BlurOpacity
+/// A fixture's face: the sheet `[elev.fixture]` asks for, over whatever
+/// sits beneath. `wash_scale` is the USER's opacity setting — a
+/// multiplier on the wash's alpha, nothing else (the BlurOpacity
 /// slider's contract). The glass is sampled by screen position, so a
 /// ride may carry the quad and the frost stays put.
 pub fn fixture_glass(dl: &mut DrawList, w: f32, h: f32, wash_scale: f32) {
+    fixture_glass_in(dl, theme::resolved(), w, h, wash_scale);
+}
+
+/// [`fixture_glass`] with the theme in hand.
+///
+/// Split for the same reason `elev::Level::draw_in` is: a face drawn
+/// from a theme that is not the published one is the only way this
+/// picture can be put under test at all, without a test reaching into
+/// the process-wide theme every other test is reading at the same time.
+///
+/// THE RANK DECIDES WHETHER THERE IS GLASS. `elev.fixture.glass.rank`
+/// says so in the master's own words — "0 emits no blur() run at all",
+/// and at `fill`, "used INSTEAD of the glass pair while rank = 0" — and
+/// until 2026-08-17 this function blurred whatever the key said, which
+/// left BOTH those keys dead: a theme could not turn the frost off, and
+/// the sheet the master describes (`alpha(@surface.base, 0.92)`,
+/// legible with no offscreen pass) could never be drawn. The master's
+/// rank moved 0 -> 1 on the same day, so the shipped picture is
+/// unchanged and the file now states what it was already showing.
+///
+/// Ranks 1..3 are ONE picture on this path, and that is a gap rather
+/// than a design: the fixture is a full-screen sheet and takes the flat
+/// `blur()` run, whose softness is the renderer's single blur target,
+/// while the pyramid's three ranks are `glass_fill`'s. Moving the
+/// fixture onto `glass_fill` would also put it on the rung's `corner`
+/// and `radius` — rounded screen corners — and that is a change to the
+/// picture, which belongs to the owner and not to this line.
+pub(crate) fn fixture_glass_in(
+    dl: &mut DrawList,
+    t: &theme::ResolvedTheme,
+    w: f32,
+    h: f32,
+    wash_scale: f32,
+) {
+    static RANK: OnceLock<TokenId> = OnceLock::new();
+    static FILL: OnceLock<TokenId> = OnceLock::new();
     static TINT: OnceLock<TokenId> = OnceLock::new();
     static WASH: OnceLock<TokenId> = OnceLock::new();
-    let t = theme::resolved();
+    if t.px(tok(&RANK, "elev.fixture.glass.rank")).clamp(0.0, 3.0) <= 0.0 {
+        // The bed the rung names, read as a BED, and drawn only when
+        // there is something in it: a rung whose `fill` is `none` draws
+        // nothing, which is the raw look the governing principle asks
+        // for and the same guard every other rung is under.
+        let fill = col(t.bed(tok(&FILL, "elev.fixture.fill")));
+        if fill.a > 0.0 {
+            dl.rect(0.0, 0.0, w, h, fill);
+        }
+        return;
+    }
     dl.blur(0.0, 0.0, w, h, col(t.color(tok(&TINT, "elev.fixture.glass.tint"))));
     let wash = t.color(tok(&WASH, "elev.fixture.glass.wash"));
     let a = wash.a * wash_scale;
@@ -106,4 +152,91 @@ pub fn ride_secs() -> f32 {
 /// points finally have their reader.
 pub fn ride_ease(t01: f32) -> f32 {
     crate::motion::Effect::of("board_ride").ease(t01)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::draw::{DrawCmd, DrawList};
+
+    /// A screen, in the only two numbers this function takes.
+    const W: f32 = 1920.0;
+    const H: f32 = 1080.0;
+
+    /// The user's BlurOpacity at rest, so the wash carries the theme's
+    /// own alpha and no other.
+    const FULL: f32 = 1.0;
+
+    fn drawn(theme_text: &str) -> Vec<DrawCmd> {
+        let t = theme::bake_over_master(theme_text);
+        let mut dl = DrawList::recording();
+        fixture_glass_in(&mut dl, &t, W, H, FULL);
+        dl.cmds().to_vec()
+    }
+
+    fn blurs(cmds: &[DrawCmd]) -> usize {
+        cmds.iter().filter(|c| matches!(c, DrawCmd::Blur { .. })).count()
+    }
+
+    /// Z15/Z16's neighbour on the ladder: the rung's rank decides whether
+    /// there is glass. Until 2026-08-17 this function laid a blur run
+    /// whatever the key said, so a theme asking for a plain sheet got
+    /// frost and no word about it.
+    #[test]
+    fn a_rank_of_zero_lays_the_rungs_own_bed_and_no_blur() {
+        let cmds = drawn("[elev.fixture]\nglass.rank = 0\nfill = #FF00FF / 1.0\n");
+        assert_eq!(blurs(&cmds), 0, "rank 0 still blurred: {cmds:?}");
+        let bed = cmds
+            .iter()
+            .find_map(|c| match c {
+                DrawCmd::Rect { color, .. } => Some(*color),
+                _ => None,
+            })
+            .expect("rank 0 draws the rung's fill instead of the glass pair");
+        assert!(
+            bed.r > 0.99 && bed.g < 0.01 && bed.b > 0.99,
+            "the sheet {bed:?} is not elev.fixture.fill"
+        );
+    }
+
+    /// …and a rung whose bed is `none` at rank 0 draws NOTHING, which is
+    /// the raw look the governing principle asks for rather than a
+    /// hairline invented here. A §5.0 sentinel empties the colour slot,
+    /// so this is the same `a > 0.0` guard every other rung is under.
+    #[test]
+    fn a_rank_of_zero_over_an_empty_bed_draws_nothing_at_all() {
+        let cmds = drawn("[elev.fixture]\nglass.rank = 0\nfill = none\n");
+        assert!(cmds.is_empty(), "an empty rung painted something: {cmds:?}");
+    }
+
+    /// The master's own fixture is frosted, and says so since 2026-08-17:
+    /// the rank moved 0 -> 1 the day it gained a reader, so the shipped
+    /// picture did not move — one blur run, exactly as before.
+    #[test]
+    fn the_master_ships_a_frosted_fixture_and_the_key_now_says_so() {
+        let cmds = drawn("");
+        assert_eq!(blurs(&cmds), 1, "the master's fixture stopped frosting: {cmds:?}");
+    }
+
+    /// A raised rank frosts, and the wash rides the USER's opacity on top
+    /// of the theme's own alpha — the BlurOpacity slider's whole
+    /// contract, and the reason the scale is a parameter and not a token.
+    #[test]
+    fn the_users_opacity_scales_the_wash_and_nothing_else() {
+        let theme_text = "[elev.fixture]\nglass.rank = 2\nglass.wash = #FFFFFF / 0.8\n";
+        let t = theme::bake_over_master(theme_text);
+        let alpha_at = |scale: f32| {
+            let mut dl = DrawList::recording();
+            fixture_glass_in(&mut dl, &t, W, H, scale);
+            dl.cmds().iter().find_map(|c| match c {
+                DrawCmd::Rect { color, .. } => Some(color.a),
+                _ => None,
+            })
+        };
+        let full = alpha_at(1.0).expect("a wash with alpha draws its quad");
+        let half = alpha_at(0.5).expect("a wash with alpha draws its quad");
+        assert!((full - 0.8).abs() < 1e-6, "the theme's wash alpha arrived as {full}");
+        assert!((half - 0.4).abs() < 1e-6, "the user's opacity did not scale the wash: {half}");
+        assert_eq!(alpha_at(0.0), None, "an opacity of zero still drew the wash quad");
+    }
 }

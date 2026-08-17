@@ -88,6 +88,19 @@ fn readings(h: f32) -> Vec<String> {
     })
 }
 
+/// Whether a reading was drawn at all.
+///
+/// NOT a count of runs. A reading is a NUMBER and, where the format asks
+/// for one, a UNIT beside it — two runs, because the master gives the unit
+/// its own size, tracking and baseline (`num.unit.*`) and none of that can
+/// be said by appending characters to a string. Counting runs here once
+/// asserted `== 1` and broke the day the unit got the run the master had
+/// always described for it. What this test is about is whether the
+/// threshold DROPPED the readout, so it asks exactly that.
+fn wrote_a_number(runs: &[String]) -> bool {
+    runs.iter().any(|s| s.chars().any(|c| c.is_ascii_digit()))
+}
+
 fn px(name: &str) -> f32 {
     let owned = name.to_string();
     fresh(move || {
@@ -122,12 +135,11 @@ fn a_gauge_at_its_declared_height_keeps_its_reading() {
     // The claim, at the master's own numbers: a gauge drawn at exactly
     // the height the master declares for it draws its number.
     let at_home = readings(body_h);
-    assert_eq!(
-        at_home.len(),
-        1,
+    assert!(
+        wrote_a_number(&at_home),
         "a gauge drawn at `gauge.h` ({body_h} px) dropped its reading — the threshold \
          guarding the readout stands above the body it guards, and `gauge.h` says \
-         which of the two is the ceiling"
+         which of the two is the ceiling. Runs drawn: {at_home:?}"
     );
 
     // And the threshold still works BELOW that height: this is a cap, not
@@ -151,11 +163,11 @@ fn a_gauge_at_its_declared_height_keeps_its_reading() {
     )));
     let body_h = px("gauge.h");
     let greedy = readings(body_h);
-    assert_eq!(
-        greedy.len(),
-        1,
+    assert!(
+        wrote_a_number(&greedy),
         "a theme set `min_h_for_value` above `gauge.h` and the reading vanished from a \
-         gauge drawn at `gauge.h`: the two keys can still be set against each other"
+         gauge drawn at `gauge.h`: the two keys can still be set against each other. \
+         Runs drawn: {greedy:?}"
     );
 
     // And the other way round, which is what keeps `min_h_for_value`
@@ -176,12 +188,11 @@ fn a_gauge_at_its_declared_height_keeps_its_reading() {
          stage asks nothing: threshold {low} px against a body {body_h} px tall"
     );
     let short = readings(low * 1.5);
-    assert_eq!(
-        short.len(),
-        1,
+    assert!(
+        wrote_a_number(&short),
         "a theme lowered `min_h_for_value` to {low} px and a gauge {} px tall — taller \
          than that threshold, shorter than `gauge.h` — dropped its reading anyway: \
-         the threshold is not being read, only the body height",
+         the threshold is not being read, only the body height. Runs drawn: {short:?}",
         low * 1.5
     );
 

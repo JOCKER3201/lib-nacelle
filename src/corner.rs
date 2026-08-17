@@ -123,10 +123,15 @@ pub fn of_code(n: u32) -> CornerStyle {
 /// the same answer it would get for a word nobody declared.
 /// `Debug` alone, and it is derived because a failing assertion prints
 /// the table. A table settled once and read behind a `OnceLock` is never
-/// copied, compared or defaulted; the derives for those were written
-/// against a use that does not exist, and a derive with no reader is the
-/// same claim as a token with no reader.
-#[derive(Debug)]
+/// compared or defaulted; the derives for those were written against a
+/// use that does not exist, and a derive with no reader is the same claim
+/// as a token with no reader.
+///
+/// It IS copied, and by exactly one reader: `elev::Level` keeps the table
+/// beside the token ids it resolved once, so a rung answers the corner
+/// word without walking the vocabulary per frame. That reader arrived with
+/// the elevation ladder, after the derives were pruned here.
+#[derive(Debug, Clone, Copy)]
 pub struct Cuts([Option<u16>; WORDS.len()]);
 
 impl Cuts {
