@@ -454,6 +454,58 @@ pub(crate) mod tests {
         ring_cmd(&dl)
     }
 
+    /// **A frosted rung is one record, drawn by the rung itself.**
+    ///
+    /// `draw.rs` proves the weld on the three calls in isolation; this
+    /// proves that the three calls `Level::draw_in` actually makes are
+    /// those three, in that order, with nothing in between — which is a
+    /// property of THIS file and can drift out of true here without a
+    /// line of the toolkit's drawing code changing. It is also the
+    /// shape of the defect K3b was gated on: the theme editor's
+    /// BACKGROUND section writes exactly these three keys, and FROSTED
+    /// is what raises the rank above zero.
+    #[test]
+    fn a_frosted_rung_welds_its_wash_and_its_ring_into_one_record() {
+        let t = theme::bake_over_master(
+            "[elev.popover]\n\
+             glass.rank = 2\n\
+             glass.tint = #88AACC / 0.6\n\
+             glass.wash = #102030 / 0.25\n",
+        );
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        popover().draw_in(&mut dl, &t, box_(), box_(), AT_REST);
+        assert_eq!(dl.shape_len(), 1, "the rung wrote more than one silhouette");
+        let rec = dl.shapes()[0];
+        use crate::draw::Shape;
+        assert_eq!(rec.flags & Shape::FILL, Shape::FILL, "the wash did not weld");
+        assert_eq!(rec.flags & Shape::STROKE, Shape::STROKE, "the ring did not weld");
+        assert_eq!(
+            rec.tint,
+            col(t.color(theme::id("elev.popover.glass.tint").unwrap())).to_array()
+        );
+        // The frost's core keeps the TINT and the quads above it carry
+        // the wash: a weld that started one quad too early would have
+        // washed the frost out of its own surface, and the rung would
+        // still draw, still weld, still be one record.
+        let wash = col(t.color(theme::id("elev.popover.glass.wash").unwrap())).to_array();
+        assert!(dl.verts[..6].iter().all(|v| v.color == rec.tint), "the core lost its tint");
+        assert!(dl.verts[6..].iter().all(|v| v.color == wash), "the wash did not land");
+        // The core is still the tessellated glass lane; the band is the
+        // field's. Both, and nothing on the plain shape lane, which
+        // reads no blurred target at all.
+        let lanes: Vec<_> = dl.runs.iter().filter_map(|r| r.image).collect();
+        assert!(lanes.contains(&crate::draw::GLASS_RANK_2), "{lanes:?}");
+        assert!(lanes.contains(&crate::draw::SHAPE_GLASS_2), "{lanes:?}");
+        assert!(!lanes.contains(&crate::draw::SHAPE), "{lanes:?}");
+        // And off the lane the rung draws what it always drew: fans,
+        // no records at all.
+        let mut old = DrawList::new();
+        popover().draw_in(&mut old, &t, box_(), box_(), AT_REST);
+        assert_eq!(old.shape_len(), 0);
+        assert!(old.runs.iter().all(|r| r.image != Some(crate::draw::SHAPE_GLASS_2)));
+    }
+
     /// The declaration this whole path stood on, and stood on badly until
     /// 2026-08-17: `edge.mode`'s vocabulary is the master's `enum:` list,
     /// not the words a theme happens to have used. Without the list the
