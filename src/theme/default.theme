@@ -5257,6 +5257,39 @@ editor.proxy_fill = alpha(@accent.primary, 0.08) # a widget proxy's body while e
 editor.hold_fill = alpha(@accent.primary, 0.25)  # the hold-to-place progress wash sweeping an ADD WIDGET entry · - · col · editor.rs:832; neither hover nor press — state.press.fill at 0.45 would swamp the live miniature underneath
 nameplate.fill = alpha(@surface.raised, 0.90)    # the plate behind a floating name label · images 1,7 · col · @surface.raised at 0.90
 
+# ---------------------------------------------------------------- settings bands
+# THREE BANDS, ONE HUE, THREE SHADES (owner, 2026-08-17). The settings
+# window stands in three columns — the section rail, the sub-page column
+# beside it, and the page — and each is to read as a different SHADE of the
+# same colour, never a different colour.
+#
+# NOTHING NEW IS INVENTED FOR IT. The surface ladder (5.5) already IS one
+# hue at six lightnesses, all six sitting on @surface.hue, so a band is
+# NAMED here and pointed at a rung. The naming is the whole of the work:
+# reaching for `surface.base` from Rust would weld the settings columns to
+# the desktop field, and no theme could ever separate them again — which is
+# the rule this section opens with (5.26).
+#
+# WHICH RUNGS, AND WHY THOSE. L 0.115 / 0.178 / 0.232, two steps of about
+# 0.06 in OKLab L — wide enough to see across a whole column, and the same
+# size, so the three read as one ladder and not as an accident. The page
+# keeps the rung the window BODY already stands on (@surface.panel, through
+# elev.window.fill), which is what every control on it was drawn against: a
+# field stays recessed under it (@surface.sunken, 0.152), a badge or an icon
+# plate stays lifted over it (@surface.inset, 0.283) and a drop-down still
+# floats clear of both (@surface.raised, 0.330). Move page_fill off that
+# rung and those three relationships all have to be re-argued.
+#
+# WHEN THE WINDOW FOLDS — content narrower than settings.col_min_w — there
+# are no columns: the rail's rows become the first bands of the one vertical
+# flow. A band's fill is a COLUMN's fill, so a folded window paints
+# page_fill alone over the whole interior; and since that rung IS the body's
+# own, a folded window looks exactly as it does today. No stripes, and no
+# special case in Rust to keep them away.
+settings.rail_fill = @surface.void    # the section rail's bed, the deepest of the three · - · col · @surface.void, the rung the screen itself bottoms out on
+settings.sub_fill = @surface.base     # the sub-page column's bed, one step up · - · col · @surface.base, the rung the desktop field stands on
+settings.page_fill = @surface.panel   # the page's bed, and the whole interior once the window folds · - · col · @surface.panel, the rung elev.window.fill already gives the body
+
 # ---------------------------------------------------------------- toast / terminal chrome
 toast.title = @severity.warning.text    # the WARNING word at the top of a toast · - · col · popup.rs:65 draws it in the chrome accent; the toast says "warning" and [severity] exists for exactly this
 toast.text = @text.primary          # the toast's message body · - · col · popup.rs:75

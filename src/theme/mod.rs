@@ -1950,6 +1950,102 @@ decor.enabled    = false
         assert!(!msgs.is_empty(), "the dangling reference must be reported");
     }
 
+    // ------------------------------------- one hue, three shades (m-basic)
+
+    /// The master with one theme file over it, resolved and baked. Every
+    /// colour question below is asked of the REAL master, because the whole
+    /// claim under test is a claim about the master's cascade.
+    fn baked(overlay: &str) -> (Schema, resolve::Resolved, bake::ResolvedTheme) {
+        let mut out = Vec::new();
+        let mut src = Sources::new();
+        let f = src.add("default.theme", DEFAULT_THEME);
+        let doc = parse::parse(&mut src, f, None, &mut out);
+        let mut schema = Schema::from_default(&doc, &mut out);
+        let r0 = resolve::resolve_default(&schema, &mut out);
+        schema.adopt_kinds(&r0.values);
+        let spec = if overlay.is_empty() {
+            schema.base_spec()
+        } else {
+            let g = src.add("basic.theme", overlay);
+            let d = parse::parse(&mut src, g, None, &mut out);
+            cascade::cascade(
+                &mut schema,
+                &[cascade::Stage::Document(&d)],
+                cascade::Options::default(),
+                &mut out,
+            )
+        };
+        let r = resolve::resolve(&schema, &spec, &mut out);
+        let t = bake::bake(&schema, &r, &BakeInput::default(), &mut out);
+        (schema, r, t)
+    }
+
+    fn lch(c: ThemeColor) -> color::Oklch {
+        c.to_linear().to_oklch()
+    }
+
+    /// The shortest way round the circle, in degrees.
+    fn hue_gap(a: f32, b: f32) -> f32 {
+        let d = (a - b).rem_euclid(360.0);
+        d.min(360.0 - d)
+    }
+
+    /// ŻYCZENIE 1. The settings window's three columns are three SHADES of
+    /// one colour, and no new colour was invented to get them: the three
+    /// tokens point at three rungs of the surface ladder, which is already
+    /// one hue at six lightnesses.
+    ///
+    /// The folded case is in the same claim: `settings.page_fill` is the
+    /// rung the window body itself stands on, so a window with no columns
+    /// paints its own bed over itself and there is nothing to stripe.
+    #[test]
+    fn the_three_settings_bands_are_three_shades_of_one_hue() {
+        let (schema, _, t) = baked("");
+        let band = |n: &str| lch(t.color(schema.id(n).expect(n)));
+        let rail = band("component.settings.rail_fill");
+        let sub = band("component.settings.sub_fill");
+        let page = band("component.settings.page_fill");
+
+        // ONE HUE — the three sit on @surface.hue, which is @hue.accent.
+        let accent = lch(t.color(schema.id("palette.accent").unwrap()));
+        for (name, c) in [("rail", rail), ("sub", sub), ("page", page)] {
+            assert!(
+                hue_gap(c.h, accent.h) < 2.0,
+                "the {name} band left the interface's hue: {} vs {}",
+                c.h,
+                accent.h
+            );
+        }
+
+        // THREE SHADES — and the two steps are the same size, so they read
+        // as one ladder rather than as an accident.
+        assert!(rail.l < sub.l && sub.l < page.l, "{} {} {}", rail.l, sub.l, page.l);
+        let (a, b) = (sub.l - rail.l, page.l - sub.l);
+        assert!(a > 0.03 && b > 0.03, "two bands too close to tell apart: {a} and {b}");
+        assert!((a - b).abs() < 0.02, "the ladder is uneven: {a} then {b}");
+
+        // The page keeps the window body's own rung, which is what makes a
+        // FOLDED window (no columns, one bed) look exactly as it does now.
+        let body = lch(t.color(schema.id("component.panel.fill").unwrap()));
+        assert!((page.l - body.l).abs() < 1e-4 && hue_gap(page.h, body.h) < 0.5);
+
+        // And a theme moves them: the seed alone re-skins all three...
+        let (s2, _, t2) = baked("[palette]\naccent = #FF2A35\n");
+        let red = ThemeColor::from_hex("#FF2A35").unwrap().to_linear().to_oklch().h;
+        for n in ["rail", "sub", "page"] {
+            let name = format!("component.settings.{n}_fill");
+            let c = lch(t2.color(s2.id(&name).unwrap()));
+            assert!(hue_gap(c.h, red) < 3.0, "{name} did not follow the seed: {}", c.h);
+        }
+        // ...and one band can be re-pointed on its own, which is the whole
+        // reason these are named tokens instead of three rungs named in Rust.
+        let (s3, _, t3) =
+            baked("[component]\nsettings.rail_fill = @surface.raised\n");
+        let one = lch(t3.color(s3.id("component.settings.rail_fill").unwrap()));
+        let other = lch(t3.color(s3.id("component.settings.sub_fill").unwrap()));
+        assert!(one.l > other.l, "the theme could not lift one band alone");
+    }
+
     #[test]
     fn the_draw_colour_api_still_works_because_the_program_calls_it() {
         // `theme::Color` is [`color::Color`] now, and the five methods the
