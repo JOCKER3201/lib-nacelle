@@ -211,7 +211,7 @@ pub fn frame(ctx: &mut Ctx, r: Rect) {
 mod tests {
     use super::*;
     use crate::draw::{DrawCmd, DrawList};
-    use crate::object::elev::tests::{same_picture, the_private_copy, AT_REST};
+    use crate::object::elev::tests::{same_picture, AT_REST};
 
     /// The box every proof below draws into. Any box would do — what is
     /// read off it is which COMMANDS a frame emits and in which colours,
@@ -220,32 +220,106 @@ mod tests {
         Rect::new(30.0, 18.0, 240.0, 150.0)
     }
 
+    /// What this file drew before it joined the ladder: the body of the
+    /// old `frame`, transcribed statement for statement — the glass
+    /// branch, the fill under it, the ring, and the bloom over the ring.
+    ///
+    /// Its OWN transcript, and not the one `menu.rs` and `tooltip.rs`
+    /// share ([`crate::object::elev::tests::the_private_copy`]), because
+    /// a window's copy was never their copy. Theirs departed from the
+    /// rung in TWO places — the body drawn whatever its alpha, the ring
+    /// drawn on the width alone — and a window's departed in FOUR: it
+    /// also stroked its ring whatever the EDGE's alpha, and it laid the
+    /// edge bloom unconditionally where the rung asks for a visible edge
+    /// first. Borrowing their transcript would have made this file's
+    /// no-move proof a proof about a picture it never drew, and would
+    /// have left the two extra departures — the two a theme that lights
+    /// `glow.panel_edge` can see — untested.
+    fn the_frames_private_copy(dl: &mut DrawList, t: &theme::ResolvedTheme, r: Rect, now: f64) {
+        static SEG: OnceLock<TokenId> = OnceLock::new();
+        let id = |n: &str| theme::id(n).unwrap_or(TokenId::MISSING);
+        let fill = col(t.bed(id("component.panel.fill")));
+        let line = col(t.color(id("component.panel.border")));
+        let mode = id("panel.corner_mode");
+        let corner = Corner::sized(cut_of(t, mode, vocabulary(mode)), t.px(id("panel.corner")), r);
+        let width = t.px(id("panel.border")).max(0.0);
+        let c = [corner; 4];
+        let seg = corner_segments(t, &SEG, corner.size);
+        let rank = t.px(id("elev.panel.glass.rank")).clamp(0.0, 3.0);
+        if rank > 0.0 {
+            dl.glass_fill(r, &c, seg, rank, col(t.color(id("elev.panel.glass.tint"))));
+            let wash = col(t.color(id("elev.panel.glass.wash")));
+            if wash.a > 0.0 {
+                dl.ring_fill(r, &c, seg, wash);
+            }
+        } else {
+            dl.ring_fill(r, &c, seg, fill);
+        }
+        dl.ring(r, &c, seg, width, line);
+        panel_edge_glow(dl, t, r, &c, seg, line, now);
+    }
+
     /// The no-move proof, in the words `menu.rs` and `tooltip.rs` already
     /// use: a window frame is a surface of Elev 2, and joining the ladder
     /// had to leave the picture exactly where it was under the master.
-    /// Compared against the private copy this file carried until
-    /// 2026-08-17, command for command and vertex for vertex.
+    /// Compared against [`the_frames_private_copy`], command for command
+    /// and vertex for vertex.
     ///
-    /// Conditional on what the master ships — `elev.panel.glass.rank = 0`
-    /// and `glow.panel_edge.enabled = false` — and deliberately so: a
-    /// theme that raises either is MEANT to move the window, which is
-    /// what wearing the rung buys.
+    /// Under the master ALONE, which is half the claim and the weaker
+    /// half: the master leaves `elev.panel.glass.rank` at 0 and the base
+    /// `glow.panel_edge.enabled` at false, so two of the four things this
+    /// file used to do are not reached at all.
+    /// [`joining_the_ladder_moved_no_pixel_with_the_glass_and_the_glow_lit`]
+    /// is where they are.
     #[test]
     fn joining_the_ladder_moved_no_pixel() {
         let t = theme::resolved();
         let mut was = DrawList::recording();
-        the_private_copy(
-            &mut was,
-            t,
-            box_(),
-            "component.panel.fill",
-            "panel.corner_mode",
-            "panel.corner",
-            "component.panel.border",
-            "panel.border",
-        );
+        the_frames_private_copy(&mut was, t, box_(), AT_REST);
         let mut now = DrawList::recording();
         level().draw_in(&mut now, t, box_(), AT_REST);
+        same_picture(&was, &now);
+    }
+
+    /// The same proof where the master cannot make it.
+    ///
+    /// Two of the frame's four departures from the rung are invisible
+    /// under a theme that ships the glass off and the bloom unlit, and
+    /// `[mood.alert]` — which the engine ships and a host may select at
+    /// any moment — lights the bloom. So the picture is taken again over
+    /// a theme that raises the rung's glass rank AND turns
+    /// `glow.panel_edge` on, and the two lists still have to agree: the
+    /// old ring-then-bloom pair and the rung's guarded one draw the same
+    /// thing whenever the edge is there to be drawn.
+    ///
+    /// Both commands are asserted present first, because two pictures
+    /// that agree by both being empty prove nothing.
+    #[test]
+    fn joining_the_ladder_moved_no_pixel_with_the_glass_and_the_glow_lit() {
+        let t = theme::bake_over_master(
+            "[elev.panel]\n\
+             glass.rank = 2\n\
+             glass.wash = #40FFC0 / 0.5\n\
+             [glow]\n\
+             panel_edge.enabled = true\n\
+             panel_edge.radius = 2.0u\n\
+             panel_edge.alpha = 0.6\n",
+        );
+        let mut was = DrawList::recording();
+        the_frames_private_copy(&mut was, &t, box_(), AT_REST);
+        let has = |dl: &DrawList, what: fn(&DrawCmd) -> bool| dl.cmds().iter().any(what);
+        assert!(
+            has(&was, |c| matches!(c, DrawCmd::GlassFill { .. })),
+            "the raised rank drew no glass, so this proves nothing: {:?}",
+            was.cmds()
+        );
+        assert!(
+            has(&was, |c| matches!(c, DrawCmd::GlowRing { .. })),
+            "the lit bloom drew nothing, so this proves nothing: {:?}",
+            was.cmds()
+        );
+        let mut now = DrawList::recording();
+        level().draw_in(&mut now, &t, box_(), AT_REST);
         same_picture(&was, &now);
     }
 

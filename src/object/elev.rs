@@ -324,18 +324,26 @@ pub(crate) mod tests {
 
     // ------------------------------------------- the no-move proof
     //
-    // Shared with `menu.rs`, `tooltip.rs` and `window.rs`, whose claim is
-    // not about a gradient at all: that JOINING the ladder moved no
-    // pixel. Written once, here, because three copies of what counts as
-    // proof is the same mistake in the test suite that this module exists
-    // to undo in the drawing code.
+    // Shared with `menu.rs` and `tooltip.rs`, whose claim is not about a
+    // gradient at all: that JOINING the ladder moved no pixel. Written
+    // once, here, because two copies of what counts as proof is the same
+    // mistake in the test suite that this module exists to undo in the
+    // drawing code.
 
     /// What an object drew before it joined the ladder — the `ring_fill`
     /// + `ring` pair from its own five tokens, transcribed from the
-    /// private copies `menu.rs`, `tooltip.rs` and `window.rs` carried
-    /// until 2026-08-17. It is a TRANSCRIPT, so it keeps their two
-    /// departures from the rung: the body is drawn whatever its alpha,
-    /// and the ring is drawn on the width alone.
+    /// private copies `menu.rs` and `tooltip.rs` carried until
+    /// 2026-08-17. It is a TRANSCRIPT, so it keeps their two departures
+    /// from the rung: the body is drawn whatever its alpha, and the ring
+    /// is drawn on the width alone.
+    ///
+    /// Those two and no others, which is why `window.rs` — the third
+    /// object to join the ladder on the same day — does NOT use this and
+    /// keeps a transcript of its own. Its private copy also stroked the
+    /// ring whatever the edge's ALPHA and laid the edge bloom
+    /// unconditionally, and a transcript that quietly dropped two of the
+    /// four things an object used to do would prove the no-move claim
+    /// about a picture nobody ever drew.
     pub(crate) fn the_private_copy(
         dl: &mut DrawList,
         t: &theme::ResolvedTheme,
