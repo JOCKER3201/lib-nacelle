@@ -478,6 +478,51 @@ extern "C" fn h_channel_read(
     len.min(u32::MAX as usize) as u32
 }
 
+/// The settings pair. Like the channel's, they take neither the drawing
+/// context nor the host handle: the directories are the PROCESS's, and a
+/// widget reads its settings in `create`, before any frame exists and
+/// before the host has a pointer to hand it.
+///
+/// This is where the plugin's inability to open a file is actually
+/// enforced. Everything the caller passes is a NAME; the path, the
+/// search order and the size ceiling are decided on this side and never
+/// crossed back.
+#[allow(clippy::too_many_arguments)]
+extern "C" fn h_settings_read(
+    addon: *const u8,
+    addon_len: u32,
+    file: *const u8,
+    file_len: u32,
+    buf: *mut u8,
+    cap: u32,
+    status: *mut u32,
+) -> u32 {
+    let addon = text_in(addon, addon_len);
+    // An empty `file` is the addon's own single settings file, so unlike
+    // a topic, empty here is a legitimate request rather than a refusal.
+    let file = text_in(file, file_len);
+    // A caller wanting only the status — "is there a file at all?" —
+    // passes no buffer, exactly as a caller wanting only a sequence
+    // number does on the channel.
+    let mut none: [u8; 0] = [];
+    let out: &mut [u8] = if buf.is_null() || cap == 0 {
+        &mut none
+    } else {
+        unsafe { std::slice::from_raw_parts_mut(buf, cap as usize) }
+    };
+    let (len, origin) = crate::settings::local_read_into(addon, file, out);
+    unsafe {
+        if let Some(status) = status.as_mut() {
+            *status = origin.code();
+        }
+    }
+    len.min(u32::MAX as usize) as u32
+}
+
+extern "C" fn h_settings_epoch() -> u32 {
+    crate::settings::local_epoch()
+}
+
 // The two v4 theme entries. Append-only means they stay at their table
 // positions forever and keep answering what the retired seven-field
 // bridge answered: `accent.primary` and `surface.base`.
@@ -794,6 +839,8 @@ pub fn host_api() -> &'static HostApi {
         tooltip: h_tooltip,
         channel_publish: h_channel_publish,
         channel_read: h_channel_read,
+        settings_read: h_settings_read,
+        settings_epoch: h_settings_epoch,
     };
     &API
 }
@@ -1363,8 +1410,8 @@ mod tests {
     fn the_host_table_grows_at_the_end_only() {
         use crate::runtime::{
             HOST_API_HAS_CHANNEL, HOST_API_HAS_CLIP, HOST_API_HAS_ENUM_WORD,
-            HOST_API_HAS_MASK_QUAD, HOST_API_HAS_RING, HOST_API_HAS_TOOLTIP,
-            HOST_API_SIZE_MIN,
+            HOST_API_HAS_MASK_QUAD, HOST_API_HAS_RING, HOST_API_HAS_SETTINGS,
+            HOST_API_HAS_TOOLTIP, HOST_API_SIZE_MIN,
         };
         let api = host_api();
         assert_eq!(api.api_size as usize, std::mem::size_of::<HostApi>());
@@ -1374,15 +1421,17 @@ mod tests {
         assert!(api.has_ring());
         assert!(api.has_tooltip());
         assert!(api.has_channel());
+        assert!(api.has_settings());
         // The appended entries sit past the mandatory prefix, in order,
-        // with the channel pair the current end of the table.
+        // with the settings pair the current end of the table.
         assert!(HOST_API_SIZE_MIN < HOST_API_HAS_ENUM_WORD);
         assert!(HOST_API_HAS_ENUM_WORD < HOST_API_HAS_MASK_QUAD);
         assert!(HOST_API_HAS_MASK_QUAD < HOST_API_HAS_CLIP);
         assert!(HOST_API_HAS_CLIP < HOST_API_HAS_RING);
         assert!(HOST_API_HAS_RING < HOST_API_HAS_TOOLTIP);
         assert!(HOST_API_HAS_TOOLTIP < HOST_API_HAS_CHANNEL);
-        assert_eq!(HOST_API_HAS_CHANNEL, std::mem::size_of::<HostApi>());
+        assert!(HOST_API_HAS_CHANNEL < HOST_API_HAS_SETTINGS);
+        assert_eq!(HOST_API_HAS_SETTINGS, std::mem::size_of::<HostApi>());
         // A host that stopped at the version-6 minimum answers none of
         // them, which is what a plugin's `has_*` gate is for.
         let old = HostApi { api_size: HOST_API_SIZE_MIN as u32, ..*api };
@@ -1392,6 +1441,7 @@ mod tests {
         assert!(!old.has_ring());
         assert!(!old.has_tooltip());
         assert!(!old.has_channel());
+        assert!(!old.has_settings());
         // And a host from before the ring pair keeps the clips.
         let pre_ring = HostApi { api_size: HOST_API_HAS_CLIP as u32, ..*api };
         assert!(pre_ring.has_clip());
@@ -1416,6 +1466,21 @@ mod tests {
         };
         assert!(half_channel.has_tooltip());
         assert!(!half_channel.has_channel());
+        // The table as it stood before the settings pair — a shipped
+        // plugin measured exactly this, and the new gate must answer
+        // false for it or that plugin reads past the end of the table.
+        let pre_settings = HostApi { api_size: HOST_API_HAS_CHANNEL as u32, ..*api };
+        assert!(pre_settings.has_channel());
+        assert!(!pre_settings.has_settings());
+        // Half the settings pair is no settings: a table that reaches
+        // the read and stops leaves a plugin caching a parsed document
+        // with no way to learn that the file under it changed.
+        let half_settings = HostApi {
+            api_size: (std::mem::offset_of!(HostApi, settings_epoch)) as u32,
+            ..*api
+        };
+        assert!(half_settings.has_channel());
+        assert!(!half_settings.has_settings());
         // A host from before the clip pair — the whole of ABI 6 as it
         // stood — still answers everything it did answer.
         let pre_clip = HostApi { api_size: HOST_API_HAS_MASK_QUAD as u32, ..*api };
@@ -1894,6 +1959,92 @@ mod tests {
             "an empty value is zero bytes long"
         );
         assert!(got >= 1, "but it HAS a sequence number, which is what makes it present");
+    }
+
+    /// The settings entry is defensive about everything that crosses it,
+    /// and never lets a name be a path.
+    ///
+    /// What is NOT asserted here is which file answered: the settings
+    /// directories are process-wide, `settings`'s own test installs and
+    /// removes some, and the two tests run in parallel under the default
+    /// harness. So this checks the properties that hold whatever is
+    /// installed — that a status is always written, that it is always
+    /// one of the four, and that a name with a separator in it is
+    /// refused whether or not such a file could exist.
+    #[test]
+    fn a_settings_name_is_a_name_and_never_a_path() {
+        use crate::runtime::{
+            SETTINGS_ABSENT, SETTINGS_MALFORMED, SETTINGS_OK, SETTINGS_REFUSED,
+        };
+        let addon = b"test-abi-addon";
+        let mut buf = [0u8; 64];
+
+        // A status is written on every path, so a caller never reads a
+        // stale one and mistakes it for an answer.
+        let mut status = 99u32;
+        h_settings_read(
+            addon.as_ptr(),
+            addon.len() as u32,
+            std::ptr::null(),
+            0,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            &mut status,
+        );
+        assert!(
+            matches!(
+                status,
+                SETTINGS_OK | SETTINGS_ABSENT | SETTINGS_MALFORMED | SETTINGS_REFUSED
+            ),
+            "a status must always be one of the four"
+        );
+
+        // Every escape a plugin could attempt is refused at the name,
+        // which is what makes "the host holds the only path" true.
+        for bad in [&b".."[..], b"../../etc/shadow", b"a/b", b"Addon", b"a.ron"] {
+            let mut status = 99u32;
+            let n = h_settings_read(
+                bad.as_ptr(),
+                bad.len() as u32,
+                std::ptr::null(),
+                0,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                &mut status,
+            );
+            assert_eq!(status, SETTINGS_REFUSED, "{bad:?} must be refused");
+            assert_eq!(n, 0, "a refused name delivers no bytes");
+        }
+
+        // Nothing dereferences a null: no name, no buffer, no status.
+        let mut status = 99u32;
+        assert_eq!(
+            h_settings_read(
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                &mut status
+            ),
+            0
+        );
+        assert_eq!(status, SETTINGS_REFUSED, "an empty addon name is not a name");
+        h_settings_read(
+            addon.as_ptr(),
+            addon.len() as u32,
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+        );
+
+        // The epoch is a number a caller compares, so the only promise
+        // it makes is that asking twice with nothing between answers
+        // the same thing.
+        assert_eq!(h_settings_epoch(), h_settings_epoch());
     }
 
     /// The tooltip entry survives the two things a plugin can do wrong

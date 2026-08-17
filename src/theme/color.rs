@@ -438,7 +438,7 @@ mod tests {
     fn wcag_extremes_and_a_known_pair() {
         assert!(approx(Color::wcag_contrast(Color::WHITE, Color::BLACK), 21.0, 1e-3));
         assert!(approx(Color::wcag_contrast(Color::WHITE, Color::WHITE), 1.0, 1e-6));
-        // azure's #29B6F6 chip: WCAG says dark text (§6 contrast_on).
+        // the azure #29B6F6 chip: WCAG says dark text (§6 contrast_on).
         let chip = Color::from_hex("#29B6F6").unwrap().to_linear();
         let vs_black = Color::wcag_contrast(chip, Color::BLACK);
         let vs_white = Color::wcag_contrast(chip, Color::WHITE);

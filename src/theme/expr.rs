@@ -1004,7 +1004,7 @@ mod tests {
             .as_color()
             .unwrap()
         };
-        // §6: azure's #29B6F6 chip needs dark text. WCAG agrees.
+        // §6: the azure #29B6F6 chip needs dark text. WCAG agrees.
         assert_eq!(pick("#29B6F6", &mut env), Color::BLACK);
         // and a near-black chip needs light text.
         assert_eq!(pick("#0A100E", &mut env), Color::WHITE);

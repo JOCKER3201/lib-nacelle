@@ -969,6 +969,19 @@ impl DrawList {
         });
     }
 
+    /// The clip in force right now: the TOP of the stack, which is
+    /// already the intersection of everything pushed. `None` = nothing
+    /// clips.
+    ///
+    /// For an object that hands rectangles back to its caller to
+    /// hit-test: what the object DRAWS is cut by this scissor, so what
+    /// it REPORTS has to be cut by the same one, or an element the
+    /// scissor took would still answer the mouse.
+    /// [`crate::object::dropdown::accordion`] is the reader.
+    pub fn clip(&self) -> Option<[f32; 4]> {
+        self.clips.last().copied()
+    }
+
     /// The clip stack as it stands. The host takes one of these before
     /// handing the list to a foreign drawer (a plugin across the ABI)
     /// and puts it back with [`DrawList::restore_clips`] afterwards: a

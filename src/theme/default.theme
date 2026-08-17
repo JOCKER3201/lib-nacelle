@@ -315,7 +315,7 @@ mode     = round
 # =========================================================================
 [surface]
 hue    = @hue.accent                # the hue every surface level sits on · 7,9,10 · deg · reads @hue.accent (m3 M1 — written as a reference, not hue(@palette.accent), so the token's kind settles to a number and a theme may override it with plain degrees); a navy bed under a cyan edge is one line here instead of six longhand oklch()
-lift   = 0.0                        # OKLab L added to all six levels · 3,4 · f, -0.09 .. 0.09 · 0 = the ladder as derived; crimson's true black is lift -0.065, family B's lit bed +0.045 (m3)
+lift   = 0.0                        # OKLab L added to all six levels · 3,4 · f, -0.09 .. 0.09 · 0 = the ladder as derived; image 4's true black is lift -0.065, family B's lit bed +0.045 (m3)
 chroma = 1.00                       # scale over the six levels' chroma coefficients · 8,9 · f, 0.0 .. 4.0 · 1 = as derived; a near-black needs C >= 0.030 to read as tinted at all
 void   = oklch(0.115, 0.0770x@chroma.accent, @surface.hue)
                     # the absolute bed: terminal background, letterbox, THE SWAPCHAIN CLEAR COLOUR (alpha forced to 1.0), and the opaque fallback when a family-B theme sets base to alpha 0 · 1-10 · OKLCh, L fixed by the ladder in 5.5 · L 0.115, C 0.22*0.35*C_accent
@@ -346,8 +346,8 @@ scrim  = alpha(@palette.black, 0.66)
 # and lifted in OKLab L at constant hue when a11y.contrast_floor = true.
 # =========================================================================
 [text]
-lift   = 0.0                        # OKLab L added to the ladder roles · 3 · f, -0.10 .. 0.10 · 0 = as derived; pure needs -0.07 to put text.title on the image's own green
-chroma = 1.00                       # scale over the text roles' chroma coefficients · 3,4 · f, 0.0 .. 3.0 · 1 = as derived; seven of eight themes resolve text.primary to the same near-white without this
+lift   = 0.0                        # OKLab L added to the ladder roles · 3 · f, -0.10 .. 0.10 · 0 = as derived; image 3's look needs -0.07 to put text.title on its own green
+chroma = 1.00                       # scale over the text roles' chroma coefficients · 3,4 · f, 0.0 .. 3.0 · 1 = as derived; seven of the eight original seeds resolved text.primary to the same near-white without this
 title      = oklch(0.870, 0.55x@chroma.accent, @hue.accent)
                     # panel titles: small caps, wide tracking (every panel heading in the images) · 1-10 · OKLCh, L fixed by the ladder in 5.6 · floor 4.5 on surface.panel (4.4); resolves 11.90 for the mint seed
 primary    = oklch(0.905, 0.15x@chroma.accent, @hue.accent)
@@ -377,7 +377,7 @@ default  = alpha(@accent.primary, 0.78)
                     # (m3 M5: was 0.55. Every image calls the edge the brightest line in the picture; the raise predates P7,
                     # when no glow primitive existed and the edge carried the whole signature alone. Since P7 glow.panel_edge
                     # RENDERS and rides this colour, and the raised value still measures right under it.
-                    # Measured: crimson's panel ring 3.00 -> 4.60, aurora's 6.17 -> 8.33, pure's 5.61 -> 9.18)
+                    # Measured on the original seeds: crimson's panel ring 3.00 -> 4.60, aurora's 6.17 -> 8.33, pure's 5.61 -> 9.18)
 strong   = @accent.primary
                     # emphasised and alarmed frames · 4 (the all-red console) · colour · accent.primary at full alpha
 focus    = @accent.focus
@@ -388,9 +388,9 @@ disabled = alpha(@text.disabled, 0.55)
 # =========================================================================
 # 5.7b border.edge.* — the seven GEOMETRY keys. The old flat spellings
 # border.width / .style / .dash / .gap / .phase / .bracket_len /
-# .bracket_inset remain as aliases (4.2), because [variant.hc] and several
-# shipped themes write border.width and a rename with no alias is a silent
-# regression.
+# .bracket_inset remain as aliases (4.2), because [variant.hc] writes
+# border.width — as the original shipped themes did — and a rename with no
+# alias is a silent regression.
 #
 # `segmented` is a PANEL-CLASS style only: a 300 px edge at 1440p is ~13
 # dashes/side ~52 quads, fine for a handful of panels and wrong for a list of
@@ -426,7 +426,7 @@ primary   = @palette.accent
 secondary = @palette.accent_alt
                     # the second chrome hue · 1 (cyan beside mint) · colour · palette.accent_alt, itself a 32 deg rotation
 hover     = tint(@accent.primary, 0.18)
-                    # hover edges and glyphs; lands azure on #4FC3F7, the literal highlight of image 6 · 6 · OKLab mix toward palette.white, t 0..1 · accent.primary tinted 0.18
+                    # hover edges and glyphs; lands the azure seed on #4FC3F7, the literal highlight of image 6 · 6 · OKLab mix toward palette.white, t 0..1 · accent.primary tinted 0.18
 active    = lum(@accent.primary, 0.84)
                     # pressed · 1, 7 · OKLCh L multiplier · accent.primary at 0.84 of its lightness, same hue and chroma
 dim       = lum(@accent.primary, 0.62)
@@ -1348,7 +1348,7 @@ spectrum.axis = x
 spectrum.space = oklab
                     # interpolation space; images 1, 7; one of oklab | srgb;
                     # srgb exists only to reproduce an existing palette
-                    # exactly and no shipped theme uses it
+                    # exactly and the master does not use it
 
 # ---- focus — the focused container's frame ------------------------------
 focus.stops = [ [0.0, @data.series[4]], [0.5, @data.series[3]], [1.0, @accent.primary] ]
@@ -1512,7 +1512,7 @@ glow.outer.mode      = auto                   # how the outer glow is realised �
 glow.outer.boost     = 1.0                    # HDR overdrive of the outer glow beyond white · 2 · f, >= 1.0 · no derivation; >1 survives only on the HDR path with no LUT
 # drop shadow — the same soft_box() 9-slice as the glows
 shadow.color         = none                   # drop shadow cast by the backdrop plate · 7,8 · colour or none · none (0.0) = no shadow quad; default ships shadowless (8)
-shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit runs 3.9u..6.4u up the ladder (8)
+shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit ran 3.9u..6.4u up the ladder (8)
 shadow.dx            = 0u                     # horizontal offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.dy            = 0u                     # vertical offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.spread        = 0u                     # outward dilation of the shadow rect before blurring · 7,8 · len (u) · no derivation
@@ -1554,7 +1554,7 @@ glow.outer.mode      = auto                   # how the outer glow is realised �
 glow.outer.boost     = 1.0                    # HDR overdrive of the outer glow beyond white · 2 · f, >= 1.0 · no derivation; >1 survives only on the HDR path with no LUT
 # drop shadow — the same soft_box() 9-slice as the glows
 shadow.color         = none                   # drop shadow cast by the board · 7,8 · colour or none · none (0.0) = no shadow quad; default ships shadowless (8)
-shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit runs 3.9u..6.4u up the ladder (8)
+shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit ran 3.9u..6.4u up the ladder (8)
 shadow.dx            = 0u                     # horizontal offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.dy            = 0u                     # vertical offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.spread        = 0u                     # outward dilation of the shadow rect before blurring · 7,8 · len (u) · no derivation
@@ -1596,7 +1596,7 @@ glow.outer.mode      = auto                   # how the outer glow is realised �
 glow.outer.boost     = 1.0                    # HDR overdrive of the outer glow beyond white · 2 · f, >= 1.0 · no derivation; >1 survives only on the HDR path with no LUT
 # drop shadow — the same soft_box() 9-slice as the glows
 shadow.color         = none                   # drop shadow cast by the panel · 7,8 · colour or none · none (0.0) = no shadow quad; default ships shadowless (8)
-shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit runs 3.9u..6.4u up the ladder (8)
+shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit ran 3.9u..6.4u up the ladder (8)
 shadow.dx            = 0u                     # horizontal offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.dy            = 0u                     # vertical offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.spread        = 0u                     # outward dilation of the shadow rect before blurring · 7,8 · len (u) · no derivation
@@ -1638,7 +1638,7 @@ glow.outer.mode      = auto                   # how the outer glow is realised �
 glow.outer.boost     = 1.0                    # HDR overdrive of the outer glow beyond white · 2 · f, >= 1.0 · no derivation; >1 survives only on the HDR path with no LUT
 # drop shadow — the same soft_box() 9-slice as the glows
 shadow.color         = none                   # drop shadow cast by the raised container · 7,8 · colour or none · none (0.0) = no shadow quad; default ships shadowless (8)
-shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit runs 3.9u..6.4u up the ladder (8)
+shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit ran 3.9u..6.4u up the ladder (8)
 shadow.dx            = 0u                     # horizontal offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.dy            = 0u                     # vertical offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.spread        = 0u                     # outward dilation of the shadow rect before blurring · 7,8 · len (u) · no derivation
@@ -1680,7 +1680,7 @@ glow.outer.mode      = auto                   # how the outer glow is realised �
 glow.outer.boost     = 1.0                    # HDR overdrive of the outer glow beyond white · 2 · f, >= 1.0 · no derivation; >1 survives only on the HDR path with no LUT
 # drop shadow — the same soft_box() 9-slice as the glows
 shadow.color         = none                   # drop shadow cast by the focused window · 7,8 · colour or none · none (0.0) = no shadow quad; default ships shadowless (8)
-shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit runs 3.9u..6.4u up the ladder (8)
+shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit ran 3.9u..6.4u up the ladder (8)
 shadow.dx            = 0u                     # horizontal offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.dy            = 0u                     # vertical offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.spread        = 0u                     # outward dilation of the shadow rect before blurring · 7,8 · len (u) · no derivation
@@ -1729,7 +1729,7 @@ glow.outer.mode      = auto                   # how the outer glow is realised �
 glow.outer.boost     = 1.0                    # HDR overdrive of the outer glow beyond white · 2 · f, >= 1.0 · no derivation; >1 survives only on the HDR path with no LUT
 # drop shadow — the same soft_box() 9-slice as the glows
 shadow.color         = none                   # drop shadow cast by the popover · 7,8 · colour or none · none (0.0) = no shadow quad; default ships shadowless (8)
-shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit runs 3.9u..6.4u up the ladder (8)
+shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit ran 3.9u..6.4u up the ladder (8)
 shadow.dx            = 0u                     # horizontal offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.dy            = 0u                     # vertical offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.spread        = 0u                     # outward dilation of the shadow rect before blurring · 7,8 · len (u) · no derivation
@@ -1771,7 +1771,7 @@ glow.outer.mode      = auto                   # how the outer glow is realised �
 glow.outer.boost     = 1.0                    # HDR overdrive of the outer glow beyond white · 2 · f, >= 1.0 · no derivation; >1 survives only on the HDR path with no LUT
 # drop shadow — the same soft_box() 9-slice as the glows
 shadow.color         = none                   # drop shadow cast by the inset well · 7,8 · colour or none · none (0.0) = no shadow quad; default ships shadowless (8)
-shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit runs 3.9u..6.4u up the ladder (8)
+shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit ran 3.9u..6.4u up the ladder (8)
 shadow.dx            = 0u                     # horizontal offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.dy            = 0u                     # vertical offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.spread        = 0u                     # outward dilation of the shadow rect before blurring · 7,8 · len (u) · no derivation
@@ -1813,7 +1813,7 @@ glow.outer.mode      = auto                   # how the outer glow is realised �
 glow.outer.boost     = 1.0                    # HDR overdrive of the outer glow beyond white · 2 · f, >= 1.0 · no derivation; >1 survives only on the HDR path with no LUT
 # drop shadow — the same soft_box() 9-slice as the glows
 shadow.color         = none                   # drop shadow cast by the overlay plate · 7,8 · colour or none · none (0.0) = no shadow quad; default ships shadowless (8)
-shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit runs 3.9u..6.4u up the ladder (8)
+shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit ran 3.9u..6.4u up the ladder (8)
 shadow.dx            = 0u                     # horizontal offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.dy            = 0u                     # vertical offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.spread        = 0u                     # outward dilation of the shadow rect before blurring · 7,8 · len (u) · no derivation
@@ -1858,7 +1858,7 @@ glow.outer.mode      = auto                   # how the outer glow is realised �
 glow.outer.boost     = 1.0                    # HDR overdrive of the outer glow beyond white · 2 · f, >= 1.0 · no derivation; >1 survives only on the HDR path with no LUT
 # drop shadow — the same soft_box() 9-slice as the glows
 shadow.color         = none                   # drop shadow cast by the fixture sheet · 7,8 · colour or none · none (0.0) = no shadow quad; default ships shadowless (8)
-shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit runs 3.9u..6.4u up the ladder (8)
+shadow.radius        = 0u                     # blur radius of the drop shadow · 7,8 · len (u), 0u = off · no derivation; cockpit ran 3.9u..6.4u up the ladder (8)
 shadow.dx            = 0u                     # horizontal offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.dy            = 0u                     # vertical offset of the drop shadow · 7,8 · len (u), may be negative · no derivation
 shadow.spread        = 0u                     # outward dilation of the shadow rect before blurring · 7,8 · len (u) · no derivation
@@ -1965,7 +1965,7 @@ shape                = cos2                   # falloff curve from radius to the
 # ---------------------------------------------------------------- scanlines
 # CRT scanlines. Overlay plate, so they cross panels and content alike.
 [decor.scanlines]
-enabled              = false                  # draw baked scanlines on the overlay plate · - · bool · no derivation; no shipped theme turns this on
+enabled              = false                  # draw baked scanlines on the overlay plate · - · bool · no derivation; the master ships it off
 period               = 0.42u                  # distance from one dark band to the next · - · len (u) · no derivation; ~2.3px @1080p
 duty                 = 0.34                   # fraction of the period that is dark · - · frac 0..1 · no derivation; a thin dark band, a wide gap
 alpha                = 0.05                   # scanline opacity · - · frac 0..1 · no derivation; texture, not a filter
@@ -1975,7 +1975,7 @@ drift                = 0.0                    # vertical crawl of the scanline p
 # ---------------------------------------------------------------- noise
 # Film grain. Overlay plate.
 [decor.noise]
-enabled              = false                  # draw baked grain on the overlay plate · - · bool · no derivation; no shipped theme turns this on
+enabled              = false                  # draw baked grain on the overlay plate · - · bool · no derivation; the master ships it off
 alpha                = 0.02                   # grain opacity · - · frac 0..1 · no derivation; at 0.02 it kills 8-bit banding and is otherwise invisible
 grain                = 0.14u                  # size of one grain cell · - · len (u) · no derivation; ~0.75px @1440p
 chroma               = 0.0                    # how coloured the grain is · - · frac 0..1 · 0 = monochrome grain, 1 = independent per channel
@@ -1998,7 +1998,7 @@ wavelength           = 0.55                   # wave length as a fraction of the
 speed                = 0.06                   # how fast the waves travel · 1,7,9 · f, cycles per second; cyclic · no derivation; slow enough to read as ambience
 phase_step           = 0.37                   # phase offset between one ribbon and the next · 1,7,9 · f, cycles · no derivation; deliberately not 1/count, so they never re-align
 thickness            = 0.35u                  # ribbon band thickness · 1,7,9 · len (u) · no derivation; ~1.9px @1440p
-gradient             = @grad.spectrum         # hue travelled along the ribbon: magenta -> violet -> cyan -> green · 1,7 · @grad.<name>, 2..8 stops · @grad.spectrum — the reserved name the shipped themes use (5.14)
+gradient             = @grad.spectrum         # hue travelled along the ribbon: magenta -> violet -> cyan -> green · 1,7 · @grad.<name>, 2..8 stops · @grad.spectrum — the reserved name the original shipped themes used (5.14)
 alpha                = 0.55                   # ribbon opacity, before the taper to 0 at both ends · 1,7,9 · frac 0..1 · no derivation; alpha is a vertex channel, so the taper is free
 host                 = panel                  # what the ribbons are drawn inside · 1,7,9 · panel | board; cyclic · no derivation; image 7 puts them inside one panel
 max_hosts            = 1                      # how many hosts actually get ribbons · 7 · n; 0 = unlimited · no derivation; 26 panels would cost 49 920 verts and 26 scissor changes per frame. --check-theme prints the arithmetic
@@ -2123,8 +2123,10 @@ codepoints            = ""                    # name = U+XXXX map; meaningful ON
 # =========================================================================
 # type - 24 roles (20 named, 4 spare). ROLE_COUNT = 24, an append-only u32
 # enum indexing [TypeRole; 24]. Sizes are authored in u so type and space
-# scale together; the conversion from the old unit is size_u = size_vh x 2.6,
-# i.e. type.body = 2.47u is today's font_px(1.0).
+# scale together; the conversion from the old unit is size_u = size_vh x 2.6
+# (2 for vh->u times UI_FONT_BASE 1.3 - the multiplier is folded into every
+# size value below, NOT carried as a token; the live global type knob is
+# metric.density_type), i.e. type.body = 2.47u is today's font_px(1.0).
 # 
 # Every role carries the SAME twelve tokens - face, size, min_px, max_px,
 # tracking, case, smallcaps_ratio, leading, tabular, fg, alpha,
@@ -2154,7 +2156,6 @@ codepoints            = ""                    # name = U+XXXX map; meaningful ON
 # =========================================================================
 
 [type]
-base_scale                    = 1.3           # global multiplier folded into the u->px conversion · - · f, 0.5 .. 2.0 · today's UI_FONT_BASE; no derivation
 min_px                        = 8px           # absolute floor under every role's resolved px · 9 · device px, 6px .. 24px · no derivation; the last defence against unreadable type
 smallcaps_ratio               = 0.78          # default px multiplier for source-lowercase glyphs · 1-10 · f, 0.5 .. 1.0 · at 1.0 a smallcaps role degrades to plain upper and the second atlas size is never rasterised
 snap_px                       = true          # round each role's px to a whole pixel before rasterisation · - · bool · collapses four atlas entries per visual size to one and stops 1px text jitter; the terminal is exempt
@@ -2195,7 +2196,7 @@ display.date.synthetic_bold   = auto          # per-role override of the face's 
 # ---------------------------------------------------------------- type.display.hero
 # the one oversized string on a screen
 display.hero.face             = display       # which face slot draws the one oversized string on a screen · 7, 9 · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
-display.hero.size             = 5.72u         # type size for the one oversized string on a screen · 7, 9 · u · 31 px at 1080p, 41 px at 1440p; size_u = size_vh x 2.6
+display.hero.size             = 16u           # type size for the one oversized string on a screen · 7, 9 · u · 86 px at 1080p, 115 px at 1440p, 160 px at 4K (unit_max_px), 64 px at the smallest window; the boot logo was 31 px — smaller than the sub-line under it
 display.hero.min_px           = @type.min_px  # px floor for this role · 7, 9 · device px · the global floor
 display.hero.max_px           = 0px           # px ceiling for this role · 7, 9 · device px, 0px = uncapped · uncapped
 display.hero.tracking         = 0.040em       # letter spacing added to every advance · 7, 9 · em, -0.05em .. 0.30em · no derivation; 5.16's role table
@@ -2495,16 +2496,16 @@ terminal.synthetic_bold       = auto          # per-role override of the face's 
 # ---------------------------------------------------------------- type.spare0
 # reserved role slot 0
 spare0.face                   = ui            # which face slot draws reserved role slot 0 · - · enum: ui | mono | ui_medium | ui_bold | display | mono_bold | icon | reserved · no derivation; 5.16's role table
-spare0.size                   = 2.47u         # type size for reserved role slot 0 · - · u · 13 px at 1080p, 18 px at 1440p; size_u = size_vh x 2.6
+spare0.size                   = 3.5u          # type size for reserved role slot 0 · - · u · 19 px at 1080p, 25 px at 1440p; the boot sub-line, at 0.22 of the logo above it
 spare0.min_px                 = @type.min_px  # px floor for this role · - · device px · the global floor
 spare0.max_px                 = 0px           # px ceiling for this role · - · device px, 0px = uncapped · uncapped
-spare0.tracking               = 0.020em       # letter spacing added to every advance · - · em, -0.05em .. 0.30em · no derivation; 5.16's role table
+spare0.tracking               = 0.200em       # letter spacing added to every advance · - · em, -0.05em .. 0.30em · the width `caption` gave the boot sub-line before it moved here
 spare0.case                   = none          # case transform applied inside FontSystem::text · - · enum: none | upper | lower | smallcaps · no derivation; 5.16's role table
 spare0.smallcaps_ratio        = @type.smallcaps_ratio
                                               # px multiplier for glyphs that were lowercase in the source · - · f, 0.5 .. 1.0 · the global ratio; smallcaps has no OpenType path (fontdue exposes no features)
-spare0.leading                = 1.45          # line height as a multiple of the resolved px · - · f, 1.0 .. 2.0 · no derivation; 5.16's role table
+spare0.leading                = 1.35          # line height as a multiple of the resolved px · - · f, 1.0 .. 2.0 · `caption`'s, carried across with the sub-line
 spare0.tabular                = false         # advance every figure by figure_advance and centre it in that box · - · bool · makes an all-figure string len x figure_advance wide without touching the atlas (5.17)
-spare0.fg                     = @text.primary # the colour this role draws in · - · colour · may name any colour token including @data.series[n] and @term.ansi[n] (5.19)
+spare0.fg                     = @text.muted   # the colour this role draws in · - · colour · subordinate to the logo's @text.title above it
 spare0.alpha                  = 1.0           # constant alpha multiplier on fg · - · frac, 0..1 · opaque
 spare0.synthetic_bold         = auto          # per-role override of the face's fake-bold x-offset · - · em, or auto · auto = @face.<this role's face>.synthetic_bold, applied only when a >=600 request fell back to Regular
 
@@ -4372,6 +4373,15 @@ anchor_gap = @space.1               # the air between a control that unfolds and
 # The gap does not scale with the unfold: it is a distance between two
 # finished objects, not a share of an animation.
 anchor_width = anchor               # whether the menu takes its anchor's width or its own minimum · - · enum: anchor | min_w · -; context menus always size to content over the min_w floor
+# THE FRAME of an unfolded body. A drop-down grows one pitch per element,
+# and a list of forty themes or four hundred font families used to hang
+# past the desktop's edge — pressable where it could not be seen. Past
+# this share of the viewport's height the blind stops and the body
+# SCROLLS inside its frame instead: the wheel moves it, the toolkit's
+# scrollbar stands in the inset lane beside the slats, and an element
+# outside the frame neither draws nor answers the mouse.
+max_h_frac = 40%                    # the tallest unfolded body, from the anchor's underside down · - · % of the viewport height · 432 px @1080p ≈ 13 elements; a longer list scrolls (M8, 2026-08-16)
+max_h_min_px = 96px                 # absolute floor for max_h_frac's result · - · device px · companion of menu.max_h_frac (3.2); a tiny window still shows a few elements
 rule = @stroke.hair                 # the separator between menu groups · - · str | none · @stroke.hair
 hint_role = caption                 # type role of the shortcut hint at a row's right edge · - · role · type.caption
 hint_gap = @space.4                 # gap between the label column and the hint column · - · len (u) · @space.4 = 2u = 10.8 px
@@ -4961,8 +4971,8 @@ shade_min = 0.35                    # how far the desktop dims behind the switch
 # modal / settings
 # =========================================================================
 [modal]
-w_frac = 40%                        # modal width · - · % of the viewport width · -
-h_frac = 52%                        # modal height · - · % of the viewport height · -
+w_frac = 75%                        # modal width · - · % of the viewport width · 3/4 ekranu od 2026-08-16, życzenie właściciela: okno ustawień rośnie do formularza, nie listy
+h_frac = 75%                        # modal height · - · % of the viewport height · razem z w_frac — 3/4 w pionie i poziomie
 min_w = 60u                         # minimum modal width · - · len (u) · 324.0 px
 min_w_min_px = 320px                # absolute floor for min_w · - · device px · companion of modal.min_w (3.2)
 min_h = 48u                         # minimum modal height · - · len (u) · 259.2 px
@@ -4983,6 +4993,15 @@ back_w_min = 13u                    # minimum width of that column · - · len (
 back_w_min_min_px = 70px            # absolute floor for back_w_min · - · device px · companion of settings.back_w_min (3.2)
 list_w_frac = 60%                   # width of the settings list column · - · % of the modal's width · -
 grid_cols = 3                       # columns in the settings icon grid · - · n · -
+col_gap = @space.6                  # rynna między kolumnami pasa · - · len (u) · 4u = 21.6 px
+zone_gap = @space.6                 # odstęp pionowy między pasami · - · len (u) · = section_gap, jeden rytm
+col_min_w = 72u                     # próg: węższa kolumna = pas składa się do listy · - · len (u) · 388.8 px
+col_min_w_min_px = 360px            # podłoga companion (3.2) · - · device px · dobrana tak, by 500 px składało, 720p+ trzymało kolumny
+bar_gap = @space.4                  # odstęp przycisków paska akcji · - · len (u) · 2u = 10.8 px
+rail_w_frac = 22%                   # szyna sekcji edytora (krok 3) · - · % szerokości treści · wzorem back_w_frac
+rail_w_min = 13u                    # minimum szyny · - · len (u) · 70.2 px
+rail_w_min_min_px = 70px            # podłoga companion (3.2) · - · device px · -
+subrail_w_frac = @settings.rail_w_frac  # druga kolumna podstron (ANEKS: układ trzypanelowy) · - · % szerokości treści · decyzja właściciela 2026-08-16: OBIE kolumny nawigacji równe, treść bierze całą resztę; poniżej progu col_min_w całe okno składa się do pionowej listy
 hint.role = caption                 # type role of a setting's hint line · - · role · type.caption
 hint_inset = 1.6x @type.caption.size    # inset of that hint under its control · - · rat of @type.caption.size · -
 note.role = caption                 # type role of a section note · - · role · type.caption
@@ -5029,11 +5048,11 @@ pad_top = 6u                        # space above the first boot line · - · le
 pad_x = 7u                          # left/right padding of the boot log · - · len (u) · 37.8 px; today vw(2.0)
 line_role = data                    # type role of one boot line · - · role · type.data: mono, tabular. A `[   0.0000] text` line is instrument data, and the binding has to AGREE with the face the line is drawn in: boot.rs drew every line in the monospace slot while this key said `body` (face `ui`), with a comment saying the face was the one part of a binding that could not be routed. It can (`Role::font`), so the key now says what the screen shows — and the stamps stop shivering, because `data` is tabular
 logo_role = display.hero            # type role of the product logo on the boot screen · - · role · type.display.hero
-sub_role = caption                  # type role of the version sub-line · - · role · type.caption
+sub_role = spare0                   # type role of the version sub-line · - · role · type.spare0, a role of its own: `caption` is shared by file tiles, the layout editor and the status bar, so the sub-line could not grow without dragging half the interface with it
 duration_ms = 3000ms                # how long the boot screen is on screen at all · - · ms, 0ms .. 10000ms · boot.rs:32; a theme that ships no boot log wants 0ms
 log_duration_ms = 1600ms            # how fast the log scrolls — all its lines inside this window · - · ms, 0ms .. 10000ms · boot.rs:38; the split between log and logo is the shape of the sequence
-logo_y_frac = 44%                   # where the logo's baseline sits · - · % of the viewport height · boot.rs:65's h/2 - big
-sub_gap = 0.4x @type.display.hero.size   # gap between the logo and its sub-line · - · rat of @type.display.hero.size · boot.rs:78
+logo_y_frac = 44%                   # where the TOP OF THE LOGO'S LINE BOX sits — the baseline lies one ascent below it (draw.rs text_center_fig -> text_verts) · - · % of the viewport height · boot.rs:125. This key said "baseline" for a long time, and sub_gap was written to match that fiction. The owner asked for the PAIR to be centred rather than the logo alone, and at the sizes above 44% already does it: the ink runs 481..598 px of 1080 and its middle lands within a pixel of the screen's (0.6 px at 1080p, 0.8 px at 1440p, 4.4 px at 720p, 10.7 px at 4K where unit_max_px clamps the unit). Moving this key would UNCENTRE the pair
+sub_gap = 1.25x @type.display.hero.size  # gap between the top of the logo's line box and the top of the sub-line's · - · rat of @type.display.hero.size · boot.rs:148. The two boxes part at 0.985x for the measured face and at 1.2x for the fallback metric, so 1.25x clears both and every real ascent up to ~1.36 em; it was 0.4x, and the sub-line was drawn THROUGH the logo
 
 # =========================================================================
 # emptystate — the line a panel draws when it has nothing to show. Its two
@@ -5153,7 +5172,7 @@ hexcell.empty = @surface.sunken     # an unfilled hexagon · images 1,3,4 · col
 
 # ---------------------------------------------------------------- bar / meter
 bar.track = @surface.sunken         # the unfilled part of a progress bar · images 1,7 · col · @surface.sunken
-bar.fill = @data.line               # the filled part · images 1,5,7 · col · a meter DISPLAYS A VALUE, so it is data, not chrome — image 5 is the proof the two split, and aurora's cyan lives or dies on this line
+bar.fill = @data.line               # the filled part · images 1,5,7 · col · a meter DISPLAYS A VALUE, so it is data, not chrome — image 5 is the proof the two split, and the aurora seed's cyan lived or died on this line
 bar.fill_warn = @severity.warning.text   # the filled part in a warning band · image 1's ENERGIA · col · @severity.warning.text
 bar.fill_crit = @severity.critical.text  # the filled part in a critical band · images 1,4 · col · @severity.critical.text
 bar.text = @text.primary            # the readout beside the bar · images 1,7 · col · @text.primary

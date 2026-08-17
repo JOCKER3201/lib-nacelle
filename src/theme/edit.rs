@@ -120,8 +120,8 @@ pub fn oklch_literal(c: Oklch) -> String {
 /// (`object/window.rs:97-104`). The four other `edge.*` keys the master
 /// declares — `color2`, `mode`, `gradient`, `axis` — have no reader in Rust
 /// and are NOT written here. Writing them would put a value in the file that
-/// changes nothing, which is exactly what makes `cockpit.theme:154-156` ask
-/// for a gradient border today and get a flat one.
+/// changes nothing — exactly how the cockpit theme (shipped until 2026-08-16)
+/// asked for a gradient border and got a flat one.
 /// The one edit that changes the border's COLOUR and nothing else.
 ///
 /// Split out for the state the editor opens in: no border kind chosen yet.
@@ -148,11 +148,11 @@ pub fn border_edits(scope: Scope, kind: Border, colour: Oklch, halo_dressed: boo
         // NEON dresses the halo ONLY where the theme has not: the default
         // master ships `radius = 0u` and `alpha = 0.0` and `window.rs:104`
         // returns at zero, so a bare switch was invisible there. A theme
-        // that has dressed its own halo — Cockpit 1.6u/0.34, aurora
-        // 0.70u/0.35, azure 0.6u/0.16, spring 1.1u/0.30, instrument
-        // 0.7u/0.22 — keeps its dress: writing the seeds over those five
-        // was the earlier shape's mistake, found in verification, and the
-        // comment that excused it had checked exactly one theme.
+        // that has dressed its own halo keeps its dress — the shipped
+        // variants (removed 2026-08-16) each wore their own numbers, from
+        // azure's 0.6u/0.16 to cockpit's 1.6u/0.34, and writing the seeds
+        // over all five was the earlier shape's mistake, found in
+        // verification; a user's theme deserves the same respect.
         Border::Neon => {
             out.push(Edit::new("glow.panel_edge.enabled", "true"));
             if !halo_dressed {
@@ -230,6 +230,457 @@ pub fn glass_edits(
     }
 }
 
+// ------------------------------------------------- the whole-theme sets
+//
+// Everything below landed 2026-08-16, when the owner's wish grew from "the
+// border and the panels' background" to the whole theme. The contract is
+// unchanged: pure functions, no engine, and not one token without a reader.
+// Every anchor was re-checked by grep on 2026-08-16 rather than taken from
+// the reconnaissance that proposed the groups — which was right seven times
+// and wrong once (see the severity note at `severity_role_edit`).
+
+/// The one colour that reskins the interface: `palette.accent`.
+///
+/// ONE token, because the master derives everything else from it: `[accent]`
+/// (default.theme:423-445) rebuilds primary/hover/active/dim/border/glow/
+/// on/focus, `[border]` (371-400) the five frame colours, `[chroma]`/`[hue]`
+/// (502-509) the sat()/hue() split that the surfaces and the text ride, and
+/// 22 of the 25 `[class]` ladders stand on `@accent.primary` (3506-3531).
+/// The readers are real and they are many: the seed itself at
+/// `theme/bake.rs:859`, the hue/chroma split at `term.rs:125` and `:133`,
+/// every class ladder entering Rust through `view/surface.rs:527`
+/// (`class_state` — serving button.rs:111, menu.rs:505, text_input.rs:964,
+/// tabs.rs:345, segmented.rs:140, checkbox.rs:93, winframe.rs:448,
+/// list.rs:352, paint.rs:685, ui.rs:1471 and :1574), the focus ring at
+/// `focus_ring.rs:87` (`focus.ring.color = @accent.focus`), the shared
+/// panel border at `window.rs:157` (`component.panel.border =
+/// @border.default`), the addon ABI at `plugin.rs:485`, the terminal cursor
+/// at `plugin.rs:651` and the solid badge at `view/paint.rs:541`.
+///
+/// OPAQUE BY FORCE: the derivations own every alpha (`border.default =
+/// alpha(@accent.primary, 0.78)` and its kin), and the three sliders this
+/// edit serves have no alpha knob. A translucent seed would fade exactly
+/// the places that use the seed raw — titles, cursors, class bases — and
+/// none of the places that alpha() it anyway: half the UI faded, with no
+/// knob saying so.
+pub fn accent_edit(scope: Scope, colour: Oklch) -> Edit {
+    let Scope::Theme = scope;
+    Edit::new("palette.accent", oklch_literal(Oklch { alpha: 1.0, ..colour }))
+}
+
+/// Where the surface ladder takes its hue from.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum SurfaceHue {
+    /// `surface.hue = @hue.accent` — the master's own wiring, restored as a
+    /// REFERENCE so a later accent drag keeps moving the surfaces with it.
+    FollowAccent,
+    /// A number in degrees, cutting the surfaces loose from the accent for
+    /// good. The master declares the override legal: the token "settles to
+    /// a number and a theme may override it with plain degrees"
+    /// (default.theme:317).
+    Own(f32),
+}
+
+/// The three meta-knobs over the six-level surface ladder.
+///
+/// NOT eighteen sliders: the levels' L rungs (0.115..0.330) are fixed by
+/// §5.5's ladder and the chroma coefficients are written into the six level
+/// expressions (default.theme:316-346). What a theme's hand may move is the
+/// hue they all sit on (`surface.hue`, read by all six expressions), a lift
+/// over every L and a scale over every C — the two scalars the BAKE applies
+/// to the whole ladder at `theme/bake.rs:519-520`, because the language has
+/// no arithmetic and "the same ladder, lifted" cannot be an expression
+/// (bake.rs:485-488). The rungs those knobs move are read for real:
+/// `surface.void` is the swapchain clear colour (`deco.rs:33`) and the
+/// terminal bed (`term.rs:91`, `term.bg = @surface.void`), `surface.panel`
+/// the window body (`winframe.rs:414`) and the shared panel fill
+/// (`window.rs:156`), `surface.raised` the menu and tooltip beds
+/// (`menu.rs:445`, `tooltip.rs:266`), `surface.sunken` the bar track
+/// (`view/paint.rs:482`), `surface.inset` the badge fill
+/// (`view/paint.rs:546`), `surface.scrim` the modal dimmer
+/// (`window.rs:126`) and `surface.base` crosses the addon ABI
+/// (`plugin.rs:489`).
+///
+/// Numbers, not colours — the none-bakes-to-black trap does not apply.
+pub fn surface_edits(scope: Scope, hue: SurfaceHue, lift: f32, chroma: f32) -> Vec<Edit> {
+    let Scope::Theme = scope;
+    vec![
+        Edit::new(
+            "surface.hue",
+            match hue {
+                SurfaceHue::FollowAccent => "@hue.accent".to_string(),
+                SurfaceHue::Own(deg) => format!("{:.2}", deg.rem_euclid(360.0)),
+            },
+        ),
+        // The clamps are the bake's own (bake.rs:519-520). Writing a wilder
+        // number would save a file that resolves to the clamp anyway, and
+        // reopens with a slider past its own wall.
+        Edit::new("surface.lift", format!("{:.4}", lift.clamp(-0.09, 0.09))),
+        Edit::new("surface.chroma", format!("{:.3}", chroma.clamp(0.0, 4.0))),
+    ]
+}
+
+/// The two meta-knobs over the seven text roles.
+///
+/// No HSV per role, deliberately: the roles' L ladder is FIXED
+/// (0.870/0.905/0.755/0.590/0.435/0.372, default.theme:348-370), their C is
+/// the accent's chroma times per-role coefficients and their hue IS the
+/// accent's — per-role colour sliders would fight the cascade and pass D's
+/// contrast floors both. Changing the accent re-derives all text by itself;
+/// what the master leaves to a theme's hand is `text.lift` and
+/// `text.chroma`, the pair the bake applies to the whole ladder at
+/// `theme/bake.rs:525-526`. The roles reach the screen through ONE reader —
+/// `view/paint.rs:157` resolves `type.<role>.fg` for every piece of text
+/// the toolkit draws — plus the terminal's default ink (`term.rs:42`,
+/// `term.fg = @text.primary`), panel titles (`panel.rs:305`), menu hints
+/// (`menu.rs:458`), tooltip text (`tooltip.rs:273`), toasts
+/// (`toaster.rs:234-235`) and badge text (`view/paint.rs:548`).
+pub fn text_edits(scope: Scope, lift: f32, chroma: f32) -> Vec<Edit> {
+    let Scope::Theme = scope;
+    vec![
+        Edit::new("text.lift", format!("{:.4}", lift.clamp(-0.10, 0.10))),
+        Edit::new("text.chroma", format!("{:.3}", chroma.clamp(0.0, 3.0))),
+    ]
+}
+
+/// §5.10's closed set of severity roles, in declaration order (`ui.rs:86`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SeverityRole {
+    Ok,
+    Info,
+    Warning,
+    Critical,
+    Contained,
+    Offline,
+    Unknown,
+}
+
+/// Pins one severity role: `.text` is the role's AUTHOR colour and the only
+/// token a hand needs. The master derives `.glyph`, `.edge`, `.fill` and
+/// `.on` from it (default.theme:574-583 and each role's kin), and author
+/// and derivations alike are what the renderer reads: `view/paint.rs:42`
+/// (.text), `:47` (.edge), `:52` (.fill), `:57` (.on), `:532`
+/// (.badge_style), the status pills at `ui.rs:147`, the toast title at
+/// `toaster.rs:234` — and `accent.warm` rides `severity.warning.text`
+/// (default.theme:442).
+///
+/// WHAT THIS GROUP DOES NOT GET, AND WHY. The reconnaissance proposed a
+/// MODE list and PULL / PULL_CLAMP / CHROMA sliders over `severity.mode`,
+/// `severity.pull`, `severity.pull_clamp` and `severity.chroma`. Grep says
+/// no: the four are declared (default.theme:546-558) and the "engine" their
+/// comments describe does not exist in Rust — the only match outside the
+/// theme file is a parser test (`parse.rs:1710`). Four controls over four
+/// dead tokens is the exact thing this module exists to refuse, so the
+/// group is the per-role pin instead, and the tests below keep the four on
+/// the dead list until someone writes their reader.
+///
+/// Opaque by force, like the accent seed: the derived members set their own
+/// alphas (`.edge` at 0.60, `.fill` at 0.88) and `.text` itself is drawn
+/// raw as status ink — a translucent author would fade the label and
+/// nothing else.
+pub fn severity_role_edit(scope: Scope, role: SeverityRole, colour: Oklch) -> Edit {
+    let Scope::Theme = scope;
+    let token = match role {
+        SeverityRole::Ok => "severity.ok.text",
+        SeverityRole::Info => "severity.info.text",
+        SeverityRole::Warning => "severity.warning.text",
+        SeverityRole::Critical => "severity.critical.text",
+        SeverityRole::Contained => "severity.contained.text",
+        SeverityRole::Offline => "severity.offline.text",
+        SeverityRole::Unknown => "severity.unknown.text",
+    };
+    Edit::new(token, oklch_literal(Oklch { alpha: 1.0, ..colour }))
+}
+
+/// The one cut the whole interface wears.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CornerCut {
+    Square,
+    Round,
+    Chamfer,
+}
+
+/// The corner language and the hairline, one set.
+///
+/// `corner.mode` is "the one place a theme states its corner language"
+/// (default.theme:287) and twelve preset siblings DERIVE from it; the
+/// derived words are read at `window.rs:158` (panel), `menu.rs:438`,
+/// `tooltip.rs:259`, `winframe.rs:450` and `view/paint.rs:690`
+/// (scrollbar). The three radii feed the presets' `*.corner` keys (41
+/// `@corner.*` references), read at `window.rs:165`, `button.rs:77`,
+/// `text_input.rs:950`, `tabs.rs:161`, `checkbox.rs:34`,
+/// `segmented.rs:147`, `menu.rs:442`, `tooltip.rs:263`, `winframe.rs:98`
+/// and `:492`, and `view/paint.rs:691`. `corner.segments` is read raw
+/// (`window.rs:74`, `focus_ring.rs:134`, `winframe.rs:452`,
+/// `plugin.rs:376`) and `stroke.hair` both raw (`view/paint.rs:595` and
+/// `:656`) and through 72 `@stroke.hair` derivations — `menu.border` and
+/// `tooltip.border` among them, which is why those two sets get their own
+/// width knobs and this one stays the global kerf.
+///
+/// `corner.pill` and `stroke.regular` are alive and deliberately NOT here:
+/// pill is a sentinel word, not a length a slider can mean, and regular's
+/// raw consumer chain (`winframe.border` = `@stroke.regular`,
+/// default.theme:4314, read at `winframe.rs:95`) is window chrome the owner
+/// has separate plans for (the CSD decision). Not writing an alive token
+/// costs nothing; the door stays open.
+pub fn shape_edits(
+    scope: Scope,
+    cut: CornerCut,
+    sm_u: f32,
+    md_u: f32,
+    lg_u: f32,
+    segments: u8,
+    hair_u: f32,
+) -> Vec<Edit> {
+    let Scope::Theme = scope;
+    let len = |v: f32, hi: f32| format!("{:.2}u", v.clamp(0.0, hi));
+    vec![
+        Edit::new(
+            "corner.mode",
+            match cut {
+                CornerCut::Square => "square",
+                CornerCut::Round => "round",
+                CornerCut::Chamfer => "chamfer",
+            },
+        ),
+        // 4u is past every radius the master states (lg = 2.2u); a wall,
+        // not a style opinion.
+        Edit::new("corner.sm", len(sm_u, 4.0)),
+        Edit::new("corner.md", len(md_u, 4.0)),
+        Edit::new("corner.lg", len(lg_u, 4.0)),
+        // The declared range (default.theme:284: n, 3 .. 16), and an
+        // integer — a fraction of a tessellation quad does not exist.
+        Edit::new("corner.segments", format!("{}", segments.clamp(3, 16))),
+        // The master's heaviest stroke is bold = 0.7u; 1u is the wall.
+        Edit::new("stroke.hair", len(hair_u, 1.0)),
+    ]
+}
+
+/// How the focus ring is stroked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RingStyle {
+    Solid,
+    Dashed,
+}
+
+/// Everything the focus-ring page's knobs say, named instead of positional
+/// — nine values in a row is where callers start swapping dash for gap.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct FocusRing {
+    pub style: RingStyle,
+    /// `focus.ring.width`, u. 0 is a legal knob position and an invisible
+    /// ring (`focus_ring.rs:63-65` returns at 0) — the slider saying "as
+    /// thin as it goes", not a defect here.
+    pub width_u: f32,
+    /// `focus.ring.offset`, u — declared 0u .. 2u (default.theme:3634).
+    pub offset_u: f32,
+    pub colour: Oklch,
+    /// The dashed rhythm, u. Written only for [`RingStyle::Dashed`].
+    pub dash_u: f32,
+    pub gap_u: f32,
+    /// The halo pair, `glow.focus_ring.*`.
+    pub halo: bool,
+    pub halo_alpha: f32,
+    /// Whether the LIVE theme already resolves a visible halo radius — read
+    /// off the theme by the caller, the same contract as `border_edits`'
+    /// `halo_dressed`.
+    pub halo_dressed: bool,
+}
+
+/// Readers, all in `object/focus_ring.rs`: `enabled` :60, `width` :63,
+/// `offset` :67, `style` :70, `dash`/`gap` :76, `color` :87, and the halo
+/// at :213 (`enabled`), :216 (`radius`), :217 (`alpha`).
+///
+/// The OFF branch is LINE's lesson verbatim: `enabled = false` is the whole
+/// of "off" (`focus_ring.rs:60-62` returns before anything else is read),
+/// so the theme's own dress — width, rhythm, colour, halo — stands, and
+/// switching back on finds it as it was. The halo dresses like NEON: the
+/// master ships `glow.focus_ring.radius = 0u` and `alpha = 0.0`
+/// (default.theme:1030 and :1039) and the renderer returns at zero
+/// (focus_ring.rs:219), so a bare switch is invisible on default — the
+/// alpha is the knob's own, and the radius is seeded ONLY on a theme that
+/// has not dressed its halo. `glow.focus_ring.color` has no reader (the
+/// halo wears the ring's colour) and is not written; the ring's corner pair
+/// derives from `@field.corner` and belongs to the shape group.
+pub fn focus_ring_edits(scope: Scope, enabled: bool, ring: &FocusRing) -> Vec<Edit> {
+    let Scope::Theme = scope;
+    let mut out = vec![Edit::new("focus.ring.enabled", if enabled { "true" } else { "false" })];
+    if !enabled {
+        return out;
+    }
+    out.push(Edit::new(
+        "focus.ring.style",
+        match ring.style {
+            RingStyle::Solid => "solid",
+            RingStyle::Dashed => "dashed",
+        },
+    ));
+    out.push(Edit::new("focus.ring.width", format!("{:.2}u", ring.width_u.clamp(0.0, 2.0))));
+    out.push(Edit::new("focus.ring.offset", format!("{:.2}u", ring.offset_u.clamp(0.0, 2.0))));
+    out.push(Edit::new("focus.ring.color", oklch_literal(ring.colour)));
+    if ring.style == RingStyle::Dashed {
+        // SOLID leaves the rhythm standing for the reason LINE leaves the
+        // halo's dress: a trip through solid must not flatten it.
+        out.push(Edit::new("focus.ring.dash", format!("{:.2}u", ring.dash_u.max(0.0))));
+        out.push(Edit::new("focus.ring.gap", format!("{:.2}u", ring.gap_u.max(0.0))));
+    }
+    out.push(Edit::new(
+        "glow.focus_ring.enabled",
+        if ring.halo { "true" } else { "false" },
+    ));
+    if ring.halo {
+        out.push(Edit::new(
+            "glow.focus_ring.alpha",
+            format!("{:.3}", ring.halo_alpha.clamp(0.0, 1.0)),
+        ));
+        if !ring.halo_dressed {
+            // The same seed the border's NEON wears; one number, one place
+            // to change it when the owner decides the halos should differ.
+            out.push(Edit::new("glow.focus_ring.radius", "1.6u"));
+        }
+    }
+    out
+}
+
+/// Split out of the ring set the way `border_colour_edit` is split out of
+/// `border_edits`: the dim is read on the WINDOW (`winframe.rs:467`), not
+/// on the ring, and it must keep working with the ring switched off —
+/// inside `focus_ring_edits` the OFF branch would swallow it. Declared
+/// 0.3 .. 1.0 (default.theme:3631), and the floor is real: "dimming an
+/// unfocused window must not hide it".
+pub fn unfocused_dim_edit(scope: Scope, dim: f32) -> Edit {
+    let Scope::Theme = scope;
+    Edit::new("focus.unfocused_dim", format!("{:.3}", dim.clamp(0.3, 1.0)))
+}
+
+/// The context menu's chrome — and the WINDOW menu's, which is the same
+/// object on the same tokens (`winframe.rs:683`, `:688`, `:689` read
+/// `component.menu.fill` / `menu.border` / `component.menu.border` for the
+/// menu the frame opens), so one set serves both.
+///
+/// Readers: fill `menu.rs:445` (a bed), ring width `menu.rs:446`, ring
+/// colour `menu.rs:453` (and `:482`, where the separator rule wears it),
+/// hint ink `menu.rs:458`. The corner pair is NOT here — `menu.corner` and
+/// `menu.corner_mode` derive from the winframe's, and the winframe's from
+/// `[corner]` (default.theme:4350-4351), so the shape group already moves
+/// them and a second author here would sever that.
+///
+/// The colours pass through as given: a bed may be translucent by a theme's
+/// design, and unlike the glass set there is no opacity knob here to own
+/// the channel — the desktop's three sliders hand an opaque colour, and a
+/// seeded colour keeps its own alpha.
+pub fn menu_edits(scope: Scope, fill: Oklch, border: Oklch, border_w_u: f32, hint: Oklch) -> Vec<Edit> {
+    let Scope::Theme = scope;
+    vec![
+        Edit::new("component.menu.fill", oklch_literal(fill)),
+        Edit::new("component.menu.border", oklch_literal(border)),
+        // Floored, not clamped: 0 means "no ring" (menu.rs:446-448 skips
+        // the draw), which is a look a theme may mean.
+        Edit::new("menu.border", format!("{:.2}u", border_w_u.max(0.0))),
+        Edit::new("component.menu.hint", oklch_literal(hint)),
+    ]
+}
+
+/// The tooltip's chrome, the menu's sibling float.
+///
+/// Readers: fill `tooltip.rs:266` (a bed), ring width `tooltip.rs:267`,
+/// ring colour `tooltip.rs:269`, text ink `tooltip.rs:273`. The corner pair
+/// stays with the shape group for the same reason the menu's does
+/// (`tooltip.corner = @corner.sm`, `tooltip.corner_mode =
+/// @menu.corner_mode`, default.theme:4801-4802).
+pub fn tooltip_edits(scope: Scope, fill: Oklch, edge: Oklch, border_w_u: f32, text: Oklch) -> Vec<Edit> {
+    let Scope::Theme = scope;
+    vec![
+        Edit::new("component.tooltip.fill", oklch_literal(fill)),
+        Edit::new("component.tooltip.edge", oklch_literal(edge)),
+        Edit::new("tooltip.border", format!("{:.2}u", border_w_u.max(0.0))),
+        Edit::new("component.tooltip.text", oklch_literal(text)),
+    ]
+}
+
+/// Whether the bar takes layout space.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScrollbarMode {
+    Overlay,
+    Inset,
+    None,
+}
+
+/// Which side of the content the bar sits on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScrollbarEdge {
+    Right,
+    Left,
+}
+
+/// The scrollbar's geometry and behaviour.
+///
+/// Readers, in `view/scroll.rs` unless said otherwise: `mode` :559 (and by
+/// word at :595, the ABI's path), `edge` :572, `w` :576, `w_hover` :577,
+/// `auto_hide` :585, `fade_ms` :586; the track switch and its colour at
+/// `view/paint.rs:673` and `:674`.
+///
+/// What stays out, and why. `scrollbar.margin` and `thumb_min` are alive
+/// (scroll.rs:578-579) but no knob was asked for — not writing an alive
+/// token costs nothing. The THUMB's colour is a class ladder
+/// (`scrollbar.thumb`, per-rung through `class_state`, view/paint.rs:685);
+/// this model writes single tokens, not ladder rungs, so the thumb keeps
+/// moving with the accent instead. The corner pair derives from `[corner]`
+/// (default.theme:4833-4834) and belongs to the shape group.
+pub fn scrollbar_edits(
+    scope: Scope,
+    mode: ScrollbarMode,
+    edge: ScrollbarEdge,
+    w_u: f32,
+    w_hover_u: f32,
+    auto_hide: bool,
+    fade_ms: f32,
+    track: Option<Oklch>,
+) -> Vec<Edit> {
+    let Scope::Theme = scope;
+    let mut out = vec![
+        Edit::new(
+            "scrollbar.mode",
+            match mode {
+                ScrollbarMode::Overlay => "overlay",
+                ScrollbarMode::Inset => "inset",
+                ScrollbarMode::None => "none",
+            },
+        ),
+        Edit::new(
+            "scrollbar.edge",
+            match edge {
+                ScrollbarEdge::Right => "right",
+                ScrollbarEdge::Left => "left",
+            },
+        ),
+        // Below half a unit the bar cannot be aimed at; 4u the master's
+        // own w_hover doubled — walls, not opinions.
+        Edit::new("scrollbar.w", format!("{:.2}u", w_u.clamp(0.5, 4.0))),
+        Edit::new("scrollbar.w_hover", format!("{:.2}u", w_hover_u.clamp(0.5, 4.0))),
+        Edit::new("scrollbar.auto_hide", if auto_hide { "true" } else { "false" }),
+    ];
+    if auto_hide {
+        // The declaration itself says the fade is "read only when
+        // auto_hide = true" (default.theme:4837), so the OFF trip leaves
+        // the theme's own duration standing, dash-and-gap style.
+        out.push(Edit::new(
+            "scrollbar.fade_ms",
+            format!("{:.0}ms", fade_ms.clamp(0.0, 2000.0)),
+        ));
+    }
+    match track {
+        Some(colour) => {
+            out.push(Edit::new("scrollbar.track", "on"));
+            out.push(Edit::new("component.scrollbar.track", oklch_literal(colour)));
+        }
+        // OFF is the switch alone: paint.rs:673 never reads the colour
+        // then, and the theme's own groove colour survives the trip.
+        None => out.push(Edit::new("scrollbar.track", "off")),
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,8 +727,8 @@ mod tests {
         let line = border_edits(Scope::Theme, Border::Line, colour, false);
         let neon = border_edits(Scope::Theme, Border::Neon, colour, false);
         let neon_dressed = border_edits(Scope::Theme, Border::Neon, colour, true);
-        // A theme that has dressed its own halo keeps it: aurora's 0.70u
-        // must not become Cockpit's 1.6u because someone chose NEON.
+        // A theme that has dressed its own halo keeps it: a theme's own
+        // 0.70u must not become the seed's 1.6u because someone chose NEON.
         for k in ["glow.panel_edge.radius", "glow.panel_edge.alpha"] {
             assert!(
                 !neon_dressed.iter().any(|e| e.token == k),
@@ -310,7 +761,8 @@ mod tests {
         // The whole point of the module. These four are declared by the master
         // and read by no Rust in the workspace (measured 2026-08-16); writing
         // them would produce a file that asks for a gradient border and gets a
-        // flat one, which is what `cockpit.theme` does today.
+        // flat one — which is what the shipped cockpit theme did, until it
+        // left with the rest on 2026-08-16.
         const DEAD: [&str; 5] = [
             "elev.panel.edge.color2",
             "elev.panel.edge.mode",
@@ -420,6 +872,369 @@ mod tests {
         assert!(
             mid.iter().any(|e| e.token.ends_with("glass.rank") && e.value == "1.70"),
             "a fractional depth was rounded away"
+        );
+    }
+
+    // ------------------------------------ the whole-theme sets (2026-08-16)
+
+    /// Every token the new sets may write, each with the reader that earns
+    /// it a place. THE list the module's iron rule stands on: a control
+    /// exists only for a token some Rust reads, and the anchors were
+    /// grepped on 2026-08-16, not inherited from the reconnaissance.
+    const ALIVE: &[(&str, &str)] = &[
+        ("palette.accent", "theme/bake.rs:859; class ladders via view/surface.rs:527"),
+        ("surface.hue", "the six level exprs (default.theme:317-331); levels read at deco.rs:33, winframe.rs:414"),
+        ("surface.lift", "theme/bake.rs:519"),
+        ("surface.chroma", "theme/bake.rs:520"),
+        ("text.lift", "theme/bake.rs:525"),
+        ("text.chroma", "theme/bake.rs:526"),
+        ("severity.ok.text", "view/paint.rs:42; ui.rs:147"),
+        ("severity.info.text", "view/paint.rs:42; ui.rs:147"),
+        ("severity.warning.text", "view/paint.rs:42; toaster.rs:234; accent.warm (default.theme:442)"),
+        ("severity.critical.text", "view/paint.rs:42; ui.rs:147"),
+        ("severity.contained.text", "view/paint.rs:42; ui.rs:147"),
+        ("severity.offline.text", "view/paint.rs:42; ui.rs:147"),
+        ("severity.unknown.text", "view/paint.rs:42; ui.rs:147"),
+        ("corner.mode", "derived words read at window.rs:158, menu.rs:438, tooltip.rs:259, winframe.rs:450, view/paint.rs:690"),
+        ("corner.sm", "tooltip.rs:263 via tooltip.corner = @corner.sm, among 41 @corner.* refs"),
+        ("corner.md", "window.rs:165 via panel.corner = @corner.md"),
+        ("corner.lg", "winframe.rs:98 via winframe.corner"),
+        ("corner.segments", "window.rs:74; focus_ring.rs:134; winframe.rs:452"),
+        ("stroke.hair", "view/paint.rs:595 and :656; 72 @stroke.hair derivations"),
+        ("focus.ring.enabled", "focus_ring.rs:60"),
+        ("focus.ring.style", "focus_ring.rs:70"),
+        ("focus.ring.width", "focus_ring.rs:63"),
+        ("focus.ring.offset", "focus_ring.rs:67"),
+        ("focus.ring.color", "focus_ring.rs:87"),
+        ("focus.ring.dash", "focus_ring.rs:76"),
+        ("focus.ring.gap", "focus_ring.rs:76"),
+        ("glow.focus_ring.enabled", "focus_ring.rs:213"),
+        ("glow.focus_ring.radius", "focus_ring.rs:216"),
+        ("glow.focus_ring.alpha", "focus_ring.rs:217"),
+        ("focus.unfocused_dim", "winframe.rs:467"),
+        ("component.menu.fill", "menu.rs:445; winframe.rs:683"),
+        ("component.menu.border", "menu.rs:453 and :482; winframe.rs:689"),
+        ("menu.border", "menu.rs:446; winframe.rs:688"),
+        ("component.menu.hint", "menu.rs:458"),
+        ("component.tooltip.fill", "tooltip.rs:266"),
+        ("component.tooltip.edge", "tooltip.rs:269"),
+        ("tooltip.border", "tooltip.rs:267"),
+        ("component.tooltip.text", "tooltip.rs:273"),
+        ("scrollbar.mode", "view/scroll.rs:559 and :595"),
+        ("scrollbar.edge", "view/scroll.rs:572"),
+        ("scrollbar.w", "view/scroll.rs:576"),
+        ("scrollbar.w_hover", "view/scroll.rs:577"),
+        ("scrollbar.auto_hide", "view/scroll.rs:585"),
+        ("scrollbar.fade_ms", "view/scroll.rs:586"),
+        ("scrollbar.track", "view/paint.rs:673"),
+        ("component.scrollbar.track", "view/paint.rs:674"),
+    ];
+
+    /// Declared by the master, read by no Rust in the workspace, and near
+    /// enough to the new groups that a control over them was actually
+    /// PROPOSED — the reconnaissance wanted a MODE list and three sliders
+    /// on the first four, on the strength of theme-file comments describing
+    /// an engine that does not exist (the only match outside the theme file
+    /// is `parse.rs:1710`, a parser test). Measured 2026-08-16.
+    const DEAD_CONTROLS: [&str; 5] = [
+        "severity.mode",
+        "severity.pull",
+        "severity.pull_clamp",
+        "severity.chroma",
+        "glow.focus_ring.color",
+    ];
+
+    /// Every branch of every new set, for the whitelist test and the
+    /// dead-token test both — a conditional write that only fires for
+    /// DASHED or for a dressed halo must not escape the net.
+    fn all_new_edits() -> Vec<Edit> {
+        let colour = c(0.7, 0.15, 200.0, 1.0);
+        let mut all = vec![accent_edit(Scope::Theme, colour)];
+        for hue in [SurfaceHue::FollowAccent, SurfaceHue::Own(210.0)] {
+            all.extend(surface_edits(Scope::Theme, hue, 0.02, 1.2));
+        }
+        all.extend(text_edits(Scope::Theme, -0.03, 0.8));
+        for role in [
+            SeverityRole::Ok,
+            SeverityRole::Info,
+            SeverityRole::Warning,
+            SeverityRole::Critical,
+            SeverityRole::Contained,
+            SeverityRole::Offline,
+            SeverityRole::Unknown,
+        ] {
+            all.push(severity_role_edit(Scope::Theme, role, colour));
+        }
+        for cut in [CornerCut::Square, CornerCut::Round, CornerCut::Chamfer] {
+            all.extend(shape_edits(Scope::Theme, cut, 0.8, 1.2, 2.2, 6, 0.2));
+        }
+        for (enabled, style, halo, dressed) in [
+            (false, RingStyle::Solid, false, false),
+            (true, RingStyle::Solid, false, false),
+            (true, RingStyle::Dashed, true, false),
+            (true, RingStyle::Dashed, true, true),
+        ] {
+            let ring = FocusRing {
+                style,
+                width_u: 0.3,
+                offset_u: 0.4,
+                colour,
+                dash_u: 1.6,
+                gap_u: 0.8,
+                halo,
+                halo_alpha: 0.3,
+                halo_dressed: dressed,
+            };
+            all.extend(focus_ring_edits(Scope::Theme, enabled, &ring));
+        }
+        all.push(unfocused_dim_edit(Scope::Theme, 0.62));
+        all.extend(menu_edits(Scope::Theme, colour, colour, 0.2, colour));
+        all.extend(tooltip_edits(Scope::Theme, colour, colour, 0.2, colour));
+        for (mode, auto_hide, track) in [
+            (ScrollbarMode::Overlay, true, Some(colour)),
+            (ScrollbarMode::Inset, false, None),
+            (ScrollbarMode::None, true, None),
+        ] {
+            all.extend(scrollbar_edits(
+                Scope::Theme,
+                mode,
+                ScrollbarEdge::Right,
+                1.2,
+                2.0,
+                auto_hide,
+                260.0,
+                track,
+            ));
+        }
+        all
+    }
+
+    /// The iron rule, applied to every new set at once: only tokens off the
+    /// ALIVE list, never one off the dead list. A token missing from ALIVE
+    /// fails even if it is real — adding it there WITH ITS ANCHOR is the
+    /// price of writing it, which is the point.
+    #[test]
+    fn every_token_a_new_set_writes_has_a_named_reader() {
+        for e in all_new_edits() {
+            assert!(
+                !DEAD_CONTROLS.contains(&e.token),
+                "the model wrote `{}`, which no renderer reads",
+                e.token
+            );
+            assert!(
+                ALIVE.iter().any(|(t, _)| *t == e.token),
+                "`{}` is not on the ALIVE list; name its reader there before writing it",
+                e.token
+            );
+        }
+    }
+
+    #[test]
+    fn the_accent_and_a_severity_pin_write_one_opaque_author_each() {
+        let translucent = c(0.7, 0.15, 200.0, 0.4);
+        let a = accent_edit(Scope::Theme, translucent);
+        assert_eq!(a.token, "palette.accent");
+        // The derivations own the alphas (border.default at 0.78 and kin);
+        // a translucent seed would fade the raw uses and nothing else.
+        assert!(!a.value.contains('/'), "the accent seed kept a slider's stray alpha");
+        let s = severity_role_edit(Scope::Theme, SeverityRole::Critical, translucent);
+        assert_eq!(s.token, "severity.critical.text");
+        assert!(!s.value.contains('/'), "the severity author kept a stray alpha");
+        // Each role pins ITS text: seven roles, seven distinct tokens.
+        let mut tokens: Vec<&str> = [
+            SeverityRole::Ok,
+            SeverityRole::Info,
+            SeverityRole::Warning,
+            SeverityRole::Critical,
+            SeverityRole::Contained,
+            SeverityRole::Offline,
+            SeverityRole::Unknown,
+        ]
+        .map(|r| severity_role_edit(Scope::Theme, r, translucent).token)
+        .to_vec();
+        tokens.dedup();
+        assert_eq!(tokens.len(), 7, "two severity roles collided on one token");
+    }
+
+    #[test]
+    fn the_surface_hue_is_a_reference_until_a_number_cuts_it_loose() {
+        let follow = surface_edits(Scope::Theme, SurfaceHue::FollowAccent, 0.0, 1.0);
+        assert_eq!(
+            follow[0].value, "@hue.accent",
+            "FOLLOW must restore the derivation as a reference, or a later \
+             accent drag stops moving the surfaces"
+        );
+        let own = surface_edits(Scope::Theme, SurfaceHue::Own(410.0), 0.0, 1.0);
+        assert_eq!(own[0].value, "50.00", "degrees are written on the circle, 410 = 50");
+        // The clamps are the bake's own (bake.rs:519-520, :525-526): a file
+        // must not carry a number the resolve would clamp anyway.
+        let wild = surface_edits(Scope::Theme, SurfaceHue::FollowAccent, 0.5, 9.0);
+        assert_eq!(wild[1].value, "0.0900");
+        assert_eq!(wild[2].value, "4.000");
+        let text = text_edits(Scope::Theme, -0.5, 9.0);
+        assert_eq!(text[0].value, "-0.1000");
+        assert_eq!(text[1].value, "3.000");
+    }
+
+    #[test]
+    fn the_shape_set_speaks_the_language() {
+        let e = shape_edits(Scope::Theme, CornerCut::Chamfer, 9.0, 1.2, 2.2, 40, 9.0);
+        let of = |t: &str| e.iter().find(|x| x.token == t).unwrap().value.clone();
+        assert_eq!(of("corner.mode"), "chamfer");
+        // Lengths carry the unit; a bare number would bake as device px
+        // and shrink on every display denser than the author's.
+        for t in ["corner.sm", "corner.md", "corner.lg", "stroke.hair"] {
+            assert!(of(t).ends_with('u'), "{t} lost its unit: {}", of(t));
+        }
+        assert_eq!(of("corner.sm"), "4.00u", "the radius wall (4u) did not hold");
+        assert_eq!(of("stroke.hair"), "1.00u", "the kerf wall (1u) did not hold");
+        // Segments are a count with the declared range (3..16); a fraction
+        // of a tessellation quad does not exist.
+        assert_eq!(of("corner.segments"), "16");
+        let few = shape_edits(Scope::Theme, CornerCut::Round, 0.8, 1.2, 2.2, 1, 0.2);
+        assert!(few.iter().any(|x| x.token == "corner.segments" && x.value == "3"));
+    }
+
+    #[test]
+    fn a_disabled_ring_is_one_flag_and_the_dress_stands() {
+        let ring = FocusRing {
+            style: RingStyle::Dashed,
+            width_u: 0.3,
+            offset_u: 0.4,
+            colour: c(0.7, 0.15, 200.0, 1.0),
+            dash_u: 1.6,
+            gap_u: 0.8,
+            halo: true,
+            halo_alpha: 0.3,
+            halo_dressed: false,
+        };
+        let off = focus_ring_edits(Scope::Theme, false, &ring);
+        // focus_ring.rs:60-62 returns on the flag before anything else is
+        // read, so the flag is the WHOLE of "off" — everything more would
+        // flatten a dress the renderer was not even going to look at.
+        assert_eq!(off.len(), 1, "OFF wrote more than the flag: {off:?}");
+        assert_eq!(off[0].token, "focus.ring.enabled");
+        assert_eq!(off[0].value, "false");
+    }
+
+    #[test]
+    fn solid_keeps_the_dashed_rhythm_and_the_halo_dresses_like_neon() {
+        let mut ring = FocusRing {
+            style: RingStyle::Solid,
+            width_u: 0.3,
+            offset_u: 0.4,
+            colour: c(0.7, 0.15, 200.0, 1.0),
+            dash_u: 1.6,
+            gap_u: 0.8,
+            halo: true,
+            halo_alpha: 0.3,
+            halo_dressed: false,
+        };
+        let solid = focus_ring_edits(Scope::Theme, true, &ring);
+        for t in ["focus.ring.dash", "focus.ring.gap"] {
+            assert!(
+                !solid.iter().any(|e| e.token == t),
+                "SOLID wrote {t}, flattening the theme's dashed rhythm"
+            );
+        }
+        // The halo mirrors NEON exactly: the master ships radius 0u and
+        // alpha 0.0 (default.theme:1030/:1039) and the renderer returns at
+        // zero, so an undressed theme gets the seed radius — and a dressed
+        // one keeps its own.
+        assert!(solid.iter().any(|e| e.token == "glow.focus_ring.radius"));
+        assert!(solid.iter().any(|e| e.token == "glow.focus_ring.alpha" && e.value == "0.300"));
+        ring.halo_dressed = true;
+        let dressed = focus_ring_edits(Scope::Theme, true, &ring);
+        assert!(
+            !dressed.iter().any(|e| e.token == "glow.focus_ring.radius"),
+            "the halo seed overwrote a theme's own radius"
+        );
+        ring.halo = false;
+        let bare = focus_ring_edits(Scope::Theme, true, &ring);
+        assert!(bare.iter().any(|e| e.token == "glow.focus_ring.enabled" && e.value == "false"));
+        for t in ["glow.focus_ring.radius", "glow.focus_ring.alpha"] {
+            assert!(
+                !bare.iter().any(|e| e.token == t),
+                "halo OFF wrote {t}, flattening the dress"
+            );
+        }
+        // And the dim lives outside the ring set, so it works with the
+        // ring off; the floor is the declared one (0.3 — a window must
+        // not vanish).
+        let dim = unfocused_dim_edit(Scope::Theme, 0.0);
+        assert_eq!(dim.token, "focus.unfocused_dim");
+        assert_eq!(dim.value, "0.300");
+    }
+
+    #[test]
+    fn the_menu_and_tooltip_sets_cover_both_floats_exactly() {
+        let k = c(0.4, 0.05, 220.0, 1.0);
+        let menu: Vec<&str> = menu_edits(Scope::Theme, k, k, 0.2, k).iter().map(|e| e.token).collect();
+        assert_eq!(
+            menu,
+            ["component.menu.fill", "component.menu.border", "menu.border", "component.menu.hint"],
+            "the menu set drifted from the four tokens menu.rs and winframe.rs read"
+        );
+        let tip: Vec<&str> =
+            tooltip_edits(Scope::Theme, k, k, 0.2, k).iter().map(|e| e.token).collect();
+        assert_eq!(
+            tip,
+            [
+                "component.tooltip.fill",
+                "component.tooltip.edge",
+                "tooltip.border",
+                "component.tooltip.text"
+            ],
+            "the tooltip set drifted from the four tokens tooltip.rs reads"
+        );
+        // The widths carry their unit, and a negative slider means zero,
+        // the renderer's own floor (menu.rs:446, tooltip.rs:267).
+        let w = menu_edits(Scope::Theme, k, k, -1.0, k);
+        assert!(w.iter().any(|e| e.token == "menu.border" && e.value == "0.00u"));
+    }
+
+    #[test]
+    fn the_scrollbar_track_and_fade_follow_their_switches() {
+        let k = c(0.2, 0.02, 220.0, 1.0);
+        let on = scrollbar_edits(
+            Scope::Theme,
+            ScrollbarMode::Inset,
+            ScrollbarEdge::Left,
+            0.1,
+            9.0,
+            true,
+            5000.0,
+            Some(k),
+        );
+        let of = |v: &Vec<Edit>, t: &str| v.iter().find(|e| e.token == t).map(|e| e.value.clone());
+        assert_eq!(of(&on, "scrollbar.mode").unwrap(), "inset");
+        assert_eq!(of(&on, "scrollbar.edge").unwrap(), "left");
+        // The walls: below 0.5u the bar cannot be aimed at, and the fade's
+        // declared range ends at 2000ms — with the unit written, because
+        // the token is a duration, not a length.
+        assert_eq!(of(&on, "scrollbar.w").unwrap(), "0.50u");
+        assert_eq!(of(&on, "scrollbar.w_hover").unwrap(), "4.00u");
+        assert_eq!(of(&on, "scrollbar.fade_ms").unwrap(), "2000ms");
+        assert_eq!(of(&on, "scrollbar.track").unwrap(), "on");
+        assert!(of(&on, "component.scrollbar.track").is_some());
+        let off = scrollbar_edits(
+            Scope::Theme,
+            ScrollbarMode::Overlay,
+            ScrollbarEdge::Right,
+            1.2,
+            2.0,
+            false,
+            260.0,
+            None,
+        );
+        // The declaration says the fade is read only when auto_hide is on
+        // (default.theme:4837), and OFF must not repaint the groove: the
+        // switch is written, the dress is not.
+        assert!(of(&off, "scrollbar.fade_ms").is_none(), "the fade was written for a bar that never fades");
+        assert_eq!(of(&off, "scrollbar.track").unwrap(), "off");
+        assert!(
+            of(&off, "component.scrollbar.track").is_none(),
+            "track OFF overwrote the theme's groove colour"
         );
     }
 }
