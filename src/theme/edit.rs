@@ -177,6 +177,35 @@ pub fn border_edits(scope: Scope, kind: Border, colour: Oklch, halo_dressed: boo
     out
 }
 
+/// The glass trio's key names on every rung of the `[elev.*]` ladder a
+/// background edit reaches: `(rank, tint, wash)`.
+///
+/// A rung is reachable exactly when some object is BUILT from it, because
+/// `elev::Level` reads the trio off whichever rung it was named with and
+/// nothing else reads it at all. Two qualify (measured 2026-08-17):
+///
+/// * `elev.panel` — every panel (`object/panel.rs`) and every window frame
+///   (`object/window.rs`, which joined the ladder the same day). This is
+///   the rung the editor has written since 2026-08-16.
+/// * `elev.popover` — the menu and the tooltip, which joined the ladder on
+///   2026-08-17 and until then drew their bodies from a private copy of
+///   the rules. Adding it here is what stops the owner's FROSTED theme
+///   from being a window of frosted glass with a flat opaque menu standing
+///   on it.
+///
+/// The other seven are deliberately absent, each for its own reason.
+/// `raised`, `focused`, `inset` and `overlay` have no object built from
+/// them, so a value written there would sit in the user's file changing
+/// nothing — the one thing this module's header forbids. `backdrop` and
+/// `board` are the screen behind everything, not a surface on it.
+/// `fixture` is excluded on the owner's own boundary: the desktop's
+/// decoration is not what "background" means in this editor, and
+/// `deco.rs` reads it by a path of its own.
+const GLASS_RUNGS: [(&str, &str, &str); 2] = [
+    ("elev.panel.glass.rank", "elev.panel.glass.tint", "elev.panel.glass.wash"),
+    ("elev.popover.glass.rank", "elev.popover.glass.tint", "elev.popover.glass.wash"),
+];
+
 /// Tokens that carry the background, for one scope: WINDOWS AND WIDGETS,
 /// never the desktop's decoration.
 ///
@@ -185,11 +214,23 @@ pub fn border_edits(scope: Scope, kind: Border, colour: Oklch, halo_dressed: boo
 /// by the panel rung through the master's derivation (`[elev.panel] fill =
 /// @component.panel.fill`), so ONE token colours both. Writing
 /// `elev.panel.fill` instead would sever that derivation for good — the
-/// windows would stop following. The glass trio lives on the panel rung
-/// (`elev.panel.glass.*`, underived, safe to write) and is read by BOTH
-/// drawers since 2026-08-16. The fixture's own glass (`elev.fixture.*`,
-/// `deco.rs`) is not touched from here, which is what keeps the board's
-/// decoration out of the editor's reach by construction.
+/// windows would stop following. The glass trio lives on the rungs
+/// themselves ([`GLASS_RUNGS`], underived, safe to write). The fixture's
+/// own glass (`elev.fixture.*`, `deco.rs`) is not touched from here, which
+/// is what keeps the board's decoration out of the editor's reach by
+/// construction.
+///
+/// A GLASSY KIND IS WRITTEN TO EVERY REACHABLE RUNG, a solid one is
+/// UNWRITTEN from every one of them. Both halves matter: without the
+/// first, a menu opened over a frosted window is the one flat plate on
+/// the screen; without the second, going back to SOLID leaves the menu
+/// frosted for good, because the rank that turned it on is still in the
+/// file. SOLID's own COLOUR stays on the single shared seam and does not
+/// travel — a menu and a tooltip have bodies of their own
+/// (`component.menu.fill`, `component.tooltip.fill`) and the editor has
+/// no control that claims to set them, whereas glass has no colour of its
+/// own to disagree about: it is whatever is behind it.
+///
 /// `opacity`, `depth` and `coverage` are the kind's own knobs, 0..1 and
 /// 1..=3: opacity scales the whole effect (a translucent SOLID lets the
 /// scene through sharp; a translucent tint blends the blur with the sharp
@@ -210,36 +251,37 @@ pub fn glass_edits(
     // Fractional on purpose: the emitter mixes two pyramid rungs by the
     // fraction, so 1.7 is a real depth and not a rounding of 2.
     let rank = format!("{:.2}", depth.clamp(1.0, 3.0));
-    match kind {
-        Glass::Solid => vec![
-            Edit::new("component.panel.fill", oklch_literal(Oklch { alpha: op, ..wash })),
-            Edit::new("elev.panel.glass.rank", "0"),
-        ],
-        Glass::Blur => vec![
-            Edit::new("elev.panel.glass.rank", rank),
-            Edit::new("elev.panel.glass.tint", oklch_literal(Oklch { alpha: op, ..tint })),
-            // The word, not a colour with nothing in it. BLUR is the tint
-            // alone, and the master's own way of saying so at this key is
-            // `none` — the same word it ships on all nine `[elev.*]` rungs.
-            //
-            // This used to write `oklch(0, 0, 0 / 0)` because `none` came
-            // back OPAQUE BLACK and painted the panels out. The cause was
-            // in `bake.rs`, not in the overlay (the master's own `none`
-            // measured the same black), and it is fixed: a sentinel now
-            // empties the colour slot it was leaving seeded. Held down by
-            // `tests/sentinel_none_colour.rs`, which asserts the word and
-            // the transparent literal are the same answer.
-            Edit::new("elev.panel.glass.wash", "none"),
-        ],
-        Glass::Frosted => vec![
-            Edit::new("elev.panel.glass.rank", rank),
-            Edit::new("elev.panel.glass.tint", oklch_literal(Oklch { alpha: op, ..tint })),
-            Edit::new(
-                "elev.panel.glass.wash",
-                oklch_literal(Oklch { alpha: coverage.clamp(0.0, 1.0), ..wash }),
-            ),
-        ],
+    let tint_lit = oklch_literal(Oklch { alpha: op, ..tint });
+    // The word, not a colour with nothing in it. BLUR is the tint alone,
+    // and the master's own way of saying so at this key is `none` — the
+    // same word it ships on all nine `[elev.*]` rungs.
+    //
+    // This used to write `oklch(0, 0, 0 / 0)` because `none` came back
+    // OPAQUE BLACK and painted the panels out. The cause was in `bake.rs`,
+    // not in the overlay (the master's own `none` measured the same
+    // black), and it is fixed: a sentinel now empties the colour slot it
+    // was leaving seeded. Held down by `tests/sentinel_none_colour.rs`,
+    // which asserts the word and the transparent literal are the same
+    // answer.
+    let wash_lit = match kind {
+        Glass::Frosted => oklch_literal(Oklch { alpha: coverage.clamp(0.0, 1.0), ..wash }),
+        _ => "none".to_string(),
+    };
+    let mut out = Vec::new();
+    if let Glass::Solid = kind {
+        out.push(Edit::new("component.panel.fill", oklch_literal(Oklch { alpha: op, ..wash })));
     }
+    for (rank_key, tint_key, wash_key) in GLASS_RUNGS {
+        match kind {
+            Glass::Solid => out.push(Edit::new(rank_key, "0")),
+            Glass::Blur | Glass::Frosted => {
+                out.push(Edit::new(rank_key, rank.clone()));
+                out.push(Edit::new(tint_key, tint_lit.clone()));
+                out.push(Edit::new(wash_key, wash_lit.clone()));
+            }
+        }
+    }
+    out
 }
 
 // ------------------------------------------------- the whole-theme sets
@@ -1155,6 +1197,55 @@ mod tests {
         assert!(
             solid.iter().any(|e| e.token == "elev.panel.glass.rank" && e.value == "0"),
             "SOLID left a previous glass standing"
+        );
+    }
+
+    /// The popover rung's half of the background, named LITERALLY and not
+    /// through [`GLASS_RUNGS`]: a test that iterated the same list the
+    /// model does would go on passing if the list shrank back to one rung,
+    /// which is precisely the regression it exists to catch.
+    ///
+    /// The claim is the owner's picture, not a token count. A menu and a
+    /// tooltip have been surfaces of `elev.popover` since 2026-08-17, so
+    /// "the background is frosted glass" has to mean the same thing when a
+    /// menu opens over the window as it does for the window under it. Both
+    /// glassy kinds, because BLUR and FROSTED differ only in the wash.
+    #[test]
+    fn a_glassy_background_reaches_the_popover_rung_as_well_as_the_panel() {
+        let colour = c(0.62, 0.08, 210.0, 1.0);
+        for kind in [Glass::Blur, Glass::Frosted] {
+            let edits = glass_edits(Scope::Theme, kind, colour, colour, 0.8, 2.0, 0.42);
+            let of = |token: &str| {
+                edits.iter().find(|e| e.token == token).map(|e| e.value.clone())
+            };
+            for key in ["rank", "tint", "wash"] {
+                let panel = of(&format!("elev.panel.glass.{key}"));
+                let popover = of(&format!("elev.popover.glass.{key}"));
+                assert!(
+                    popover.is_some(),
+                    "{kind:?} frosted the window and left elev.popover.glass.{key} alone, \
+                     so a menu over it stays a flat plate"
+                );
+                assert_eq!(
+                    panel, popover,
+                    "{kind:?} gave the popover rung a different {key} from the panel's; \
+                     one background means one material"
+                );
+            }
+        }
+    }
+
+    /// …and the way back. A rank is what turns the glass ON, so SOLID has
+    /// to write it to zero on EVERY rung it ever raised — otherwise the
+    /// menu keeps the frost it was given, the file says so, and no control
+    /// in the editor can take it off again.
+    #[test]
+    fn going_back_to_solid_takes_the_glass_off_the_popover_rung_too() {
+        let colour = c(0.3, 0.05, 220.0, 1.0);
+        let solid = glass_edits(Scope::Theme, Glass::Solid, colour, colour, 1.0, 2.0, 0.42);
+        assert!(
+            solid.iter().any(|e| e.token == "elev.popover.glass.rank" && e.value == "0"),
+            "SOLID left the popover rung frosted: {solid:?}"
         );
     }
 

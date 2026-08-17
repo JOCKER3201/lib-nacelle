@@ -7,11 +7,15 @@
 //! `edge.axis`), and beyond them the glass pair, the two glows, the
 //! drop shadow and the reflection. An object that assembles its rung out
 //! of primitives at its own call site therefore owns a PRIVATE COPY of
-//! those rules, and the copies drift: `panel.rs` reads the fill as a bed
-//! and guards it on alpha, `window.rs` does not; whichever of them the
-//! next level's author reads is the one that level will resemble.
+//! those rules, and the copies drift. They did: `panel.rs` read the fill
+//! as a bed and guarded it on alpha where `window.rs` did neither, and
+//! `window.rs` went on stroking a FLAT ring for a year after the rung
+//! grew a second colour — whichever copy the next level's author read
+//! was the one that level came to resemble.
 //!
-//! [`Level`] is the one reader. A consumer names a rung once — `"elev.
+//! [`Level`] is the one reader, and as of 2026-08-17 there are no
+//! others: the panel, the window frame, the menu and the tooltip all
+//! name a rung and take what it says. A consumer names it once — `"elev.
 //! popover"` — and gets the whole dictionary, so when the glass ranks
 //! and the shadow 9-slice land they land for every rung at once instead
 //! of for whichever object was being edited that week.
@@ -131,6 +135,14 @@ impl Level {
     /// that does not exist would resolve to `MISSING` — whose colour is
     /// the engine's raw ink, which is not what "the theme said nothing"
     /// should paint.
+    ///
+    /// The window frame (`window.rs`, 2026-08-17) is the third caller and
+    /// its reason is not age but a SEAM: `component.panel.fill` is the one
+    /// token a window and a panel share, because the master derives
+    /// `[elev.panel] fill` from it. A frame that stopped naming it and read
+    /// the rung's own `fill` instead would sever that derivation, and the
+    /// theme editor's background — which writes the shared token on
+    /// purpose — would stop colouring windows.
     pub(crate) fn worn_as(
         mut self,
         fill: &str,
@@ -162,15 +174,28 @@ impl Level {
     /// `cut_of` applies to a corner word.
     ///
     /// What is NOT read is `edge.gradient`, the NAMED multi-stop slot
-    /// (`@grad.<name>`). Measured 2026-08-17: the engine bakes no stops at
-    /// all. `[grad]`'s `<name>.stops` is an array of `[position, colour]`
-    /// pairs, `cascade.rs` declares each pair as a token, and `bake.rs`'s
-    /// `Value::Array(_) => {}` drops it — so `ResolvedTheme` has no place
-    /// to hold a stop list and no accessor to answer one with. Adding it
-    /// is a theme-engine job (bake the eight `[grad].samples` RGBA stops
-    /// per slot, plus a `stops(id)` accessor); until then the sugar pair is
-    /// the whole of what a theme can ask for here, which is what the
-    /// master's own comment calls "the color/color2 pair".
+    /// (`@grad.<name>`), and TWO doors are shut in front of it rather than
+    /// the one this comment named until 2026-08-17. Both were measured,
+    /// and [`tests::the_named_gradient_has_two_doors_shut_and_this_is_which`]
+    /// holds the measurement down:
+    ///
+    /// * THE NAME HAS NOTHING TO POINT AT. `@grad.spectrum` is §3.2's
+    ///   reference production, which resolves a TOKEN — and `grad.spectrum`
+    ///   is a SECTION. `theme::id` answers `None` for it, so the value a
+    ///   theme would write here cannot be resolved at all, let alone read.
+    ///   Naming a section needs either a language production or a per-rung
+    ///   `enum:` of the gradients the file declares.
+    /// * AND THE STOPS ARE NOT BAKED. `[grad]`'s `<name>.stops` is an array
+    ///   of `[position, colour]` pairs; `cascade.rs` declares each PAIR as a
+    ///   token, and `bake.rs`'s `Value::Array(_) => {}` drops the pair — so
+    ///   `grad.spectrum.stops[1]`, whose position the master writes as 0.34,
+    ///   bakes to a scalar of 0 and an unwritten colour. `ResolvedTheme` has
+    ///   no place to hold a stop list and no accessor to answer one with.
+    ///
+    /// Opening either alone buys nothing, which is why this is a
+    /// theme-engine job and not a reader's. Until then the sugar pair is the
+    /// whole of what a theme can ask for here, which is what the master's
+    /// own comment calls "the color/color2 pair".
     fn edge_gradient(&self, t: &theme::ResolvedTheme) -> Option<(Color, [f32; 2])> {
         if self.mode_gradient? != t.enum_of(self.edge_mode) {
             return None;
@@ -299,18 +324,18 @@ pub(crate) mod tests {
 
     // ------------------------------------------- the no-move proof
     //
-    // Shared with `menu.rs` and `tooltip.rs`, whose claim is not about a
-    // gradient at all: that JOINING the ladder moved no pixel. Written
-    // once, here, because two copies of what counts as proof is the same
-    // mistake in the test suite that this module exists to undo in the
-    // drawing code.
+    // Shared with `menu.rs`, `tooltip.rs` and `window.rs`, whose claim is
+    // not about a gradient at all: that JOINING the ladder moved no
+    // pixel. Written once, here, because three copies of what counts as
+    // proof is the same mistake in the test suite that this module exists
+    // to undo in the drawing code.
 
     /// What an object drew before it joined the ladder — the `ring_fill`
     /// + `ring` pair from its own five tokens, transcribed from the
-    /// private copies `menu.rs` and `tooltip.rs` carried until
-    /// 2026-08-17. It is a TRANSCRIPT, so it keeps their two departures
-    /// from the rung: the body is drawn whatever its alpha, and the ring
-    /// is drawn on the width alone.
+    /// private copies `menu.rs`, `tooltip.rs` and `window.rs` carried
+    /// until 2026-08-17. It is a TRANSCRIPT, so it keeps their two
+    /// departures from the rung: the body is drawn whatever its alpha,
+    /// and the ring is drawn on the width alone.
     pub(crate) fn the_private_copy(
         dl: &mut DrawList,
         t: &theme::ResolvedTheme,
@@ -415,6 +440,48 @@ pub(crate) mod tests {
                 assert_eq!(theme::enum_index(axis, word), Some(i as u16), "{rung} {word}");
             }
         }
+    }
+
+    /// A TRIPWIRE, not a wish: the two doors [`Level::edge_gradient`]
+    /// names in front of `edge.gradient` are measured here, so the day
+    /// either opens this test fails and the reader that owes the master a
+    /// multi-stop ring is written instead of forgotten.
+    ///
+    /// `edge.gradient` is the last of Z16's four keys still without a
+    /// reader — the other three (`mode`, `color2`, `axis`) gained one on
+    /// 2026-08-17 — and the audit is owed the reason in numbers rather
+    /// than in prose.
+    #[test]
+    fn the_named_gradient_has_two_doors_shut_and_this_is_which() {
+        // The slot itself is real on every rung: what is missing is not
+        // the declaration.
+        for rung in ["elev.panel", "elev.focused", "elev.popover"] {
+            assert!(
+                theme::id(&format!("{rung}.edge.gradient")).is_some(),
+                "{rung} stopped declaring the named-gradient slot"
+            );
+        }
+        // Door one: `@grad.spectrum` is a reference to a SECTION, and §3.2's
+        // reference production resolves tokens. There is nothing under that
+        // name for a theme's value to point at.
+        assert_eq!(
+            theme::id("grad.spectrum"),
+            None,
+            "a gradient's NAME became a token — the reference door is open, \
+             so `edge.gradient = @grad.<name>` can now be resolved and owes \
+             `Level::edge_gradient` a reader"
+        );
+        // Door two: the pairs under it are tokens, and the bake drops them.
+        // The master writes this stop's position as 0.34; a baked pair would
+        // answer with it.
+        let stop = theme::id("grad.spectrum.stops[1]")
+            .expect("the master's stop list stopped declaring its slots");
+        assert_eq!(
+            theme::resolved().px(stop),
+            0.0,
+            "a `[position, colour]` pair now bakes — the stop door is open, \
+             so a multi-stop ring is buildable and owes the ladder a reader"
+        );
     }
 
     /// USTERKA 2. A gradient written in the theme reaches the ring as a
