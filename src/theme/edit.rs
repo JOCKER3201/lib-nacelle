@@ -123,13 +123,18 @@ pub fn oklch_literal(c: Oklch) -> String {
 
 /// Tokens that carry the border, for one scope.
 ///
-/// `elev.panel.edge.color` and `.width` are what `elev::Level` reads
-/// (`object/elev.rs:68-69`); the glow keys are what `panel_edge_glow` reads
-/// (`object/window.rs:97-104`). The four other `edge.*` keys the master
-/// declares — `color2`, `mode`, `gradient`, `axis` — have no reader in Rust
-/// and are NOT written here. Writing them would put a value in the file that
-/// changes nothing — exactly how the cockpit theme (shipped until 2026-08-16)
-/// asked for a gradient border and got a flat one.
+/// `elev.panel.edge.color` and `.width` are what `elev::Level` reads; the
+/// glow keys are what `panel_edge_glow` reads (`object/window.rs`). Of the
+/// four other `edge.*` keys the master declares, THREE gained a reader on
+/// 2026-08-17 — `color2`, `mode` and `axis` are the two-stop sugar pair, and
+/// `elev::Level::edge_gradient` reads all three — but the editor has no
+/// GRADIENT border kind to offer yet, so it still writes none of them and
+/// the two it does write stay neutral about them. `gradient` (the named
+/// multi-stop slot) remains unread: the engine bakes no stop arrays at all,
+/// which is a theme-engine job and is written up at `edge_gradient`.
+/// Writing a key nothing reads would put a value in the file that changes
+/// nothing — exactly how the cockpit theme (shipped until 2026-08-16) asked
+/// for a gradient border and got a flat one.
 /// The one edit that changes the border's COLOUR and nothing else.
 ///
 /// Split out for the state the editor opens in: no border kind chosen yet.
@@ -213,19 +218,18 @@ pub fn glass_edits(
         Glass::Blur => vec![
             Edit::new("elev.panel.glass.rank", rank),
             Edit::new("elev.panel.glass.tint", oklch_literal(Oklch { alpha: op, ..tint })),
-            // A fully transparent colour, NOT the word `none`. The master
-            // may declare the key with `none`, but the same word arriving
-            // through an overlay bakes to OPAQUE BLACK and paints itself
-            // over the glass — measured 2026-08-16, three screenshots: the
-            // set with `none` renders black panels, the same set without
-            // the line renders glass. The resolver's overlay handling of
-            // the sentinel is a real bug, recorded in the plan; until it
-            // is fixed, the editor writes what it means: no wash, as a
-            // colour with nothing in it.
-            Edit::new(
-                "elev.panel.glass.wash",
-                oklch_literal(Oklch { l: 0.0, c: 0.0, h: 0.0, alpha: 0.0 }),
-            ),
+            // The word, not a colour with nothing in it. BLUR is the tint
+            // alone, and the master's own way of saying so at this key is
+            // `none` — the same word it ships on all nine `[elev.*]` rungs.
+            //
+            // This used to write `oklch(0, 0, 0 / 0)` because `none` came
+            // back OPAQUE BLACK and painted the panels out. The cause was
+            // in `bake.rs`, not in the overlay (the master's own `none`
+            // measured the same black), and it is fixed: a sentinel now
+            // empties the colour slot it was leaving seeded. Held down by
+            // `tests/sentinel_none_colour.rs`, which asserts the word and
+            // the transparent literal are the same answer.
+            Edit::new("elev.panel.glass.wash", "none"),
         ],
         Glass::Frosted => vec![
             Edit::new("elev.panel.glass.rank", rank),
@@ -1081,20 +1085,24 @@ mod tests {
 
     #[test]
     fn no_set_writes_a_token_nothing_reads() {
-        // The whole point of the module. These four are declared by the master
-        // and read by no Rust in the workspace (measured 2026-08-16); writing
+        // The whole point of the module. These two are declared by the master
+        // and read by no Rust in the workspace (measured 2026-08-17); writing
         // them would produce a file that asks for a gradient border and gets a
         // flat one — which is what the shipped cockpit theme did, until it
         // left with the rest on 2026-08-16.
-        const DEAD: [&str; 5] = [
-            "elev.panel.edge.color2",
-            "elev.panel.edge.mode",
-            "elev.panel.edge.gradient",
-            "elev.panel.edge.axis",
-            "glow.panel_edge.color",
-        ];
+        const DEAD: [&str; 2] = ["elev.panel.edge.gradient", "glow.panel_edge.color"];
         // `glass.rank` left this list on 2026-08-16, the day it gained its
         // first reader (`elev::Level::draw`, `window::frame`).
+        //
+        // `edge.color2`, `edge.mode` and `edge.axis` left it on 2026-08-17,
+        // the day the SUGAR PAIR gained one (`elev::Level::edge_gradient`).
+        // They are still not written here — the editor has no GRADIENT
+        // border kind — but a model that started writing them would now be
+        // writing something the screen answers, so their absence from this
+        // list is the honest state of the workspace rather than a licence.
+        // `edge.gradient` stays: `[grad].<name>.stops` is an array, and
+        // arrays are dropped by `bake.rs` (`Value::Array(_) => {}`), so
+        // there is no baked stop list for any reader to ask for.
         let colour = c(0.7, 0.15, 200.0, 1.0);
         let mut all = Vec::new();
         for kind in [Border::Line, Border::Neon] {

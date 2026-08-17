@@ -20,7 +20,6 @@
 //! its `motion.tooltip_*`, and until then appearing is instantaneous,
 //! which is honest rather than half-animated.
 
-use crate::draw::Corner;
 use crate::theme::{self, Color, TokenId};
 use crate::{ui, Ctx, Rect};
 use std::collections::hash_map::DefaultHasher;
@@ -146,6 +145,29 @@ impl Tooltips {
         self.shown.as_deref()
     }
 
+    /// The rung a tooltip is a surface of, dressed in the tooltip's own
+    /// key names.
+    ///
+    /// `[elev.popover]` is Elev 5, whose gloss names a tooltip in the
+    /// master itself. What the tooltip states for itself is exactly what
+    /// it stated before it joined the ladder — the same five tokens the
+    /// old private copy read — so joining moved no pixel; what it gains is
+    /// everything the rung says and the object never could: the glass pair
+    /// (`elev.popover.glass.*`, rank 0 in the master, so nothing is drawn
+    /// today), the panel-edge bloom, and every key the ladder grows next.
+    fn level() -> &'static super::elev::Level {
+        static LEVEL: OnceLock<super::elev::Level> = OnceLock::new();
+        LEVEL.get_or_init(|| {
+            super::elev::Level::of("elev.popover").worn_as(
+                "component.tooltip.fill",
+                "tooltip.corner_mode",
+                "tooltip.corner",
+                "component.tooltip.edge",
+                "tooltip.border",
+            )
+        })
+    }
+
     /// The frame's decision, as arithmetic: which request (if any) is
     /// due to be shown, given the two themed times in milliseconds.
     ///
@@ -184,17 +206,10 @@ impl Tooltips {
         static H: OnceLock<TokenId> = OnceLock::new();
         static PAD_X: OnceLock<TokenId> = OnceLock::new();
         static PAD_Y: OnceLock<TokenId> = OnceLock::new();
-        static CORNER: OnceLock<TokenId> = OnceLock::new();
-        static CORNER_MODE: OnceLock<TokenId> = OnceLock::new();
-        static CORNER_IDX: OnceLock<(Option<u16>, Option<u16>)> = OnceLock::new();
-        static BORDER: OnceLock<TokenId> = OnceLock::new();
         static OFFSET: OnceLock<TokenId> = OnceLock::new();
         static MAX_W: OnceLock<TokenId> = OnceLock::new();
         static ROLE: OnceLock<TokenId> = OnceLock::new();
-        static FILL: OnceLock<TokenId> = OnceLock::new();
-        static EDGE: OnceLock<TokenId> = OnceLock::new();
         static INK: OnceLock<TokenId> = OnceLock::new();
-        static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
 
         let t = theme::resolved();
         let delay = t.px(tok(&DELAY, "tooltip.delay_ms"));
@@ -252,22 +267,19 @@ impl Tooltips {
         self.shown = Some(text.clone());
 
         // ---- the box ----------------------------------------------------
-        // A tooltip is the same floating chrome a menu is, so the master
-        // points `tooltip.corner_mode` at the menu's rather than letting
-        // two boxes that appear side by side answer differently.
-        let style =
-            super::window::corner_style(t, tok(&CORNER_MODE, "tooltip.corner_mode"), &CORNER_IDX);
-        // `Corner::sized` rather than a clamp: §5.0's `pill` bakes to a
-        // negative number, so a floor at zero would draw the square a
-        // master writing `pill` wrote to avoid — and say nothing.
-        let corner = Corner::sized(style, t.px(tok(&CORNER, "tooltip.corner")), r);
-        let c = [corner; 4];
-        let seg = super::window::corner_segments(t, &SEGMENTS, corner.size);
-        ctx.dl.ring_fill(r, &c, seg, col(t.bed(tok(&FILL, "component.tooltip.fill"))));
-        let bw = t.px(tok(&BORDER, "tooltip.border")).max(0.0);
-        if bw > 0.0 {
-            ctx.dl.ring(r, &c, seg, bw, col(t.color(tok(&EDGE, "component.tooltip.edge"))));
-        }
+        // Elev 5, the popover rung — a tooltip is one of the four surfaces
+        // the master's own `[elev.popover]` gloss names ("menu, tooltip,
+        // context menu, drag ghost"), and until 2026-08-17 it was the only
+        // kind of surface in the toolkit that stood outside the ladder
+        // altogether: no glass, no shadow, no rung. It wore its own copy of
+        // the rules instead, which is the drift `elev.rs`'s header is about.
+        //
+        // The body, cut and ring stay on the tooltip's OWN keys, so the
+        // picture does not move: a tooltip is the same floating chrome a
+        // menu is (the master points `tooltip.corner_mode` at the menu's
+        // rather than letting two boxes that appear side by side answer
+        // differently) but it keeps its own tighter radius.
+        Self::level().draw(ctx, r);
 
         // ---- the text ---------------------------------------------------
         let ink = col(t.color(tok(&INK, "component.tooltip.text")));
@@ -326,6 +338,39 @@ mod tests {
         all_in, drawn_runs, face_follows_the_theme, measure_in_child, report, role_word,
     };
     use crate::draw::DrawCmd;
+
+    /// USTERKA 3, the no-move proof — the tooltip's half of the claim
+    /// `menu.rs` makes in the same words. A tooltip is a surface of Elev 5
+    /// since 2026-08-17; joining the ladder had to leave the picture
+    /// exactly where it was under the master, and this compares the rung
+    /// against the private copy it replaced, command for command and
+    /// vertex for vertex.
+    ///
+    /// Conditional, and deliberately so, on what the master ships:
+    /// `elev.popover.glass.rank = 0` and `glow.panel_edge.enabled =
+    /// false`. A theme that raises either is MEANT to move the tooltip —
+    /// that it now can is the whole of what joining bought.
+    #[test]
+    fn joining_the_ladder_moved_no_pixel() {
+        use crate::draw::DrawList;
+        use crate::object::elev::tests::{same_picture, the_private_copy};
+        let t = theme::resolved();
+        let r = Rect::new(40.0, 25.0, 180.0, 30.0);
+        let mut was = DrawList::recording();
+        the_private_copy(
+            &mut was,
+            t,
+            r,
+            "component.tooltip.fill",
+            "tooltip.corner_mode",
+            "tooltip.corner",
+            "component.tooltip.edge",
+            "tooltip.border",
+        );
+        let mut now = DrawList::recording();
+        Tooltips::level().draw_in(&mut now, t, r);
+        same_picture(&was, &now);
+    }
 
     const DELAY: f32 = 600.0;
     const LINGER: f32 = 120.0;

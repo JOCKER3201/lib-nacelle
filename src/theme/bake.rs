@@ -463,7 +463,37 @@ pub fn bake(
                 .filter(|_| schema.kind(id) != Kind::Enum)
             {
                 // A sentinel folds to its `f32` and can never reach a vertex.
-                Some(s) => scalars[i] = s,
+                //
+                // It could, until 2026-08-17, through the OTHER array. The
+                // colours are seeded opaque black — the right seed for a
+                // token that is not a colour at all — and this arm wrote
+                // only the scalar, so every `color()`/`bed()` reader of a
+                // key holding `none` was answered with a black quad at full
+                // alpha. `none` on a colour key means the exact opposite:
+                // the master says so at every one of them ("none = the
+                // second quad is not drawn", "none = draw no quad"), and
+                // every reader in the toolkit spells that as `if c.a > 0.0`.
+                //
+                // It went unseen because the master ships `glass.rank = 0`
+                // on all nine `[elev.*]` rungs, so no frame ever asked for
+                // the wash's colour. The theme editor's BLUR/FROSTED raises
+                // the rank, the wash is read for the first time — and the
+                // panels came up black. That was blamed on the overlay
+                // (`.gap-program/obalone-naprawy.md`, and the workaround at
+                // `theme::edit::glass_edits`), but the two doors are the
+                // same door: measured 2026-08-17, the master's own `none`
+                // answered rgba(0,0,0,1) exactly like the preview's.
+                //
+                // All four sentinels, not just `none`: §5.0 says a sentinel
+                // is a scalar and is "never overloaded onto a colour
+                // channel", so the honest reading of the colour slot is
+                // that there is no colour in it. A consumer that must tell
+                // `none` from `same_as_parent` reads the scalar, where the
+                // word still folds to its own `f32`.
+                Some(s) => {
+                    scalars[i] = s;
+                    colors[i] = Color::TRANSPARENT;
+                }
                 None => enums[i] = schema.enum_index(id, w).unwrap_or(0),
             },
             Value::Codepoint(c) => scalars[i] = *c as f32,
@@ -673,6 +703,9 @@ pill = pill
 [panel]
 content_pad = 2.8u
 content_pad_x = same_as_parent
+# A colour key the theme declines to fill in — the master's `glass.wash`
+# shape, which is what the sentinel-colour test needs to see.
+wash = none
 border = 0.2u
 [a11y]
 min_hit = 4.8u
@@ -794,9 +827,33 @@ ansi = [ #000000, #CD3131 ]
         let t = bake_at(&mut fx, 1080.0);
         assert_eq!(px(&fx, &t, "panel.content_pad_x"), -3.0); // same_as_parent
         assert_eq!(px(&fx, &t, "corner.pill"), -2.0); // pill
+        assert_eq!(px(&fx, &t, "panel.wash"), 0.0); // none
+
+        // The claim in the name, actually made. The assertion here was
+        // `a >= 0.0` for every token, which is true of the opaque black the
+        // colours array is SEEDED with and so could never fail — and while
+        // it stood, `none` on a colour key answered `color()` with a black
+        // quad at full alpha. Walk the values instead: wherever a token
+        // holds a sentinel, its colour slot must say there is no colour.
+        let r = resolve_default(&fx.schema, &mut fx.out);
+        let mut seen = 0;
         for i in 0..t.len() {
-            assert!(t.color(TokenId(i as u16)).a >= 0.0);
+            let id = TokenId(i as u16);
+            let Some(Value::Word(w)) = r.get(id) else { continue };
+            if fx.schema.kind(id) == Kind::Enum || super::super::expr::sentinel(w).is_none() {
+                continue;
+            }
+            seen += 1;
+            let c = t.color(id);
+            assert_eq!(
+                c.a,
+                0.0,
+                "\"{}\" holds the sentinel `{w}` and answers colour() with alpha {}",
+                fx.schema.name(id),
+                c.a
+            );
         }
+        assert_eq!(seen, 3, "the fixture's sentinels went missing; the walk proved nothing");
     }
 
     #[test]
