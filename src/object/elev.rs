@@ -421,7 +421,6 @@ pub(crate) mod tests {
         assert_eq!(dl.shape_len(), 1, "the rung wrote more than one silhouette");
         let rec = dl.shapes()[0];
         use crate::draw::Shape;
-        assert_eq!(rec.flags & Shape::GLASS, Shape::GLASS, "the frost is not on the record");
         assert_eq!(rec.flags & Shape::FILL, Shape::FILL, "the wash did not weld");
         assert_eq!(rec.flags & Shape::STROKE, Shape::STROKE, "the ring did not weld");
         assert_eq!(

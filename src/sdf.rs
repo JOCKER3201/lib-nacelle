@@ -220,14 +220,34 @@ pub fn over(top: [f32; 4], bottom: [f32; 4]) -> [f32; 4] {
 /// alpha and is the only one of the three that can brighten. The
 /// master's ladder says exactly this at `elev.*.glass`; this function
 /// is where those words become arithmetic.
-pub fn glass_base(blur: [f32; 4], tint: [f32; 4], wash: [f32; 4]) -> [f32; 4] {
+///
+/// `display` IS THE SEAM, and it is a parameter because getting it
+/// wrong is invisible until somebody loads a colour LUT. The renderer
+/// ends every fragment with `grade()`, which is the identity until one
+/// is loaded and an arbitrary curve after that. A frosted surface is
+/// drawn in two pieces — a core of two ordinary quads the hardware
+/// blends, and this band — so the two pieces agree only if what the
+/// band folds is what the hardware would have blended. OVER is
+/// associative, so a transform applied to EACH LAYER survives the fold:
+/// `over(f(w), f(k))` composited on any destination is exactly `f(w)`
+/// over `f(k)` over that destination. A transform applied to the FOLD
+/// does not survive it — `f(over(w, k))` is a different colour, and the
+/// difference draws as a rectangle inside the panel, on the line where
+/// the core's cut happens to fall. Pass the identity where there is no
+/// display transform to apply.
+pub fn glass_base(
+    blur: [f32; 4],
+    tint: [f32; 4],
+    wash: [f32; 4],
+    display: impl Fn([f32; 4]) -> [f32; 4],
+) -> [f32; 4] {
     let frost = [
         blur[0] * tint[0],
         blur[1] * tint[1],
         blur[2] * tint[2],
         blur[3] * tint[3],
     ];
-    over(wash, frost)
+    over(display(wash), display(frost))
 }
 
 // ---- The oriented lane (f3 §3.1, §K4) --------------------------------
@@ -1561,15 +1581,48 @@ mod tests {
         [f(p[0], 0.11), f(p[1], 0.07), f(p[0] + p[1], 0.05), 1.0]
     }
 
+    /// The DISPLAY TRANSFORM every fragment of the renderer ends with:
+    /// `shaders.rs: grade()`, a colour LUT the user may load (the
+    /// desktop's `ColorLut` setting), applied to rgb and never to
+    /// alpha. Nothing below depends on WHICH curve it is — smoothstep
+    /// is here because it is monotone, bounded and unmistakably
+    /// non-linear — and non-linearity is the whole of what matters: it
+    /// is what makes the PLACE a transform is applied observable in the
+    /// picture. Identity is the shipped default and the case in which
+    /// the question cannot be asked, which is why the proofs run both.
+    fn graded(c: [f32; 4], lut: bool) -> [f32; 4] {
+        if !lut {
+            return c;
+        }
+        let f = |x: f32| {
+            let x = x.clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        };
+        [f(c[0]), f(c[1]), f(c[2]), c[3]]
+    }
+
     /// One `fs_shape_glass` fragment, out of this file's functions — the
     /// twin of [`fs_shape`] with `glass_base` where its fill was.
-    fn fs_shape_glass(rec: &Shape, at: [f32; 2], local: [f32; 2], colour: [f32; 4]) -> [f32; 4] {
+    ///
+    /// The grade goes on the three LAYERS — the frost and the wash
+    /// inside `glass_base`, the stroke on its way into [`compose`] —
+    /// and not on the composite, because the core of the same surface
+    /// is two ordinary draws the hardware blends after grading each.
+    /// `fs_shape` may and does grade its composite: its fill is ONE
+    /// layer, so there is nothing there for a fold to reassociate.
+    fn fs_shape_glass(
+        rec: &Shape,
+        at: [f32; 2],
+        local: [f32; 2],
+        colour: [f32; 4],
+        lut: bool,
+    ) -> [f32; 4] {
         let d = d_shape(local, rec.half, &record_corners(rec));
         let has = |bit: u32| f32::from(rec.flags & bit != 0);
         let wash = [colour[0], colour[1], colour[2], colour[3] * has(Shape::FILL)];
         compose(
-            glass_base(blurred(at), rec.tint, wash),
-            rec.stroke_c,
+            glass_base(blurred(at), rec.tint, wash, |c| graded(c, lut)),
+            graded(rec.stroke_c, lut),
             coverage(d, 1.0),
             band_coverage(d, rec.stroke, 1.0) * has(Shape::STROKE),
         )
@@ -1581,7 +1634,12 @@ mod tests {
     /// sample times the vertex colour, by screen position, uv ignored —
     /// `SHAPE_GLASS_*` is the fragment above, and everything else is
     /// what [`frags`] already knew.
-    fn frags_glass(dl: &DrawList, p: [f32; 2]) -> Vec<[f32; 4]> {
+    ///
+    /// `lut` arms the display transform in all four of them, each where
+    /// its own fragment applies it: `fs_blur` and `fs_main` grade what
+    /// they return, `fs_shape` grades its composite, and the frosted
+    /// fragment grades its layers.
+    fn frags_glass(dl: &DrawList, p: [f32; 2], lut: bool) -> Vec<[f32; 4]> {
         let mut out = Vec::new();
         let mut start = 0usize;
         for run in &dl.runs {
@@ -1596,18 +1654,18 @@ mod tests {
                     Some(img) if is_glass_rank(img) => {
                         let g = blurred(p);
                         let c = q[0].color;
-                        [g[0] * c[0], g[1] * c[1], g[2] * c[2], g[3] * c[3]]
+                        graded([g[0] * c[0], g[1] * c[1], g[2] * c[2], g[3] * c[3]], lut)
                     }
-                    _ if q[0].shape == crate::draw::NO_SHAPE => q[0].color,
+                    _ if q[0].shape == crate::draw::NO_SHAPE => graded(q[0].color, lut),
                     Some(img) if is_shape_glass(img) => {
                         let rec = &dl.shapes()[q[0].shape as usize];
                         let c = [q[0].pos[0] - q[0].uv[0], q[0].pos[1] - q[0].uv[1]];
-                        fs_shape_glass(rec, p, [p[0] - c[0], p[1] - c[1]], q[0].color)
+                        fs_shape_glass(rec, p, [p[0] - c[0], p[1] - c[1]], q[0].color, lut)
                     }
                     _ => {
                         let rec = &dl.shapes()[q[0].shape as usize];
                         let c = [q[0].pos[0] - q[0].uv[0], q[0].pos[1] - q[0].uv[1]];
-                        fs_shape(rec, [p[0] - c[0], p[1] - c[1]], q[0].color)
+                        graded(fs_shape(rec, [p[0] - c[0], p[1] - c[1]], q[0].color), lut)
                     }
                 });
             }
@@ -1626,9 +1684,9 @@ mod tests {
         img == SHAPE_GLASS_1 || img == SHAPE_GLASS_2 || img == SHAPE_GLASS_3
     }
 
-    fn blend_glass(dl: &DrawList, p: [f32; 2], dst: [f32; 3]) -> [f32; 3] {
+    fn blend_glass(dl: &DrawList, p: [f32; 2], dst: [f32; 3], lut: bool) -> [f32; 3] {
         let mut d = dst;
-        for f in frags_glass(dl, p) {
+        for f in frags_glass(dl, p, lut) {
             for k in 0..3 {
                 d[k] = f[k] * f[3] + d[k] * (1.0 - f[3]);
             }
@@ -1670,6 +1728,16 @@ mod tests {
     /// multiplies back — which is exact in arithmetic and one ulp off
     /// in binary. 1e-6 is a thousand times under a step of an 8-bit
     /// channel.
+    ///
+    /// It runs with the display transform OFF and ON, and the second
+    /// pass is the one that states something the first cannot. Off, the
+    /// question "where is the grade applied" has no observable answer;
+    /// on, the core is two graded draws the hardware blends and the
+    /// band is one fragment, so the band agrees with its own interior
+    /// only if it grades the layers rather than their fold. That
+    /// difference is a RECTANGLE inside a frosted panel, on the line
+    /// where the core's cut falls, and it is the seam K3b would have
+    /// introduced (§3.3, `glass_base`'s `display`).
     #[test]
     fn the_frosted_frame_paints_what_the_whole_frosted_quad_painted() {
         let mix = mixed_corners();
@@ -1691,19 +1759,22 @@ mod tests {
                 for px in (r.x as i32 - 3)..(r.x + r.w) as i32 + 3 {
                     let p = [px as f32 + 0.5, py as f32 + 0.5];
                     for dst in [[0.0; 3], [1.0, 0.5, 0.25], [1.0; 3]] {
-                        let (a, b) = (blend_glass(&split, p, dst), blend_glass(&whole, p, dst));
-                        for k in 0..3 {
-                            assert!(
-                                (a[k] - b[k]).abs() <= 1e-6,
-                                "{name}: pixel {p:?} over {dst:?}: {a:?} vs {b:?}"
-                            );
+                        for lut in [false, true] {
+                            let a = blend_glass(&split, p, dst, lut);
+                            let b = blend_glass(&whole, p, dst, lut);
+                            for k in 0..3 {
+                                assert!(
+                                    (a[k] - b[k]).abs() <= 1e-6,
+                                    "{name}: pixel {p:?} over {dst:?}, lut {lut}: {a:?} vs {b:?}"
+                                );
+                            }
                         }
                     }
                     // Two layers over the core, one fragment over the
                     // band, none outside: the frost and the wash are the
                     // only pair on this lane that may cover a pixel
                     // twice, and they are two DIFFERENT layers.
-                    let n = frags_glass(&split, p).len();
+                    let n = frags_glass(&split, p, false).len();
                     assert!(n <= 2, "{name}: pixel {p:?} covered {n} times");
                     lit += n as u32;
                 }
@@ -1770,5 +1841,50 @@ mod tests {
         // …and it is not a rounding error: at these alphas the old
         // order is off by more than a step of an 8-bit channel.
         assert!(worst > 1.0 / 255.0, "the pair was already right, off by {worst}");
+    }
+
+    /// **Where the display transform goes, as a number.** The fold of
+    /// §3.3 buys one coverage for three layers, and it costs one thing:
+    /// the band composes on the CPU what the core still composes in the
+    /// blender, so the two agree only while every per-fragment
+    /// transform is applied to the same operands on both sides.
+    ///
+    /// `grade()` is that transform, it is the last thing every fragment
+    /// of the renderer does, and it is the identity until a user loads
+    /// a colour LUT — so this is a defect that ships looking correct
+    /// and appears the day somebody uses a feature that has nothing to
+    /// do with glass. OVER is associative, so grading each LAYER
+    /// survives the fold exactly; grading the FOLD does not, and the
+    /// gap is the seam. Both are asserted here: the first to 1e-6, the
+    /// second as a difference no eye needs help to find.
+    #[test]
+    fn the_display_transform_goes_on_the_layers_and_not_on_their_fold() {
+        let wash = bed().to_array();
+        let t = tint().to_array();
+        let dst = [0.15f32, 0.2, 0.25];
+        let mut worst = 0.0f32;
+        for i in 0..=20 {
+            let blur = blurred([i as f32 * 7.0, i as f32 * 3.0]);
+            let frost = [blur[0] * t[0], blur[1] * t[1], blur[2] * t[2], blur[3] * t[3]];
+            // The CORE of a frosted surface, and the ground truth: two
+            // ordinary draws, each graded on its way out of its own
+            // fragment, blended by the hardware.
+            let mut core = dst;
+            for f in [graded(frost, true), graded(wash, true)] {
+                for k in 0..3 {
+                    core[k] = f[k] * f[3] + core[k] * (1.0 - f[3]);
+                }
+            }
+            // The BAND, both ways round.
+            let layers = glass_base(blur, t, wash, |c| graded(c, true));
+            let fold = graded(glass_base(blur, t, wash, |c| c), true);
+            for k in 0..3 {
+                let a = layers[k] * layers[3] + dst[k] * (1.0 - layers[3]);
+                let b = fold[k] * fold[3] + dst[k] * (1.0 - fold[3]);
+                assert!((a - core[k]).abs() <= 1e-6, "the band left its own core: {a} vs {core:?}");
+                worst = worst.max((b - core[k]).abs());
+            }
+        }
+        assert!(worst > 1.0 / 255.0, "the grade commuted after all, off by {worst}");
     }
 }

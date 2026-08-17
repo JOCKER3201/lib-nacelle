@@ -154,21 +154,33 @@ pub struct Shape {
     pub stroke_c: [f32; 4],
     /// Bits 0-7: [`CornerStyle`] × 4 (tl, tr, br, bl), 2 bits each.
     /// Bits 8-11: [`ShapeKind`]. Bit 12 [`Shape::FILL`], bit 13
-    /// [`Shape::STROKE`], bit 17 [`Shape::GLASS`]. Bits 14-16 and 18-31
-    /// are unclaimed and MUST be zero — 14 and 15 are spoken for by
-    /// §2.5's table (`OUTSIDE_ONLY`, `GAUSS`, both with the soft
-    /// profiles) and 16 by its kind modifier, which is why glass took
-    /// the first bit past all three rather than the first bit free.
+    /// [`Shape::STROKE`]. Bits 14-31 are unclaimed and MUST be zero;
+    /// 14, 15 and 16 are spoken for by §2.5's table (`OUTSIDE_ONLY`,
+    /// `GAUSS` and the kind modifier, all with the soft profiles).
+    ///
+    /// **There is no GLASS bit, and for one day there was.** A frost is
+    /// told apart by the two things that actually decide the picture:
+    /// the RUN's handle — `SHAPE_GLASS_*`, which is what binds a
+    /// blurred target and picks the fragment — and `tint`, which is
+    /// zero on every other record and is the frost's own identity in
+    /// `over` when it is. A bit that no shader reads and no branch
+    /// turns is a bit spent, and this record's bits have claimants
+    /// waiting.
     pub flags: u32,
     /// Half the arc's sweep, radians; >= PI = a full ring. Ring only.
     pub arc_half: f32,
     /// Direction of the arc's middle, radians. Ring only.
     pub arc_dir: f32,
     pub _pad: f32,
-    /// What the blurred scene behind a GLASS band is multiplied by
+    /// What the blurred scene behind a FROSTED band is multiplied by
     /// before the wash lies over it (§3.3) — the same product `fs_blur`
     /// draws for the surface's core, so band and core frost alike.
-    /// Meaningless, and zero, without [`Shape::GLASS`].
+    ///
+    /// ZERO on every record that is not a frost, and that is arithmetic
+    /// rather than convention: `over(wash, blur × 0)` IS the wash, so a
+    /// plain record read by the frosted fragment draws exactly what the
+    /// plain fragment would have drawn. That identity is why the lane
+    /// needs no flag to gate it.
     pub tint: [f32; 4],
 }
 const _: () = assert!(std::mem::size_of::<Shape>() == 80);
@@ -179,11 +191,6 @@ impl Shape {
     pub const FILL: u32 = 1 << 12;
     /// Bit 13: draw the inward stroke band with `stroke_c`.
     pub const STROKE: u32 = 1 << 13;
-    /// Bit 17: the record's `tint` is live and the run's handle names a
-    /// pyramid rank — the fragment samples the blurred scene, tints it,
-    /// and lays the vertex's wash over that before the band goes on.
-    /// A record without this bit reads no texture at all.
-    pub const GLASS: u32 = 1 << 17;
     /// Bits 8-11 carry the [`ShapeKind`].
     pub const KIND_SHIFT: u32 = 8;
     /// Bits 0-11: everything that describes the SILHOUETTE — the four
@@ -2124,9 +2131,8 @@ impl DrawList {
         if stroke.is_some() {
             flags |= Shape::STROKE;
         }
-        if s.glass.is_some() {
-            flags |= Shape::GLASS;
-        }
+        // A frost claims no bit here: `tint` below says it, the run's
+        // handle binds it, and the fragment needs neither told twice.
         let half = [r.w * 0.5, r.h * 0.5];
         let centre = [r.x + half[0], r.y + half[1]];
         // §2.10: a part drawn over the bed that was just written is not
@@ -2739,8 +2745,10 @@ impl DrawList {
         // than a true three-way mix would allow, which is invisible next to
         // the blur it buys. One layer when the depth lands on a rung.
         //
-        // ON THE VECTOR LANE THIS IS THE ONE PLACE A SECOND EDGE
-        // SURVIVES, and it is worth naming rather than discovering: two
+        // ON THE VECTOR LANE THIS IS WHERE A SECOND EDGE SURVIVES A
+        // FROST — `ring_grad` is the other survivor on the lane, for a
+        // reason of its own, and says so at its own door. Worth naming
+        // here rather than discovering there: two
         // rungs are two runs and two records, so their outer boundaries
         // blend twice, and the excess is the same `c·(1 − c)·a·b` R4
         // names — with `b` the UPPER rung's alpha, which is the
@@ -4728,9 +4736,17 @@ mod tests {
         let dl = frosted(2.0, true, true, true);
         assert_eq!(dl.shape_len(), 1, "the wash or the border wrote its own record");
         let rec = dl.shapes()[0];
-        assert_eq!(rec.flags & Shape::GLASS, Shape::GLASS, "the record is not glass");
         assert_eq!(rec.flags & Shape::FILL, Shape::FILL);
         assert_eq!(rec.flags & Shape::STROKE, Shape::STROKE);
+        // And a frost spends no FLAG on saying so. The tint below and
+        // the lane further down are the two readers there are; a third
+        // statement of the same fact would be a bit of this record
+        // spent on nothing, with §2.5's table still waiting for 14.
+        assert_eq!(
+            rec.flags & !(Shape::SILHOUETTE | Shape::FILL | Shape::STROKE),
+            0,
+            "a record grew a flag past the two parts and the silhouette"
+        );
         assert_eq!(rec.tint, frost().to_array(), "the tint did not reach the record");
         assert_eq!(rec.stroke_c, ink().to_array());
         // Three runs, in the order the layers stack.
@@ -4864,13 +4880,55 @@ mod tests {
         assert_eq!(cut.verts[2].pos, cut.verts[8].pos);
     }
 
+    /// **A re-cut quad keeps the lane it was cut for.** `uv` means two
+    /// different things on the two lanes: on a strip it is the local
+    /// point the field is read at (`pos − centre`), on a core it is the
+    /// atlas's white pixel, because a core is an ordinary fill and
+    /// samples coverage like every other solid rect in this file.
+    /// `respan_frame` rewrites every quad of a frame each time a wash
+    /// or a border deepens the band, so it is the one place that has to
+    /// know which is which — and it counts the cores off the geometry
+    /// rather than assuming one, because a frosted surface has TWO.
+    ///
+    /// A rule written for a single core would hand the second one a
+    /// local origin, and a local origin is a texture coordinate a
+    /// hundred pixels outside the atlas: the interior of every frosted
+    /// panel with a border would sample the glyph sheet, wrapped, and
+    /// the wash would come out of the letters. It would not crash, and
+    /// every position in this file's other tests would still be right.
+    #[test]
+    fn a_re_cut_core_reads_the_white_pixel_and_a_strip_reads_the_field() {
+        let (u, v) = FontSystem::white_uv();
+        // The centre of the rect `frosted` draws on: whole numbers, so
+        // §2.7's snap is the identity and this is exact.
+        let centre = [10.0 + 200.0 * 0.5, 20.0 + 100.0 * 0.5];
+        for (name, dl) in [
+            ("frost, wash and border", frosted(2.0, true, true, true)),
+            ("frost and wash", frosted(2.0, true, true, false)),
+            ("an unwashed frost", frosted(2.0, true, false, true)),
+            ("a fractional depth", frosted(1.5, true, true, true)),
+        ] {
+            for (i, vx) in dl.verts.iter().enumerate() {
+                if vx.shape == NO_SHAPE {
+                    assert_eq!(vx.uv, [u, v], "{name}: core vertex {i} left the atlas");
+                } else {
+                    assert_eq!(
+                        vx.uv,
+                        [vx.pos[0] - centre[0], vx.pos[1] - centre[1]],
+                        "{name}: strip vertex {i} lost its local origin"
+                    );
+                }
+            }
+        }
+    }
+
     /// A FROST never joins a bed — not another frost's, and not a
     /// plain one's. The plain case is the one that could pass unnoticed:
     /// a caller filling a rect and then frosting the same rect offers a
     /// bed of exactly the right silhouette, and a frost that took it
-    /// would be composited in as an ordinary fill — no `GLASS` bit, no
-    /// tint, no blurred sample, and the frost simply gone from a
-    /// picture that still draws.
+    /// would be composited in as an ordinary fill — no tint, no lane,
+    /// no blurred sample, and the frost simply gone from a picture that
+    /// still draws.
     #[test]
     fn a_frost_never_joins_a_bed_that_is_not_its_own() {
         let mut dl = DrawList::new();
@@ -4880,9 +4938,13 @@ mod tests {
         dl.ring_fill(r, &c, 6, wash());
         dl.glass_fill(r, &c, 6, 2.0, frost());
         assert_eq!(dl.shape_len(), 2, "the frost welded into the plate under it");
-        assert_eq!(dl.shapes()[0].flags & Shape::GLASS, 0, "the plate turned to glass");
-        assert_eq!(dl.shapes()[1].flags & Shape::GLASS, Shape::GLASS);
+        assert_eq!(dl.shapes()[0].tint, [0.0; 4], "the plate turned to glass");
         assert_eq!(dl.shapes()[1].tint, frost().to_array());
+        // …and the lanes agree with the tints: the plate reads no
+        // target, the frost reads its rung's.
+        let lanes: Vec<Option<ImageId>> = dl.runs.iter().map(|r| r.image).collect();
+        assert!(lanes.contains(&Some(SHAPE)), "{lanes:?}");
+        assert!(lanes.contains(&Some(SHAPE_GLASS_2)), "{lanes:?}");
     }
 
     /// The register holds INTENT, and the intent of a frosted surface
