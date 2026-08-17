@@ -13,10 +13,24 @@
 //! the frame itself is [`super::window::frame`] — the same call the
 //! popup made, so the port is a move rather than a redrawing.
 //!
-//! Entry and exit animation is out of scope: it wants the property
-//! animation engine a later phase brings, and `motion.toast_*` is the
-//! place it will land. A toast appears and disappears, which is honest
-//! rather than half-animated.
+//! # There is no `motion.toast_*`, and there will not be
+//!
+//! This header used to promise one, and the promise is withdrawn for the
+//! reason `tooltip.rs`'s header sets out at length: §5.22's catalogue is
+//! CLOSED, it names EVENTS rather than objects, and a toast arriving is a
+//! small window arriving. The binding is `motion.window_open` and
+//! `motion.window_close`, read through
+//! [`crate::object::winframe::present`] — which is the honest reading here
+//! more than anywhere, since the frame this module draws IS
+//! [`super::window::frame`], the same call the popup made.
+//!
+//! What is not done yet is this file drawing through it. The toaster has
+//! the half the tooltip lacks — a toast already has a lifetime, so the
+//! moment it begins to leave is known — and lacks the half the tooltip
+//! has: the box is placed by the queue, so a toast leaving while the one
+//! behind it moves up wants the stack's geometry settled first. Until
+//! then a toast appears and disappears, which is honest rather than
+//! half-animated.
 
 use crate::theme::{self, Color, TokenId};
 use crate::ui::{self, Sev};

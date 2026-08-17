@@ -822,6 +822,111 @@ fn fit_title(
     paint::fit_end_tab(&mut CtxSurface::new(ctx), face, px, text, room, spacing, tabular)
 }
 
+// ------------------------------------------------------- arrive and leave
+
+/// How far a window has ARRIVED, and the box to draw it in while it is
+/// still on its way.
+///
+/// [`present`] is what fills it in; a caller holds it for one frame and
+/// hands the two halves to two different places, which is the whole
+/// reason it is a pair rather than one number.
+#[derive(Clone, Copy, Debug)]
+pub struct Present {
+    /// 0..1 — how much of the window is on screen. Every colour the
+    /// window draws is multiplied by it.
+    ///
+    /// **Exactly 0 means GONE**, and it is the host's signal that a
+    /// closing window may be forgotten: the frame it reaches zero is the
+    /// last frame worth drawing. Exactly 1 means arrived, and at rest it
+    /// is always one of the two — a settled gate reads no token at all.
+    pub alpha: f32,
+    /// The box to DRAW in. The window's own rectangle at rest; a little
+    /// smaller about its own centre while it arrives or leaves.
+    ///
+    /// **Never hit-test this.** See [`present`].
+    pub rect: Rect,
+}
+
+/// How much smaller a window is at the very start of its arrival, as a
+/// fraction of its settled size.
+///
+/// A literal in Rust, deliberately, and §5.22 is the authority: "the theme
+/// does NOT own … the GEOMETRY of the motion. Geometry of motion is a
+/// layout fact … and a theme that could change it could produce an
+/// unhittable menu." The catalogue is CLOSED at eighteen effects of eight
+/// keys, none of which is a distance; a token for this would be a
+/// nineteenth thing to declare, and the sentence above is the reason the
+/// catalogue does not have one.
+///
+/// A theme that wants no growth at all still has a switch, and it is the
+/// one the catalogue gives it: `motion.window_open.enabled = false`
+/// freezes the presence at 1, and a presence of 1 is the rectangle
+/// untouched.
+const ARRIVE_FROM: f32 = 0.96;
+
+/// Where a window stands between "not there" and "there" —
+/// `motion.window_open` and `motion.window_close`, the pair §5.22 has
+/// carried since it was written with nothing reading either.
+///
+/// Call it EVERY frame the window might exist, with `open` false as
+/// readily as true: a window that is only asked about while open has
+/// nothing left on screen to leave. The host keeps drawing until
+/// [`Present::alpha`] reaches exactly 0, and then forgets it.
+///
+/// # The hits stay on the RESOLVED rectangle
+///
+/// [`Present::rect`] is a rigid transform of `r` about its own centre —
+/// the same box, smaller — and it exists only to be drawn into. Every
+/// hit test, every layout, every rectangle handed to a child stays `r`.
+///
+/// This is not fussiness. §5.22's prohibition list has "anything that
+/// affects layout" in it, and the paragraph above it says a theme able to
+/// move the geometry of a motion "could produce an unhittable menu". A
+/// control whose hit box breathed for 180 ms after the window opened
+/// would be that, on the toolkit's side rather than the theme's, and a
+/// pointer arriving during the animation is the ordinary case rather than
+/// the rare one: a window usually opens because the hand is already
+/// moving toward it.
+///
+/// # The two directions are two entries
+///
+/// The master gives the exit its own duration and its own curve — 140 ms
+/// of `ease_in` against 180 ms of `ease_out`, "so the exit accelerates
+/// away" — which is why this runs on [`crate::motion::gate_dir`] rather
+/// than on `gate`.
+pub fn present(ctx: &mut Ctx, r: Rect, open: bool) -> Present {
+    // BORN AT ZERO, whatever `open` says: a window the registry has never
+    // seen did not exist a frame ago, and a host has nothing to draw on
+    // that frame, so it cannot seed the gate by asking with false first.
+    let a = crate::motion::gate_born(
+        "winframe.present",
+        r,
+        open,
+        "window_open",
+        "window_close",
+        0.0,
+        ctx.t,
+    );
+    Present { alpha: a, rect: arrive_rect(r, a) }
+}
+
+/// `r` shrunk about its own centre to [`ARRIVE_FROM`] at `a = 0`, and `r`
+/// itself at `a = 1`.
+///
+/// The ends are EXACT: a settled window is drawn in the rectangle it was
+/// given, not in a rectangle that rounds to it. Everything in this file
+/// is placed against `outer` down to the half pixel, so a frame arriving
+/// at 0.99998 of its size is a chrome that no longer lines up with its
+/// own client area.
+fn arrive_rect(r: Rect, a: f32) -> Rect {
+    if a >= 1.0 {
+        return r;
+    }
+    let k = ARRIVE_FROM + (1.0 - ARRIVE_FROM) * a.clamp(0.0, 1.0);
+    let (w, h) = (r.w * k, r.h * k);
+    Rect::new(r.x + (r.w - w) * 0.5, r.y + (r.h - h) * 0.5, w, h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

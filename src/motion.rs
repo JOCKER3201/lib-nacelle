@@ -1145,22 +1145,94 @@ struct Gate {
 ///
 /// [`Crossfade`] is what runs it, which is what that type was built for.
 pub fn gate(name: &str, r: Rect, on: bool, effect: &'static str, now: f64) -> f32 {
+    gate_dir(name, r, on, effect, effect, now)
+}
+
+/// [`gate`] with a DIFFERENT effect each way.
+///
+/// The catalogue has three pairs that are two entries rather than one —
+/// `window_open` against `window_close` is the plain case, and the master
+/// spells out why: the exit is faster than the entry (140 ms against 180)
+/// and it is `ease_in` against `ease_out`, "so the exit accelerates away".
+/// A gate that took one effect could express neither half of that.
+///
+/// The effect is chosen at the moment the target CHANGES and then stands
+/// for the whole run, so a gate turned round mid-flight finishes on the
+/// effect of the direction it is now going — which is the one the user is
+/// watching. `focus` and everything else symmetric passes the same id
+/// twice through [`gate`], and nothing about those calls moved.
+pub fn gate_dir(
+    name: &str,
+    r: Rect,
+    on: bool,
+    rising: &'static str,
+    falling: &'static str,
+    now: f64,
+) -> f32 {
+    gate_born(name, r, on, rising, falling, if on { 1.0 } else { 0.0 }, now)
+}
+
+/// [`gate_dir`] with the value a gate is BORN at said out loud.
+///
+/// The registry's first rule is "born AT its rung, settled, with no fade
+/// owed", and it is right for a CONTROL: a row that scrolled into view was
+/// hovered before it appeared, and fading it in from where the pixel under
+/// it used to be would be a lie about what happened.
+///
+/// A WINDOW is the other case. A window asked about for the first time did
+/// not exist a frame ago — that is what opening means — so being born
+/// already arrived is the one thing it must not be. The host cannot fix
+/// this from outside either: it has nothing to draw on the frame before,
+/// so it cannot ask with `on` false first.
+///
+/// So the birth value is a parameter, and `born != target` on a first
+/// sighting starts the fade there and then — the only place in this module
+/// where a key begins life owing one.
+pub fn gate_born(
+    name: &str,
+    r: Rect,
+    on: bool,
+    rising: &'static str,
+    falling: &'static str,
+    born: f32,
+    now: f64,
+) -> f32 {
+    let effect = if on { rising } else { falling };
     let target = if on { 1.0 } else { 0.0 };
     FADES.with(|cell| {
         let mut f = cell.borrow_mut();
         f.sweep(now);
         let key = key_of(name, r);
         let fades = &mut *f;
+        let fresh = !fades.gates.contains_key(&key);
         let g = fades.gates.entry(key).or_insert_with(|| Gate {
-            fade: Crossfade::new(target),
+            fade: Crossfade::new(born),
             effect,
             ends: f64::NEG_INFINITY,
             seen: now,
         });
+        if fresh && born != target {
+            // A first sighting that owes a fade. The clock-has-not-moved
+            // rule below would call this one frame asked twice and jump,
+            // which is exactly the answer a window must not get.
+            let e = Effect::of(effect);
+            g.fade.retarget(&e, target, now);
+            g.effect = effect;
+            g.ends = now + e.one_shot_secs() as f64;
+        }
         if g.fade.target() != target {
             if now > g.seen {
+                // Sampled under the effect that HAS BEEN RUNNING, not the
+                // one about to: `retarget` reads the current value before
+                // it aims anywhere, and reading it under the new effect
+                // asks "how far along would this fade be if it had begun
+                // when the old one did, at the new duration" — a question
+                // with no meaning and a wrong answer. It could not show
+                // while both directions shared an effect; a window closing
+                // in 140 ms and reopening over 180 ms is where it does.
+                let running = Effect::of(g.effect);
+                g.fade.retarget(&running, target, now);
                 let e = Effect::of(effect);
-                g.fade.retarget(&e, target, now);
                 g.effect = effect;
                 g.ends = now + e.one_shot_secs() as f64;
             } else {

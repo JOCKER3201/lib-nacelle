@@ -3814,7 +3814,7 @@ enabled     = true                    # run this effect at all; -; bool; setting
 
 # ---- window_open · a window or dialog appearing --------------------------
 [motion.window_open]
-duration_ms = 180ms                   # window/dialog entry; image 7; ms, 0ms .. 2000ms; -
+duration_ms = 180ms                   # window/dialog entry; image 7; ms, 0ms .. 2000ms; object/winframe.rs present() through motion::gate_dir — and this entry is the one a TOOLTIP and a TOAST arrive on too: the catalogue names EVENTS, not objects, so there is no motion.tooltip_* or motion.toast_* and there will not be
 period_ms   = 0ms                     # unused - one-shot transition; -; ms; -
 amplitude   = 0.00                    # unused outside cyclic effects; -; 0..1; -
 floor       = 0.00                    # unused outside step easing; -; 0..1; -
@@ -3825,7 +3825,7 @@ enabled     = true                    # run this effect at all; -; bool; -
 
 # ---- window_close · a window or dialog leaving ---------------------------
 [motion.window_close]
-duration_ms = 140ms                   # window/dialog exit, faster than entry; image 7; ms, 0ms .. 2000ms; -
+duration_ms = 140ms                   # window/dialog exit, faster than entry; image 7; ms, 0ms .. 2000ms; object/winframe.rs present(); the pair is TWO entries precisely so the exit may be faster and curve the other way, which is what motion::gate_dir exists for
 period_ms   = 0ms                     # unused - one-shot transition; -; ms; -
 amplitude   = 0.00                    # unused outside cyclic effects; -; 0..1; -
 floor       = 0.00                    # unused outside step easing; -; 0..1; -

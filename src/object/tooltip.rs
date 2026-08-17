@@ -15,10 +15,38 @@
 //! top, so it is the one under the pointer.
 //!
 //! Everything visual comes from `[tooltip]` and `component.tooltip.*`;
-//! the module holds no literal of its own. There is no fade — the phase
-//! that gives the toolkit a property-animation engine gives the tooltip
-//! its `motion.tooltip_*`, and until then appearing is instantaneous,
-//! which is honest rather than half-animated.
+//! the module holds no literal of its own.
+//!
+//! # There is no `motion.tooltip_*`, and there will not be
+//!
+//! This header used to promise one. §5.22's catalogue is CLOSED — its own
+//! prohibition list ends with "new effect ids (an unknown id is reported
+//! and ignored)" — so the promise was for a token that would have had to
+//! be argued into the master, and the argument does not hold up:
+//!
+//! * The catalogue names EVENTS, not objects. It has `hover`, not
+//!   `button_hover` and `row_hover`; `menu_unfold`, read by the context
+//!   menu and the drop-down alike. A tooltip appearing is a small window
+//!   appearing, which is `motion.window_open`, and a tooltip going away is
+//!   `motion.window_close`. Those are the two ids this object binds to.
+//! * Four ids for one event is four durations a theme can put out of step.
+//!   The first author who shortened `window_open` and not `tooltip_in`
+//!   would have a desktop whose windows and tooltips appear at different
+//!   speeds, having changed one number and been given two behaviours.
+//! * The DELAY before a tooltip appears was never motion. It is
+//!   `tooltip.delay_ms` and `tooltip.linger_ms` in `[tooltip]`, both read
+//!   in [`Tooltips::step`], and neither is a curve: they decide WHETHER
+//!   the box is due, not how it gets there.
+//!
+//! The seam is [`crate::object::winframe::present`], which is where the
+//! two ids are read. What is not done yet is this file drawing through it,
+//! and it is a real piece of work rather than a line: a tooltip follows
+//! the pointer, so the box moves every frame and cannot be the fade's key
+//! — the ANCHOR is what stays still while the pointer rests on it — and
+//! fading OUT means keeping the last box and its laid-out lines for as
+//! long as the gate takes to fall, which [`Tooltips`] does not remember
+//! today. Until then appearing is instantaneous, which is honest rather
+//! than half-animated.
 
 use crate::draw::Corner;
 use crate::theme::{self, Color, TokenId};
