@@ -790,8 +790,106 @@ mod tests {
         assert_eq!(ring.corner[0], 4.0, "half the thickness");
         assert_eq!((ring.arc_half, ring.arc_dir), (0.6, 0.3));
         // The band's outer edge meets the shorter side, turned by dir.
-        let out = turned([0.0, 30.0], 0.3);
+        // Where that is, is stated as a POSITION ON THE GLASS and not by
+        // calling `turned` — a probe built out of the rotation it is
+        // checking cancels the rotation's sign and passes either way,
+        // which is how three sign mutations once survived this file
+        // whole. `the_turn_runs_clockwise_on_the_glass` owns the
+        // convention; this line only spends it.
+        let out = at(30.0, std::f32::consts::FRAC_PI_2 + 0.3);
         assert!(d_record(&ring, out).abs() <= 1e-3, "outer edge reads {}", d_record(&ring, out));
+    }
+
+    /// A point `radius` from the centre at `angle` MEASURED ON THE
+    /// GLASS: clockwise from +x, because y grows downward here, so a
+    /// growing angle runs 3 o'clock → 6 o'clock → 9 o'clock.
+    ///
+    /// Written out rather than taken from [`turned`] on purpose: this is
+    /// the fixed frame the tests below state their expectations in, and
+    /// it has to be independent of the function whose sign they pin.
+    fn at(radius: f32, angle: f32) -> [f32; 2] {
+        [radius * angle.cos(), radius * angle.sin()]
+    }
+
+    /// **The one convention two crates share, stated as geometry.**
+    ///
+    /// `turned` and the `−arc_dir` in [`d_record`] are the whole of how
+    /// an angle reaches a silhouette, and `fs_shape` has to reproduce
+    /// both from a comment. Until this test there was nothing to
+    /// reproduce: flipping the sign in `turned`, or dropping the minus
+    /// in either of `d_record`'s two turning kinds, left every test in
+    /// this file passing. The old probes could not see it — one was
+    /// built by calling `turned` and then read back through `turned`,
+    /// which cancels whatever sign it has, and the other turned a
+    /// hexagon by 30°, an angle at which the lattice is its own mirror.
+    ///
+    /// So the expectations here are clock positions, and both turns are
+    /// angles that are NOT symmetries: 15° on a six-fold lattice, and an
+    /// arc whose swept wedge and its mirror image do not overlap.
+    #[test]
+    fn the_turn_runs_clockwise_on_the_glass() {
+        use crate::draw::{DrawList, ShapeKind, ShapeSpec};
+        use crate::theme::Color;
+        use crate::Rect;
+        let quarter = std::f32::consts::FRAC_PI_2;
+
+        // A quarter turn takes 6 o'clock to 9 o'clock and 3 o'clock to 6
+        // — clockwise, the sense every other angle in this project has.
+        let down = turned([0.0, 1.0], quarter);
+        assert!((down[0] + 1.0).abs() <= 1e-6 && down[1].abs() <= 1e-6, "+y went to {down:?}");
+        let right = turned([1.0, 0.0], quarter);
+        assert!((right[1] - 1.0).abs() <= 1e-6 && right[0].abs() <= 1e-6, "+x went to {right:?}");
+
+        let r = Rect::new(0.0, 0.0, 120.0, 120.0);
+        let emit = |kind| {
+            let mut dl = DrawList::new();
+            dl.shape(&ShapeSpec {
+                rect: r,
+                corners: [Corner::SQUARE; 4],
+                kind,
+                fill: Some(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+                stroke: None,
+            });
+            dl.shapes()[0]
+        };
+
+        // The hexagon. At turn 0 a flat edge sits at the top, so its
+        // midpoint is straight up — 12 o'clock, `−quarter` on the glass
+        // — one apothem from the centre. Turn the LATTICE by 15° and
+        // that midpoint has to move 15° clockwise with it.
+        let turn = std::f32::consts::PI / 12.0;
+        let hex = emit(ShapeKind::Hex { turn });
+        let apothem = hex.corner[0];
+        assert!(apothem > 40.0, "the fitted apothem collapsed: {apothem}");
+        let on = at(apothem, -quarter + turn);
+        assert!(d_record(&hex, on).abs() <= 1e-2, "the flat edge is not at 12 + 15°: {on:?}");
+        // 15° is the whole point: at that angle the MIRROR of the edge
+        // midpoint lands 30° off the nearest edge normal, which is as
+        // deep inside a hexagon as a point at the apothem's radius ever
+        // gets. A lattice turned anticlockwise would put the boundary
+        // there and leave the assertion above outside.
+        let mirrored = at(apothem, -quarter - turn);
+        let inside = d_record(&hex, mirrored);
+        assert!(inside < -1.0, "the lattice turned the wrong way: {inside} at {mirrored:?}");
+
+        // The arc. Its middle starts at 6 o'clock (`+quarter`) and the
+        // direction turns it clockwise from there. A sweep of ±0.3 rad
+        // about 0.9 rad cannot reach −0.9 rad, so the mirror of the
+        // middle is not merely off-centre in the band — it is off the
+        // band altogether, by more than the band is wide.
+        let (dir, half_sweep) = (0.9f32, 0.3f32);
+        let ring = emit(ShapeKind::Ring { width: 8.0, half_sweep, dir });
+        let (rb, ra) = (ring.corner[0], 60.0 - ring.corner[0]);
+        let middle = d_record(&ring, at(ra, quarter + dir));
+        assert!((middle + rb).abs() <= 1e-2, "the axis of the arc is not at 6 + dir: {middle}");
+        let opposite = d_record(&ring, at(ra, quarter - dir));
+        assert!(opposite > rb, "the arc swept the wrong way: {opposite} at the mirror");
+        // And the sweep is symmetric ABOUT that middle: both ends of the
+        // wedge sit on the axis, at the depth of a cap's own centre.
+        for end in [dir - half_sweep, dir + half_sweep] {
+            let d = d_record(&ring, at(ra, quarter + end));
+            assert!((d + rb).abs() <= 1e-2, "the cap centre at {end} rad reads {d}");
+        }
     }
 
     /// The chamfer passes through (b.x − c, b.y) and (b.x, b.y − c) —

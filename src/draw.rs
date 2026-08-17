@@ -117,7 +117,13 @@ pub struct Shape {
     pub arc_half: f32,
     /// The kind's second angle, radians: the direction of a Ring's
     /// middle, the lattice turn of a Hex. Both are measured from local
-    /// +y — DOWNWARD on screen — turning toward +x.
+    /// +y — DOWNWARD on screen — turning toward **−x**, which with y
+    /// down is CLOCKWISE on the glass: 6 o'clock toward 9 o'clock. That
+    /// is the one sense an angle has anywhere in this project, from
+    /// `donut.start_deg` to a knob's travel, and it is the sense
+    /// [`crate::sdf::turned`] carries — a positive `arc_dir` sends the
+    /// silhouette's own +y point to `(−R·sin dir, R·cos dir)`.
+    /// `sdf::the_turn_runs_clockwise_on_the_glass` is the assertion.
     pub arc_dir: f32,
     pub _pad: f32,
 }

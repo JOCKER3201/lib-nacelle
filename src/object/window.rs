@@ -46,6 +46,101 @@ pub(crate) fn vocabulary(mode: TokenId) -> (Option<u16>, Option<u16>) {
     (theme::enum_index(mode, "round"), theme::enum_index(mode, "chamfer"))
 }
 
+/// The four corners a `shape.*` preset asks for, starting from the one
+/// the object already settled (f3 K6's acceptance condition).
+///
+/// **This is where `shape.<preset>.corners_tl/tr/br/bl` reach the
+/// screen.** Sixteen presets have carried the four keys since the theme
+/// engine was written; [`crate::view::paint::preset`] gave them a
+/// reader, and a reader nobody calls changes no picture — the key was
+/// still dead where it counts. A frame calls this, so a theme writing
+/// `shape.panel.corners_tl = [ chamfer, 2u ]` now cuts one corner of
+/// every panel and leaves the other three where they were.
+///
+/// The BASE stays the object's own — `panel.corner_mode` /
+/// `panel.corner` for a frame — so this ADDS a say rather than moving
+/// one, and nothing that already read a corner reads it anywhere else.
+/// Each per-corner key is a PAIR whose slots inherit separately, so a
+/// slot left at `same_as_parent` — which is every slot the master ships
+/// but `button_alt`'s and `tab`'s — answers exactly the corner that
+/// arrived, and the shipped picture is bit for bit what it was.
+///
+/// The frame is the ONE caller today, and deliberately: `shape.*` has
+/// sixteen presets and the audit's §7.2 leaves it open whether every
+/// object moves onto them or the master loses the other fifteen. That
+/// decision is not this step's to take. What this step owed was a road
+/// with traffic on it, and `shape.panel` is the preset K6's own
+/// acceptance condition names.
+///
+/// A preset that declares no such keys keeps `base` on all four and says
+/// so once: reading a token that is not there gives zero, and zero is a
+/// square corner nobody asked for.
+pub(crate) fn per_corner(
+    t: &theme::ResolvedTheme,
+    cell: &'static OnceLock<[TokenId; 8]>,
+    preset: &'static str,
+    base: Corner,
+    r: Rect,
+) -> [Corner; 4] {
+    let ids = *cell.get_or_init(|| {
+        let mut out = [TokenId::MISSING; 8];
+        for (i, slot) in ["tl", "tr", "br", "bl"].iter().enumerate() {
+            let key = format!("{preset}.corners_{slot}");
+            for (j, part) in ["[0]", "[1]"].iter().enumerate() {
+                out[2 * i + j] =
+                    theme::id(&format!("{key}{part}")).unwrap_or(TokenId::MISSING);
+            }
+        }
+        out
+    });
+    if ids.iter().any(|id| *id == TokenId::MISSING) {
+        crate::ui::warn_once(
+            &format!("per_corner:{preset}"),
+            &format!("\"{preset}\" declares no corners_tl/tr/br/bl pair: its corners cannot be set one at a time"),
+        );
+        return [base; 4];
+    }
+    // The RULE — what a half-stated pair means — is
+    // `view::paint::override_corner` and is not repeated here: the
+    // surface layer reads the same four keys for anything drawing
+    // through the ABI, and two answers to one question is the drift
+    // every shared reader in this crate was pulled out to end. What is
+    // local is only HOW the four readings are taken, which on this side
+    // is a memoised token and a borrowed word rather than a string key
+    // and an allocation.
+    let mut out = [base; 4];
+    for (i, corner) in out.iter_mut().enumerate() {
+        let (word, len) = (ids[2 * i], ids[2 * i + 1]);
+        let scalar = t.px(word);
+        let stated = t.px(len);
+        // Compared as a WORD, not as an enum index: a preset's style
+        // slot has no `enum:` list in the master, so its word table
+        // grows out of the values a theme actually loaded and an index
+        // memoised against the master's own table would name someone
+        // else's word after a swap.
+        *corner = crate::ui::with_theme_word(word, |w| {
+            crate::view::paint::override_corner(base, r, scalar, w, stated)
+        });
+    }
+    out
+}
+
+/// The largest ARC on a ring, which is the only thing its tessellation
+/// count has to answer for.
+///
+/// [`crate::draw::ring_points`] takes ONE count for all four corners, so
+/// something has to reconcile four sizes into it, and the honest reducer
+/// is the largest one that is actually curved: a square corner is a
+/// point and a chamfer is a single straight cut, and neither is improved
+/// by a finer arc. Reading the plain maximum instead would let a theme
+/// that chamfers one corner deeply raise the segment count of the three
+/// round ones it never mentioned — a change to a corner it did not name.
+pub(crate) fn round_reach(c: &[Corner; 4]) -> f32 {
+    c.iter()
+        .filter(|k| k.style == CornerStyle::Round)
+        .fold(0.0f32, |m, k| m.max(k.size))
+}
+
 /// [`corner_style`] with the vocabulary already in hand.
 pub(crate) fn cut_of(
     t: &theme::ResolvedTheme,
@@ -183,8 +278,15 @@ pub fn frame(ctx: &mut Ctx, r: Rect) {
     // not up in a metrics struct that has no box yet.
     let corner = Corner::sized(style, t.px(tok(&CUT, "panel.corner")), r);
     let width = t.px(tok(&WIDTH, "panel.border")).max(0.0);
-    let c = [corner; 4];
-    let seg = corner_segments(t, &SEGMENTS, corner.size);
+    // `shape.panel` gets the last word on each corner SEPARATELY, which
+    // is the whole of what its four per-corner keys were written for.
+    static PER: OnceLock<[TokenId; 8]> = OnceLock::new();
+    let c = per_corner(t, &PER, "shape.panel", corner, r);
+    // The tessellation is settled by the biggest ARC on the ring
+    // (`round_reach`): one count serves all four corners, so reading it
+    // off the base alone would under-tessellate a corner a theme made
+    // rounder than the preset.
+    let seg = corner_segments(t, &SEGMENTS, round_reach(&c));
     // The same glass trio the panel rung reads, BY DESIGN and not by
     // accident: the owner's scope for a background is "windows and
     // widgets", one decision for both, so a frame asks the same three
