@@ -682,7 +682,11 @@ pub fn scrollbar(
     } else {
         State::Idle
     };
-    let style: StateInk = sf.class_state("scrollbar.thumb", rung);
+    // The thumb draws its idle rung too, so the plain fade applies: no
+    // resting rung has to be invented for it. While the thumb is being
+    // DRAGGED it moves, and a moved control is a new key born at its
+    // rung — so the grab reads instantly and the travel never lags.
+    let style: StateInk = sf.class_ink("scrollbar.thumb", rung, geom.thumb);
     // The master asks for `@corner.pill` here and got a rectangle: the
     // radius was declared and read by nothing. The pair is the ordinary
     // one — the radius from `scrollbar.corner`, the cut from

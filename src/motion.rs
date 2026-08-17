@@ -51,8 +51,11 @@
 //! `ScrollPhysics::read` pattern), and `host.t_motion` for scripts
 //! (§5.22: `clock.rhai` reads `host.t` raw and bypasses reduced motion).
 
-use crate::theme::{self, TokenId};
+use crate::theme::parse::State;
+use crate::theme::{self, Color, TokenId};
 use crate::ui::{theme_word, warn_once};
+use crate::view::surface::StateInk;
+use crate::Rect;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -409,6 +412,547 @@ impl Crossfade {
     }
 }
 
+// ------------------------------------------------------- the state fades
+//
+// Where the transition state LIVES, decided once, here.
+//
+// A control does not carry it. Almost every control in this toolkit is
+// drawn by a free function handed a rectangle and a bool — `button::draw`,
+// `checkbox::draw`, a list row inside `view::list` — and giving each of
+// them somewhere to keep a fade would mean giving every CALLER somewhere
+// to keep the control. That is the change this design exists to avoid:
+// the settings window alone would grow a field per switch.
+//
+// So the fades live in ONE registry beside the resolver, keyed by the two
+// things a caller already has: the interaction CLASS it is drawing on and
+// the RECTANGLE it is drawing in. Nothing is passed down and nothing is
+// stored up; a call site gains one argument it was already holding.
+//
+// Three rules make that key honest:
+//
+// * **A key seen for the first time is born AT its rung**, settled, with
+//   no fade owed. So a control that moved — a scrolling row, a dragged
+//   thumb — simply appears in its state, exactly as it does today, rather
+//   than fading in from wherever the pixel under it used to be.
+// * **A transition needs a clock that moved.** Two asks at one `now` are
+//   one frame asked twice, not a state change over time, and the second
+//   jumps. This is what keeps a draw that is repeated within a frame — and
+//   every test that draws at a fixed `t` — bit for bit what it was.
+// * **An entry not asked about is dropped.** A control that left the
+//   screen stops being re-seen, and the sweep below reclaims it; the map
+//   is bounded by what is on screen, not by what has ever been on screen.
+//
+// AND NOTHING HERE STARTS A CLOCK. At rest a track is one hash lookup and
+// four compares — no theme read, no allocation, no redraw asked for. The
+// host learns that it owes another frame by asking [`pending`], which
+// answers false the moment the last fade lands. The desktop's 100 % CPU
+// fault was a per-frame reload that nothing asked for; a fade that costs
+// nothing until something changes cannot repeat it.
+
+/// A control's place between the rungs of its ladder: a weight per rung,
+/// summing to 1.
+///
+/// Usually one rung has all of it — that is what "settled" means, and it
+/// is the answer at rest. During a fade the weight moves from whatever
+/// mixture the control was showing to the rung it is heading for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mix {
+    w: [f32; State::ALL.len()],
+    to: State,
+    settled: bool,
+}
+
+impl Mix {
+    /// The mixture that is one rung and nothing else.
+    fn pure(to: State) -> Mix {
+        let mut w = [0.0; State::ALL.len()];
+        w[to as usize] = 1.0;
+        Mix { w, to, settled: true }
+    }
+
+    /// Whether the control is standing still on [`Mix::target`]. A settled
+    /// mix is the signal to skip the blend entirely and read the one rung,
+    /// which is what makes a resting frame identical to today's.
+    pub fn is_settled(&self) -> bool {
+        self.settled
+    }
+
+    /// The rung the control is heading for — and standing on, once
+    /// [`Mix::is_settled`] answers true.
+    pub fn target(&self) -> State {
+        self.to
+    }
+
+    /// How much of `rung` is showing, 0..1.
+    pub fn weight(&self, rung: State) -> f32 {
+        self.w[rung as usize]
+    }
+}
+
+/// One tracked control: the mixture it was showing when its last fade
+/// began, the rung that fade is heading for, and the clock either side.
+#[derive(Clone, Copy)]
+struct Track {
+    /// The mixture frozen at the moment the current fade started. This is
+    /// what makes an interrupted fade continue from where it stood
+    /// instead of jumping: the fade is always "from this mixture to that
+    /// rung", and a mixture can hold an unfinished fade of its own.
+    base: [f32; State::ALL.len()],
+    to: State,
+    /// When the current fade began, and when it will be over. Both
+    /// `NEG_INFINITY` while the track is settled, which is what lets the
+    /// resting path answer without reading a single token.
+    since: f64,
+    ends: f64,
+    effect: &'static str,
+    /// The last `now` this key was asked about — the sweep's evidence
+    /// that the control is still on screen, and the clock-moved test.
+    seen: f64,
+}
+
+impl Track {
+    fn born(to: State, now: f64) -> Track {
+        let mut base = [0.0; State::ALL.len()];
+        base[to as usize] = 1.0;
+        Track {
+            base,
+            to,
+            since: f64::NEG_INFINITY,
+            ends: f64::NEG_INFINITY,
+            effect: "hover",
+            seen: now,
+        }
+    }
+
+    /// Snap to `to` with no fade — a first sighting, or a change asked for
+    /// at an instant the clock has not left.
+    fn jump(&mut self, to: State) {
+        self.base = [0.0; State::ALL.len()];
+        self.base[to as usize] = 1.0;
+        self.to = to;
+        self.since = f64::NEG_INFINITY;
+        self.ends = f64::NEG_INFINITY;
+    }
+
+    /// How far the current fade has run at `now`, 1.0 once it is over.
+    ///
+    /// The end time is remembered so a settled track costs no token read
+    /// at all; a theme swap that LENGTHENS a running effect is answered by
+    /// the old end, which lands one fade early and never one fade late.
+    fn progress(&self, now: f64) -> f32 {
+        if self.ends <= now {
+            return 1.0;
+        }
+        Effect::of(self.effect).one_shot(self.since, now)
+    }
+
+    fn mix_at(&self, p: f32) -> Mix {
+        if p >= 1.0 {
+            return Mix::pure(self.to);
+        }
+        let mut w = self.base;
+        for v in w.iter_mut() {
+            *v *= 1.0 - p;
+        }
+        w[self.to as usize] += p;
+        Mix { w, to: self.to, settled: false }
+    }
+
+    /// The rung carrying most of the current mixture — the one the
+    /// transition is fairly described as coming FROM, which is what picks
+    /// the effect.
+    fn dominant(&self) -> State {
+        let mut best = self.to;
+        let mut best_w = f32::MIN;
+        for s in State::ALL {
+            if self.base[s as usize] > best_w {
+                best_w = self.base[s as usize];
+                best = s;
+            }
+        }
+        best
+    }
+}
+
+/// Which `motion.<id>` entry a move between two rungs runs under.
+///
+/// The catalogue is closed and it names the STATES, not the pairs, so the
+/// pair has to choose: the rung that CHANGED is the one that names the
+/// effect, and when two changed at once the slower, more consequential
+/// change wins. Disabled is the outermost — a control leaving the world
+/// is a bigger event than the pointer arriving — then press (and its
+/// sustained form, dragging), then selection, and hover last, which is
+/// both the commonest and the quickest.
+fn effect_for(from: State, to: State) -> &'static str {
+    let pressed = |s: State| matches!(s, State::Press | State::Dragging);
+    let chosen = |s: State| matches!(s, State::Selected | State::SelectedHover);
+    if from == State::Disabled || to == State::Disabled {
+        "disable"
+    } else if pressed(from) != pressed(to) {
+        "press"
+    } else if chosen(from) != chosen(to) {
+        "select"
+    } else {
+        "hover"
+    }
+}
+
+/// The identity of one drawn control: its class and the box it occupies,
+/// rounded to whole pixels.
+///
+/// A hash rather than a `String`, because this is asked once per control
+/// per frame and a key that allocates is a key that shows up in a
+/// profile. Two controls of one class cannot share a box, and a control
+/// that MOVED is deliberately a different key — see the born-settled rule
+/// above.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct Key {
+    class: u64,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+fn key_of(class: &str, r: Rect) -> Key {
+    // FNV-1a: a few bytes of a short name, no allocation, no dependency.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in class.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Key {
+        class: h,
+        x: r.x.round() as i32,
+        y: r.y.round() as i32,
+        w: r.w.round() as i32,
+        h: r.h.round() as i32,
+    }
+}
+
+/// How long an unseen entry is kept before the sweep reclaims it. Long
+/// enough that a control hidden for a frame or two keeps its fade, short
+/// enough that a scrolled-away list does not sit in memory.
+const KEEP_SECS: f64 = 0.5;
+/// The map size that forces a sweep whatever the clock says — the guard
+/// for a host whose `now` never moves, and for churn faster than the
+/// interval.
+const SWEEP_AT: usize = 2048;
+
+/// Everything the fades keep between frames: the tracks, the scalar
+/// gates, when the map was last swept, and when the last fade in flight
+/// will land.
+#[derive(Default)]
+struct Fades {
+    tracks: HashMap<Key, Track>,
+    gates: HashMap<Key, Gate>,
+    swept: f64,
+    /// The latest `ends` of anything started — what [`pending`] answers
+    /// against. It is an upper bound, never a promise that something is
+    /// still moving, so a host that redraws one frame too many is the
+    /// worst it can cause.
+    until: f64,
+}
+
+thread_local! {
+    static FADES: RefCell<Fades> = RefCell::new(Fades {
+        tracks: HashMap::new(),
+        gates: HashMap::new(),
+        swept: f64::NEG_INFINITY,
+        until: f64::NEG_INFINITY,
+    });
+}
+
+impl Fades {
+    /// Drops what is no longer on screen. Cheap and rare: once every
+    /// [`KEEP_SECS`], or when the map grows past [`SWEEP_AT`].
+    fn sweep(&mut self, now: f64) {
+        let by_clock = now - self.swept >= KEEP_SECS;
+        let by_size = self.tracks.len() + self.gates.len() >= SWEEP_AT;
+        if !by_clock && !by_size {
+            return;
+        }
+        self.tracks.retain(|_, t| now - t.seen < KEEP_SECS);
+        self.gates.retain(|_, g| now - g.seen < KEEP_SECS);
+        self.swept = now;
+    }
+}
+
+/// Where the control drawn as `class` in `r` stands on its ladder at
+/// `now`, having been asked for rung `to`.
+///
+/// The one entry point to the registry, and the one place a transition
+/// begins. Callers that need the INK rather than the weights want
+/// [`state_ink`], which is written in terms of this.
+pub fn state_mix(class: &str, r: Rect, to: State, now: f64) -> Mix {
+    FADES.with(|cell| {
+        let mut f = cell.borrow_mut();
+        f.sweep(now);
+        let key = key_of(class, r);
+        let fades = &mut *f;
+        // A first sighting is born AT its rung — settled, no fade owed —
+        // and then falls through the same arithmetic as every other ask.
+        let track = fades.tracks.entry(key).or_insert_with(|| Track::born(to, now));
+        if track.to != to {
+            if now > track.seen {
+                // A real frame boundary: freeze what is showing and fade
+                // from THERE. `p` is 0 at this instant, so the mixture
+                // answered below is the one the last frame drew — that is
+                // the no-jump contract, and it holds however often the
+                // target turns round mid-flight.
+                let p = track.progress(now);
+                track.base = track.mix_at(p).w;
+                let effect = effect_for(track.dominant(), to);
+                track.to = to;
+                track.since = now;
+                track.effect = effect;
+                track.ends = now + Effect::of(effect).one_shot_secs() as f64;
+            } else {
+                track.jump(to);
+            }
+        }
+        track.seen = now;
+        let p = track.progress(now);
+        let mix = track.mix_at(p);
+        let ends = track.ends;
+        if p >= 1.0 {
+            // Arrived: collapse, so every later frame takes the resting
+            // path and reads no tokens at all.
+            track.jump(to);
+        }
+        if ends > now {
+            fades.until = fades.until.max(ends);
+        }
+        mix
+    })
+}
+
+/// The ink a control is drawn in at `now`: its ladder's rung, or the
+/// blend of the rungs it stands between while a fade runs.
+///
+/// `rung` is the CALLER's answer to "what does this class look like in
+/// that state", which is the whole reason this takes a closure rather
+/// than reading the class itself. A list row at rest draws no plate at
+/// all — the master's `idle.fill` is not transparent, and reading it
+/// would put a wash under every resting row — so `view::list` hands in a
+/// clear Idle and keeps the pixels it has always drawn. A button hands in
+/// the ladder unchanged. Both fade between exactly what they would
+/// otherwise have snapped between, which is the promise: **only the time
+/// of arrival is animated, never the colours arrived at.**
+///
+/// A settled mix reads ONE rung and returns it untouched — so at rest,
+/// under `motion.scale = 0`, and under a disabled effect, the ink is bit
+/// for bit the ink of the build without any of this.
+pub fn state_ink(
+    class: &str,
+    r: Rect,
+    to: State,
+    now: f64,
+    mut rung: impl FnMut(State) -> StateInk,
+) -> StateInk {
+    let mix = state_mix(class, r, to, now);
+    if mix.is_settled() {
+        return rung(to);
+    }
+    // A mixture that is still ONE rung — the instant a fade sets off, and
+    // the instant one is turned round — answers that rung's ink UNTOUCHED.
+    // The blend below is arithmetic, and arithmetic on a colour the theme
+    // wrote (`r * a / a` is not `r`) is a colour the theme did not write.
+    if let Some(s) = State::ALL.into_iter().find(|s| mix.weight(*s) >= 1.0) {
+        if s == to {
+            return rung(to);
+        }
+        let mut out = rung(s);
+        out.elevation = rung(to).elevation;
+        return out;
+    }
+    let mut acc = StateInk::CLEAR;
+    // Colours are accumulated PREMULTIPLIED and divided out at the end.
+    // A straight-alpha average of a transparent rung and a solid one
+    // drags the solid one toward the transparent one's RGB — which is
+    // black, and a hover that fades in through a bruise is worse than no
+    // fade at all.
+    let mut prem = [[0.0f32; 4]; 4];
+    for s in State::ALL {
+        let w = mix.weight(s);
+        if w <= 0.0 && s != to {
+            continue;
+        }
+        let ink = rung(s);
+        if s == to {
+            // A rank is an INDEX into `elev.*`, not a length: half of
+            // rank 1 and half of rank 2 is not rank 1.5, it is nothing.
+            // The material the control is heading for is the material it
+            // is made of the instant the move begins.
+            acc.elevation = ink.elevation;
+        }
+        if w <= 0.0 {
+            continue;
+        }
+        for (i, c) in [ink.fill, ink.edge, ink.text, ink.glyph].into_iter().enumerate() {
+            prem[i][0] += c.r * c.a * w;
+            prem[i][1] += c.g * c.a * w;
+            prem[i][2] += c.b * c.a * w;
+            prem[i][3] += c.a * w;
+        }
+        acc.edge_width += ink.edge_width * w;
+        acc.glow_radius += ink.glow_radius * w;
+        acc.glow_alpha += ink.glow_alpha * w;
+    }
+    let out = prem.map(unpremultiply);
+    acc.fill = out[0];
+    acc.edge = out[1];
+    acc.text = out[2];
+    acc.glyph = out[3];
+    acc
+}
+
+/// `a` at 0, `b` at 1, mixed the way [`state_ink`] mixes a rung — for a
+/// pair of colours that are NOT two rungs of one class.
+///
+/// The window controls are why it is public: their glyph wears
+/// `component.window_control.idle` and `.hover` (and `.close_hover`,
+/// which is the whole reason the pair is not a ladder), so the plate's
+/// ring fades on the class and the glyph inside it has to fade on the
+/// same clock or the two come apart mid-hover.
+///
+/// The ENDS ARE EXACT. A theme's colour must arrive as the theme wrote
+/// it, not as `a + (b - a) * 1.0` happened to round.
+pub fn mix_color(a: Color, b: Color, t: f32) -> Color {
+    if t <= 0.0 {
+        return a;
+    }
+    if t >= 1.0 {
+        return b;
+    }
+    unpremultiply([
+        a.r * a.a * (1.0 - t) + b.r * b.a * t,
+        a.g * a.a * (1.0 - t) + b.g * b.a * t,
+        a.b * a.a * (1.0 - t) + b.b * b.a * t,
+        a.a * (1.0 - t) + b.a * t,
+    ])
+}
+
+/// A premultiplied accumulator back to the straight-alpha colour the draw
+/// list takes. Nothing showing is nothing — a transparent colour has no
+/// hue to preserve.
+///
+/// The alpha is CLAMPED, and only the alpha: an `easing = custom` whose
+/// control points overshoot is doing what it was authored to do, and an
+/// overshoot is meaningful for a position but not for a coverage. The
+/// hue is left alone, because it is the ratio the division already
+/// normalised.
+fn unpremultiply(c: [f32; 4]) -> Color {
+    if c[3] <= 0.0 {
+        return Color::TRANSPARENT;
+    }
+    Color { r: c[0] / c[3], g: c[1] / c[3], b: c[2] / c[3], a: c[3].min(1.0) }
+}
+
+// ------------------------------------------------------------- the gates
+
+/// One tracked 0..1 property that is not a ladder at all — the focus
+/// ring's presence being the first of them.
+struct Gate {
+    fade: Crossfade,
+    effect: &'static str,
+    ends: f64,
+    seen: f64,
+}
+
+/// A 0..1 property that fades in and out under `motion.<effect>` — the
+/// carrier for the signals that are NOT rungs of the state ladder.
+///
+/// Focus is the reason it exists. §5.21 is explicit that focus is not a
+/// ladder rung: the ring is an overlay around the control, drawn or not
+/// drawn. "Or not drawn" is exactly a 0..1 property, and `motion.focus`
+/// has been sitting in the closed catalogue with no reader since it was
+/// written. `name` and `r` identify the gate the way a class and a box
+/// identify a track, and the three rules at the top of this section hold
+/// here too — born at its value, a jump when the clock has not moved, and
+/// swept when it stops being asked about.
+///
+/// [`Crossfade`] is what runs it, which is what that type was built for.
+pub fn gate(name: &str, r: Rect, on: bool, effect: &'static str, now: f64) -> f32 {
+    let target = if on { 1.0 } else { 0.0 };
+    FADES.with(|cell| {
+        let mut f = cell.borrow_mut();
+        f.sweep(now);
+        let key = key_of(name, r);
+        let fades = &mut *f;
+        let g = fades.gates.entry(key).or_insert_with(|| Gate {
+            fade: Crossfade::new(target),
+            effect,
+            ends: f64::NEG_INFINITY,
+            seen: now,
+        });
+        if g.fade.target() != target {
+            if now > g.seen {
+                let e = Effect::of(effect);
+                g.fade.retarget(&e, target, now);
+                g.effect = effect;
+                g.ends = now + e.one_shot_secs() as f64;
+            } else {
+                g.fade = Crossfade::new(target);
+                g.ends = f64::NEG_INFINITY;
+            }
+        }
+        g.seen = now;
+        let ends = g.ends;
+        let v = if ends <= now {
+            // Landed: no token read, and the value is the target exactly.
+            g.fade = Crossfade::new(target);
+            g.ends = f64::NEG_INFINITY;
+            target
+        } else {
+            g.fade.sample(&Effect::of(g.effect), now)
+        };
+        if ends > now {
+            fades.until = fades.until.max(ends);
+        }
+        v
+    })
+}
+
+// ------------------------------------------------------------ the host's two
+
+/// Whether any fade started so far will still be moving at `now` — "the
+/// host owes one more frame".
+///
+/// FALSE AT REST, which is the point: nothing in this module asks for a
+/// redraw, so a screen where nothing changed is drawn exactly as often as
+/// it is today. An upper bound, never a promise: a fade retargeted to
+/// where it already stood, or one landing early under a shortened effect,
+/// can leave this true for a few frames more than strictly necessary.
+pub fn pending(now: f64) -> bool {
+    FADES.with(|cell| now < cell.borrow().until)
+}
+
+/// How many controls the registry is tracking — for the test that proves
+/// a control which left the screen leaves nothing behind. Not a number
+/// any drawing code has business reading.
+pub fn tracked() -> usize {
+    FADES.with(|cell| {
+        let f = cell.borrow();
+        f.tracks.len() + f.gates.len()
+    })
+}
+
+/// Forgets every fade in flight, as if nothing had been drawn yet.
+///
+/// For tests, and for a host that has just torn a world down: the next
+/// ask is a first sighting, so it is born settled and nothing fades in
+/// from a screen that no longer exists.
+pub fn forget_fades() {
+    FADES.with(|cell| {
+        let mut f = cell.borrow_mut();
+        f.tracks.clear();
+        f.gates.clear();
+        f.until = f64::NEG_INFINITY;
+        f.swept = f64::NEG_INFINITY;
+    });
+}
+
 // ---------------------------------------------------------------------
 
 #[cfg(test)]
@@ -494,6 +1038,98 @@ mod tests {
                 assert!(v.is_finite(), "points {p:?} answered {v} at step {i}");
             }
         }
+    }
+
+    /// Which `motion.<id>` a move between two rungs runs under: the rung
+    /// that CHANGED names it, and the outermost change wins when two
+    /// moved at once.
+    #[test]
+    fn the_rung_that_moved_names_the_effect() {
+        assert_eq!(effect_for(State::Idle, State::Hover), "hover");
+        assert_eq!(effect_for(State::Hover, State::Idle), "hover");
+        assert_eq!(effect_for(State::Selected, State::SelectedHover), "hover");
+        assert_eq!(effect_for(State::Hover, State::Press), "press");
+        assert_eq!(effect_for(State::Dragging, State::Idle), "press");
+        assert_eq!(effect_for(State::Press, State::Dragging), "hover", "both are pressed");
+        assert_eq!(effect_for(State::Idle, State::Selected), "select");
+        assert_eq!(effect_for(State::SelectedHover, State::Hover), "select");
+        // Disabled is the outermost rule: it wins whatever else moved.
+        assert_eq!(effect_for(State::Press, State::Disabled), "disable");
+        assert_eq!(effect_for(State::Disabled, State::SelectedHover), "disable");
+    }
+
+    /// The identity of a drawn control is its class and its box, rounded
+    /// to whole pixels: a control that moved a hair is the same control,
+    /// one that moved a row is not, and two classes never collide in one
+    /// box.
+    #[test]
+    fn the_key_is_the_class_and_the_box() {
+        let r = Rect::new(10.0, 20.0, 30.0, 40.0);
+        assert_eq!(key_of("button", r), key_of("button", Rect::new(10.2, 19.8, 30.0, 40.1)));
+        assert_ne!(key_of("button", r), key_of("list.item", r));
+        assert_ne!(key_of("button", r), key_of("button", Rect::new(10.0, 40.0, 30.0, 40.0)));
+        assert_ne!(key_of("button", r), key_of("button", Rect::new(10.0, 20.0, 31.0, 40.0)));
+        // A degenerate rectangle is a key like any other, never a panic.
+        let _ = key_of("button", Rect::new(f32::NAN, 0.0, -1.0, f32::INFINITY));
+    }
+
+    /// A mixture is a weighting: it sums to one whatever the progress,
+    /// and it is the base at 0 and the target at 1.
+    #[test]
+    fn a_mixture_always_sums_to_one() {
+        let mut t = Track::born(State::Idle, 0.0);
+        t.base = [0.25, 0.75, 0.0, 0.0, 0.0, 0.0, 0.0];
+        t.to = State::Press;
+        for i in 0..=10 {
+            let m = t.mix_at(i as f32 / 10.0);
+            let sum: f32 = State::ALL.into_iter().map(|s| m.weight(s)).sum();
+            assert!((sum - 1.0).abs() < 1e-5, "the weights lost mass at {i}: {sum}");
+        }
+        assert_eq!(t.mix_at(0.0).weight(State::Hover), 0.75);
+        assert!(t.mix_at(1.0).is_settled());
+        assert_eq!(t.mix_at(1.0).weight(State::Press), 1.0);
+        assert_eq!(t.dominant(), State::Hover, "the heavier rung is the one it came from");
+    }
+
+    /// The blend's ENDS are exact — a theme's colour arrives as the theme
+    /// wrote it — and the middle keeps its hue: mixing something with
+    /// nothing must not drag it toward black, which is what a straight
+    /// average of an RGBA pair does.
+    #[test]
+    fn a_mix_keeps_its_ends_and_its_hue() {
+        let cyan = Color { r: 0.0, g: 0.9, b: 1.0, a: 1.0 };
+        let none = Color::TRANSPARENT;
+        assert_eq!(mix_color(none, cyan, 0.0), none);
+        assert_eq!(mix_color(none, cyan, 1.0), cyan);
+        assert_eq!(mix_color(none, cyan, -3.0), none);
+        assert_eq!(mix_color(none, cyan, 9.0), cyan);
+        let half = mix_color(none, cyan, 0.5);
+        assert!((half.a - 0.5).abs() < 1e-6, "alpha did not halve: {}", half.a);
+        assert!(half.g == cyan.g && half.b == cyan.b && half.r == cyan.r, "the hue moved");
+        // Two solid colours average the ordinary way.
+        let red = Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+        let mid = mix_color(red, cyan, 0.5);
+        assert!((mid.r - 0.5).abs() < 1e-6 && (mid.g - 0.45).abs() < 1e-6 && mid.a == 1.0);
+    }
+
+    /// A key nobody has seen is born settled on the rung it was asked
+    /// for, and a second ask AT THE SAME INSTANT is one frame asked
+    /// twice — a jump, not a transition. Both answers are reached
+    /// without reading a token, which is what this can assert without a
+    /// theme.
+    #[test]
+    fn a_first_sighting_and_a_still_clock_both_settle() {
+        forget_fades();
+        let r = Rect::new(0.0, 0.0, 7.0, 7.0);
+        let m = state_mix("motion.test.born", r, State::Hover, 3.0);
+        assert!(m.is_settled() && m.target() == State::Hover);
+        let m = state_mix("motion.test.born", r, State::Press, 3.0);
+        assert!(m.is_settled() && m.target() == State::Press, "one instant, two rungs, no fade");
+        let m = state_mix("motion.test.born", r, State::Idle, 2.5);
+        assert!(m.is_settled(), "a clock that went backwards is not a frame boundary");
+        assert!(!pending(3.0), "a settled registry asked the host for a frame");
+        forget_fades();
+        assert_eq!(tracked(), 0);
     }
 
     /// Retargeting mid-flight does not move the sampled value at the

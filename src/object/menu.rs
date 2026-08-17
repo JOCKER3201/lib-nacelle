@@ -504,13 +504,36 @@ impl MenuState {
                     } else {
                         State::Idle
                     };
-                    let style = match class {
-                        Some(cl) => t.class_state(cl, state),
-                        None => StateStyle::RAW,
-                    };
-                    // The highlight wash; idle rows rest on the menu's
-                    // own bed (the window-menu idiom, winframe.rs).
-                    if state != State::Idle {
+                    // Crossfaded under `motion.hover` / `.select` /
+                    // `.disable`. The row's IDLE rung keeps the ladder's
+                    // text — a resting label is a themed colour — but no
+                    // fill: an idle row rests on the menu's own bed (the
+                    // window-menu idiom, winframe.rs), and fading back
+                    // into `idle.fill` would paint a wash under every
+                    // row. So the highlight fades out to nothing, and at
+                    // rest its alpha is exactly zero.
+                    let style: StateStyle = crate::motion::state_ink(
+                        "menu.item",
+                        r,
+                        state,
+                        ctx.t,
+                        |s| {
+                            let ink = crate::view::surface::StateInk::from(match class {
+                                Some(cl) => t.class_state(cl, s),
+                                None => StateStyle::RAW,
+                            });
+                            match s {
+                                State::Idle => crate::view::surface::StateInk {
+                                    fill: crate::theme::Color::TRANSPARENT,
+                                    ..ink
+                                },
+                                _ => ink,
+                            }
+                        },
+                    )
+                    .into();
+                    // The highlight wash; a row at rest has none.
+                    if style.fill.a > 0.0 {
                         ctx.dl.rect(r.x, r.y, r.w, r.h, col(style.fill));
                     }
                     if rh >= text_threshold {

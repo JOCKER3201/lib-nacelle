@@ -188,6 +188,23 @@ pub const STATE_NAMES: [&str; 7] = [
 ];
 
 impl State {
+    /// The ladder in its own order — the order [`STATE_NAMES`] is written
+    /// in and the order `class_states` is indexed by.
+    ///
+    /// A consumer that has to visit every rung (the state crossfade in
+    /// [`crate::motion`] weighs all seven) would otherwise spell the list
+    /// a second time, and a second spelling is a second answer to "how
+    /// many rungs are there" the day an eighth arrives.
+    pub const ALL: [State; STATE_NAMES.len()] = [
+        State::Idle,
+        State::Hover,
+        State::Press,
+        State::Selected,
+        State::SelectedHover,
+        State::Dragging,
+        State::Disabled,
+    ];
+
     pub fn from_name(s: &str) -> Option<State> {
         Some(match s {
             "idle" => State::Idle,

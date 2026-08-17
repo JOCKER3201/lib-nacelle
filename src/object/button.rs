@@ -7,6 +7,7 @@ use crate::focus::{Caps, FocusId};
 use crate::draw::Corner;
 use crate::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
 use crate::ui;
+use crate::view::surface::StateInk;
 use crate::{Ctx, Rect};
 use std::sync::OnceLock;
 
@@ -107,10 +108,24 @@ pub fn dress(ctx: &mut Ctx, r: Rect, st: ButtonState) -> StateStyle {
     // ride the same corners as the frames — one shape, drawn by the
     // same primitive a panel's ring uses.
     ctx.dl.ring_fill(r, &corners, seg, col(t.color(tok(&PLATE, "shape.button.fill"))));
-    let style = match *CLASS.get_or_init(|| theme::class_id("button")) {
-        Some(c) => t.class_state(c, st.state()),
-        None => StateStyle::RAW,
-    };
+    // The rung, reached over TIME: hover, press and selection crossfade
+    // under their own `motion.*` entries instead of snapping. The wash is
+    // the ladder's own at rest and at the end of every fade — only the
+    // arrival is animated (`motion::state_ink`).
+    let cls = *CLASS.get_or_init(|| theme::class_id("button"));
+    let style: StateStyle = crate::motion::state_ink(
+        "button",
+        r,
+        st.state(),
+        ctx.t,
+        |s| {
+            StateInk::from(match cls {
+                Some(c) => t.class_state(c, s),
+                None => StateStyle::RAW,
+            })
+        },
+    )
+    .into();
     ctx.dl.ring_fill(r, &corners, seg, col(style.fill));
     if style.edge_width > 0.0 {
         ctx.dl.ring(r, &corners, seg, style.edge_width, col(style.edge));
@@ -171,9 +186,10 @@ pub fn draw(ctx: &mut Ctx, r: Rect, label: &str, st: ButtonState) {
 pub fn draw_focusable(ctx: &mut Ctx, r: Rect, label: &str, st: ButtonState, id: FocusId) {
     let f = ctx.focus.as_deref_mut().map(|fc| fc.register(id, r, Caps::NONE));
     draw(ctx, r, label, st);
-    if f.map_or(false, |f| f.ring) {
-        focus_ring::draw_quad(ctx, quad(&r));
-    }
+    // Asked EVERY frame, ring or no ring: the band fades in and out on
+    // `motion.focus`, and a call made only while focused would have
+    // nothing left on screen to fade away.
+    focus_ring::draw_quad_faded(ctx, quad(&r), f.map_or(false, |f| f.ring));
 }
 
 // ---------------------------------------------------------------------

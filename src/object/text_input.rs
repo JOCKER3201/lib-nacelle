@@ -950,10 +950,17 @@ pub fn draw(
     } else {
         State::Idle
     };
-    let wash = match *CLASS.get_or_init(|| theme::class_id("field")) {
-        Some(cl) => t.class_state(cl, state),
-        None => StateStyle::RAW,
-    };
+    // Crossfaded, not snapped: `motion.hover` on the way under the
+    // pointer, `motion.disable` — the slowest of the state fades, by the
+    // master's own note — on the way out of the world.
+    let cls = *CLASS.get_or_init(|| theme::class_id("field"));
+    let wash: StateStyle = crate::motion::state_ink("field", r, state, ctx.t, |s| {
+        crate::view::surface::StateInk::from(match cls {
+            Some(cl) => t.class_state(cl, s),
+            None => StateStyle::RAW,
+        })
+    })
+    .into();
     ctx.dl.ring_fill(r, &c, seg, col(wash.fill));
     // The ring: colour from the component group, width stepping up
     // while the field holds the caret (`field.border_focused`).
@@ -1207,9 +1214,7 @@ pub fn draw(
     }
     ctx.dl.pop_clip();
 
-    if f.map_or(false, |f| f.ring) {
-        focus_ring::draw(ctx, r);
-    }
+    focus_ring::draw_faded(ctx, r, f.map_or(false, |f| f.ring));
     FieldDraw { focused, caret: caret_rect }
 }
 

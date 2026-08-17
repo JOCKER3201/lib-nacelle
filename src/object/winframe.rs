@@ -9,9 +9,15 @@
 //! The title bar reads, left to right: the options button, the title
 //! centred on the window, and the minimize, maximize and close
 //! buttons. The options button opens the window menu, anchored to the
-//! icon's corner. The frame draws STATES, never transitions: how a
-//! menu unfolds, how focus fades — that is animation, and animation
-//! belongs to the compositor drawing the frame, not to the frame.
+//! icon's corner. The frame stages NO animation of its own — how a
+//! window opens, how a menu unfolds, how a board rides: that belongs to
+//! whoever draws the frame. What it does do is ask the toolkit's one
+//! state resolver ([`crate::motion::state_ink`]) for its rungs, exactly
+//! as a button in a panel does, so a close button and a button in a
+//! dialog cannot disagree about how long a hover takes to arrive. Under
+//! the owner's ONE WINDOW MODEL there is no separate class of "our"
+//! controls, and this file's own window menu is `menu.item` — the very
+//! class the context menu is drawn on, one object drawn twice.
 //!
 //! The frame computes, draws and answers where a point landed. What a
 //! hit MEANS — moving, closing, focusing, resizing the actual window —
@@ -60,6 +66,37 @@ fn class_state(
         Some(c) => t.class_state(c, state),
         None => theme::bake::StateStyle::RAW,
     }
+}
+
+/// [`class_state`], reached over TIME: the same baked rungs, crossfaded
+/// under `motion.hover` / `.press` / `.select` / `.disable` instead of
+/// snapped between. `r` is the box the control occupies, which is how the
+/// shared registry tells one plate from the next without this file
+/// keeping a single byte between frames.
+///
+/// `bare_idle` is for a control that draws NOTHING at rest — a menu row
+/// sits on the frame's own bed, so its idle rung has no fill and the
+/// highlight fades out to nothing rather than into `state.idle.fill`,
+/// which would paint a wash under every row of the window menu.
+fn class_fade(
+    t: &theme::ResolvedTheme,
+    cell: &'static OnceLock<Option<u16>>,
+    name: &'static str,
+    state: State,
+    r: Rect,
+    now: f64,
+    bare_idle: bool,
+) -> theme::bake::StateStyle {
+    crate::motion::state_ink(name, r, state, now, |s| {
+        let ink = crate::view::surface::StateInk::from(class_state(t, cell, name, s));
+        match (bare_idle, s) {
+            (true, State::Idle) => {
+                crate::view::surface::StateInk { fill: Color::TRANSPARENT, ..ink }
+            }
+            _ => ink,
+        }
+    })
+    .into()
 }
 
 /// Frame measurements. The theme bakes them to device pixels for the
@@ -442,11 +479,19 @@ impl Frame {
         ctx.dl.rect(c.x + c.w, c.y, m.border, c.h, body);
         // Focus swaps the edge role (§5.21): the focused ring is
         // `border.focus`, the resting one the window class's idle edge.
-        let line = if focused {
-            col(t.color(tok(&BORDER_FOCUS, "border.focus")))
-        } else {
-            col(class_state(t, &WINDOW_CLASS, "window", State::Idle).edge)
-        };
+        //
+        // Over `motion.focus`, and NOT as a courtesy: the master's own
+        // note on that entry is "the edge re-role and the subtree dim,
+        // together", so the two ride one gate and cannot come apart.
+        // The gate is keyed on the frame's own box, so a window being
+        // moved or resized is a new key born at its state — a drag is
+        // not a change of focus and must not be drawn as one.
+        let g = crate::motion::gate("winframe.focus", outer, focused, "focus", ctx.t);
+        let line = crate::motion::mix_color(
+            col(class_state(t, &WINDOW_CLASS, "window", State::Idle).edge),
+            col(t.color(tok(&BORDER_FOCUS, "border.focus"))),
+            g,
+        );
         let style = corner_style(t, tok(&MODE, "winframe.corner_mode"), &MODE_IDX);
         let corners = [Corner { style, size: m.cut }; 4];
         let seg = corner_segments(t, &SEGMENTS, m.cut);
@@ -461,10 +506,19 @@ impl Frame {
             t.px(tok(&RULE_W, "winframe.rule")).max(0.0),
             col(t.color(tok(&TITLEBAR_RULE, "component.titlebar.rule"))),
         );
-        let dim = if focused {
-            1.0
-        } else {
-            t.px(tok(&UNFOCUSED_DIM, "focus.unfocused_dim")).clamp(0.0, 1.0)
+        // The subtree dim, on the same gate as the edge above. The ENDS
+        // ARE EXACT — a resting frame is dimmed by the number the theme
+        // wrote, and a focused one is not dimmed at all — because a
+        // multiplier that arrives at 0.999 is a frame nobody asked for.
+        let dim = {
+            let off = t.px(tok(&UNFOCUSED_DIM, "focus.unfocused_dim")).clamp(0.0, 1.0);
+            if g >= 1.0 {
+                1.0
+            } else if g <= 0.0 {
+                off
+            } else {
+                off + (1.0 - off) * g
+            }
         };
         let bw = t.px(tok(&BUTTON_BORDER, "winframe.button.border")).max(0.0);
         let ink_idle = col(t.color(tok(&WC_IDLE, "component.window_control.idle")));
@@ -475,11 +529,14 @@ impl Frame {
         // the one destructive control and hovers in its own colour.
         let plate = |ctx: &mut Ctx, r: Rect, close: bool| -> Color {
             let hot = ctx.mouse.over(r);
-            let st = class_state(
+            let st = class_fade(
                 t,
                 &ICON_BUTTON,
                 "icon_button",
                 if hot { State::Hover } else { State::Idle },
+                r,
+                ctx.t,
+                false,
             );
             let ring = col(st.edge);
             // `winframe.button.corner` carries the LENGTH alone: the
@@ -499,15 +556,17 @@ impl Frame {
                 bw,
                 ring.alpha(ring.a * dim),
             );
-            let ink = if hot {
-                if close {
-                    ink_close
-                } else {
-                    ink_hover
-                }
-            } else {
-                ink_idle
-            };
+            // The glyph fades on the SAME clock as the plate's ring: it
+            // is a different pair of tokens, not a ladder, so it rides
+            // `motion.hover` through a gate instead. A ring that
+            // brightens over 90 ms above a glyph that snapped would
+            // read as two controls.
+            let g = crate::motion::gate("winframe.control", r, hot, "hover", ctx.t);
+            let ink = crate::motion::mix_color(
+                ink_idle,
+                if close { ink_close } else { ink_hover },
+                g,
+            );
             ink.alpha(ink.a * dim)
         };
         let stroke = t.px(tok(&ICON_STROKE, "winframe.icon.stroke")).max(0.0);
@@ -708,13 +767,16 @@ impl Frame {
         for (i, (_, label)) in MENU.iter().enumerate() {
             let row = menu_row(mr, i);
             let hot = ctx.mouse.over(row);
-            let st = class_state(
+            let st = class_fade(
                 t,
                 &MENU_ITEM,
                 "menu.item",
                 if hot { State::Hover } else { State::Idle },
+                row,
+                ctx.t,
+                true,
             );
-            if hot {
+            if st.fill.a > 0.0 {
                 ctx.dl.rect(row.x, row.y, row.w, row.h, col(st.fill));
             }
             ctx.dl.text_fig(

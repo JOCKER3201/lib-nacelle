@@ -1431,20 +1431,29 @@ pub fn table_surface<S: Surface>(
             if interactive {
                 let hovered = band.contains(mouse.0, mouse.1);
                 let rung = match (pressed_head == Some(i), hovered, sorted) {
-                    (true, _, _) => Some(theme::parse::State::Press),
-                    (_, true, true) => Some(theme::parse::State::SelectedHover),
-                    (_, true, false) => Some(theme::parse::State::Hover),
-                    (_, false, true) => Some(theme::parse::State::Selected),
-                    _ => None,
+                    (true, _, _) => theme::parse::State::Press,
+                    (_, true, true) => theme::parse::State::SelectedHover,
+                    (_, true, false) => theme::parse::State::Hover,
+                    (_, false, true) => theme::parse::State::Selected,
+                    _ => theme::parse::State::Idle,
                 };
-                if let Some(rung) = rung {
-                    let style = sf.class_state("table.head", rung);
-                    if style.fill.a > 0.0 {
-                        sf.rect(band, style.fill);
-                    }
-                    if style.text.a > 0.0 {
-                        text_c = style.text;
-                    }
+                // The resting heading is the one this file has always
+                // drawn: no band behind it, and the head role's own ink
+                // in front. Handing that in as the idle rung is what
+                // lets the wash fade out to nothing and the label fade
+                // back to its resting colour, instead of snapping —
+                // while a table nobody is pointing at keeps every pixel
+                // it had.
+                let rest = crate::view::surface::StateInk {
+                    text: head_c,
+                    ..crate::view::surface::StateInk::CLEAR
+                };
+                let style = sf.class_ink_resting("table.head", rung, band, rest);
+                if style.fill.a > 0.0 {
+                    sf.rect(band, style.fill);
+                }
+                if style.text.a > 0.0 {
+                    text_c = style.text;
                 }
                 if let Some(h) = hits.as_deref_mut() {
                     h.push(band, crate::view::Hit::TableHead { id: view_id, col: i });
@@ -1532,19 +1541,24 @@ pub fn table_surface<S: Surface>(
                 && mouse.1 < body_y + body_h;
             let chosen = selected_key == Some(key.as_str());
             let rung = match (chosen, hovered) {
-                (true, true) => Some(theme::parse::State::SelectedHover),
-                (true, false) => Some(theme::parse::State::Selected),
-                (false, true) => Some(theme::parse::State::Hover),
-                _ => None,
+                (true, true) => theme::parse::State::SelectedHover,
+                (true, false) => theme::parse::State::Selected,
+                (false, true) => theme::parse::State::Hover,
+                _ => theme::parse::State::Idle,
             };
-            if let Some(rung) = rung {
-                // `script.row` — the class the master already declares
-                // for "a selectable row a script widget draws". No new
-                // selection colour exists, or needs to.
-                let style = sf.class_state("script.row", rung);
-                if style.fill.a > 0.0 {
-                    sf.rect(rect, style.fill);
-                }
+            // `script.row` — the class the master already declares for
+            // "a selectable row a script widget draws". No new selection
+            // colour exists, or needs to. A resting row wears the zebra
+            // and nothing else, so its idle rung is CLEAR (list.rs's
+            // reason, in full).
+            let style = sf.class_ink_resting(
+                "script.row",
+                rung,
+                rect,
+                crate::view::surface::StateInk::CLEAR,
+            );
+            if style.fill.a > 0.0 {
+                sf.rect(rect, style.fill);
             }
         }
         // Recorded whatever `select` says: a row rectangle is also how
