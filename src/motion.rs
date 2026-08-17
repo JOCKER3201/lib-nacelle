@@ -56,7 +56,7 @@ use crate::theme::{self, Color, TokenId};
 use crate::ui::{theme_word, warn_once};
 use crate::view::surface::StateInk;
 use crate::Rect;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -222,38 +222,45 @@ impl Effect {
     /// (prohibition 6: an unknown effect is reported and ignored) —
     /// which falls out of the token fallbacks: a MISSING `enabled`
     /// reads `false`, and a disabled effect answers 1.0.
+    ///
+    /// A HIT ALLOCATES NOTHING. The map is keyed by `String` because it
+    /// has to own the names it interned, but `HashMap<String, _>` looks
+    /// up by `&str` — so the lookup comes first, alone, and the
+    /// `to_string` happens once per id in the life of the process rather
+    /// than once per ask. (`entry(id.to_string())` allocated on every
+    /// call, including the ones a running fade makes per frame per
+    /// control, which is the profile this memo exists to avoid.)
     pub fn of(id: &str) -> Effect {
         thread_local! {
             static EFFECTS: RefCell<HashMap<String, Effect>> = RefCell::new(HashMap::new());
         }
-        EFFECTS.with(|m| {
-            *m.borrow_mut().entry(id.to_string()).or_insert_with(|| {
-                if theme::id(&format!("motion.{id}.duration_ms")).is_none() {
-                    warn_once(
-                        &format!("motion:{id}"),
-                        &format!("unknown motion effect \"{id}\" — it freezes at fully visible"),
-                    );
-                }
-                let g = |k: &str| {
-                    theme::id(&format!("motion.{id}.{k}")).unwrap_or(TokenId::MISSING)
-                };
-                Effect {
-                    duration_ms: g("duration_ms"),
-                    period_ms: g("period_ms"),
-                    amplitude: g("amplitude"),
-                    floor: g("floor"),
-                    duty: g("duty"),
-                    easing: g("easing"),
-                    easing_p: [
-                        g("easing_p[0]"),
-                        g("easing_p[1]"),
-                        g("easing_p[2]"),
-                        g("easing_p[3]"),
-                    ],
-                    enabled: g("enabled"),
-                }
-            })
-        })
+        if let Some(hit) = EFFECTS.with(|m| m.borrow().get(id).copied()) {
+            return hit;
+        }
+        if theme::id(&format!("motion.{id}.duration_ms")).is_none() {
+            warn_once(
+                &format!("motion:{id}"),
+                &format!("unknown motion effect \"{id}\" — it freezes at fully visible"),
+            );
+        }
+        let g = |k: &str| theme::id(&format!("motion.{id}.{k}")).unwrap_or(TokenId::MISSING);
+        let built = Effect {
+            duration_ms: g("duration_ms"),
+            period_ms: g("period_ms"),
+            amplitude: g("amplitude"),
+            floor: g("floor"),
+            duty: g("duty"),
+            easing: g("easing"),
+            easing_p: [
+                g("easing_p[0]"),
+                g("easing_p[1]"),
+                g("easing_p[2]"),
+                g("easing_p[3]"),
+            ],
+            enabled: g("enabled"),
+        };
+        EFFECTS.with(|m| m.borrow_mut().insert(id.to_string(), built));
+        built
     }
 
     /// The four `easing_p` control points, read from the live theme.
@@ -425,8 +432,11 @@ impl Crossfade {
 //
 // So the fades live in ONE registry beside the resolver, keyed by the two
 // things a caller already has: the interaction CLASS it is drawing on and
-// the RECTANGLE it is drawing in. Nothing is passed down and nothing is
-// stored up; a call site gains one argument it was already holding.
+// the RECTANGLE it is drawing in — plus the SURFACE, which is ambient
+// rather than passed, because the same content drawn once per screen is
+// two controls and the call site has no idea which screen it is on
+// ([`set_surface`]). Nothing is passed down and nothing is stored up; a
+// call site gains one argument it was already holding.
 //
 // Three rules make that key honest:
 //
@@ -442,12 +452,16 @@ impl Crossfade {
 //   screen stops being re-seen, and the sweep below reclaims it; the map
 //   is bounded by what is on screen, not by what has ever been on screen.
 //
-// AND NOTHING HERE STARTS A CLOCK. At rest a track is one hash lookup and
-// four compares — no theme read, no allocation, no redraw asked for. The
-// host learns that it owes another frame by asking [`pending`], which
-// answers false the moment the last fade lands. The desktop's 100 % CPU
-// fault was a per-frame reload that nothing asked for; a fade that costs
-// nothing until something changes cannot repeat it.
+// AND NOTHING HERE STARTS A CLOCK. At rest a track is the surface's
+// thread-local read, the viewport's atomic load, one hash lookup and a
+// handful of compares — no token resolved, no allocation, no redraw
+// asked for, nothing that takes the theme engine's lock. The host learns
+// that it owes another frame by asking [`pending`], which answers false
+// the moment the last fade lands. The desktop's 100 % CPU fault was a
+// per-frame reload that nothing asked for; a fade that costs nothing
+// until something changes cannot repeat it — and neither may the sweep
+// that keeps its map, which is why the one below is rate-limited rather
+// than run at every ask.
 
 /// A control's place between the rungs of its ladder: a weight per rung,
 /// summing to 1.
@@ -597,21 +611,93 @@ fn effect_for(from: State, to: State) -> &'static str {
     }
 }
 
-/// The identity of one drawn control: its class and the box it occupies,
-/// rounded to whole pixels.
+/// The identity of one drawn control: the SURFACE it is drawn on, its
+/// class, and the box it occupies, rounded to whole pixels.
 ///
 /// A hash rather than a `String`, because this is asked once per control
 /// per frame and a key that allocates is a key that shows up in a
 /// profile. Two controls of one class cannot share a box, and a control
 /// that MOVED is deliberately a different key — see the born-settled rule
 /// above.
+///
+/// # WHY THE SURFACE IS PART OF IT
+///
+/// The desktop draws THE SAME CONTENT ONCE PER SCREEN. Class and box
+/// alone therefore name one entry for what are two controls: on a
+/// two-monitor desk the same button stands in the same rectangle on both
+/// screens, and only one of them has the pointer. Frame after frame the
+/// registry would be told `Hover` and then `Idle` about one track, so the
+/// fade would turn round on every frame and never settle — the same
+/// shape of fault as the control panel's hit boxes in August 2026, where
+/// one slot served two screens.
+///
+/// The two words are kept SEPARATE rather than folded into one. Mixing
+/// them saves eight bytes and buys a question that can only be answered
+/// with a collision argument — and "two screens occasionally share one
+/// fade" is a bug nobody would ever manage to report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Key {
+    surface: u64,
+    viewport: u64,
     class: u64,
     x: i32,
     y: i32,
     w: i32,
     h: i32,
+}
+
+thread_local! {
+    /// The surface the current frame is being drawn onto, as the HOST
+    /// names it. Zero — "the only surface there is" — until a host says
+    /// otherwise, which is what every single-window embedder and every
+    /// test wants.
+    static SURFACE: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Names the surface the frames that FOLLOW are drawn onto, and answers
+/// what it was, so a caller can put the old one back.
+///
+/// # What to pass, and why this is the host's word to give
+///
+/// The identity has to be STABLE between two frames of one screen and
+/// DIFFERENT between two screens. Nothing inside the toolkit can supply
+/// both halves:
+///
+/// * a control's rectangle is in the SCREEN's own coordinates, so two
+///   monitors give the same numbers for the same control;
+/// * `Ctx.w`/`Ctx.h` are the window's size — equal for two identical
+///   monitors, and equal again for one monitor before and after a
+///   sibling resizes;
+/// * [`theme::epoch`] names which BAKE is published, and on a
+///   mixed-height desktop it alternates every frame by design — the
+///   reason `content_epoch` had to be split off it after the 100 % CPU
+///   fault. It is a cache key, never a screen's name.
+///
+/// [`theme::viewport_key`] is the one thing the toolkit can read that is
+/// right about the case the fault was found in — two screens of unequal
+/// height are two viewports — and it is folded in below without anyone
+/// asking. But two IDENTICAL monitors bake identically, so it cannot
+/// separate them, and identical monitors are the ordinary desk. That
+/// last step needs a word only the host has.
+///
+/// Pass anything stable per screen and distinct between screens: a hash
+/// of the connector name (`DP-1`, `eDP-1` — nacelle-desktop's
+/// `Screen::connector`, which is documented there as A SCREEN'S
+/// IDENTITY, surviving unplugging and reordering), or, failing a
+/// connector, the screen's index in the host's own list.
+///
+/// **NO CALLER IN THIS REPOSITORY.** It is called by the host, once, at
+/// the top of the frame — in nacelle-desktop that is `draw_screen` in
+/// `src/main.rs`, beside its existing `theme::set_viewport(h, …)`, which
+/// is already the one place in that program certain to be looking at one
+/// named screen. Stone 3 wires it.
+pub fn set_surface(id: u64) -> u64 {
+    SURFACE.with(|c| c.replace(id))
+}
+
+/// Which surface [`set_surface`] last named on this thread.
+pub fn surface() -> u64 {
+    SURFACE.with(|c| c.get())
 }
 
 fn key_of(class: &str, r: Rect) -> Key {
@@ -622,6 +708,16 @@ fn key_of(class: &str, r: Rect) -> Key {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     Key {
+        // The host's word for the screen, and the engine's word for the
+        // viewport: EITHER one differing is a different control. The
+        // viewport half costs one atomic load — no lock, no resolve —
+        // and it is what makes a mixed-height desktop right before any
+        // host has been taught to call [`set_surface`]. It also means a
+        // resize re-keys every track, which is the born-settled rule
+        // doing exactly what it is for: a screen whose every rectangle
+        // just moved has no fades worth carrying over.
+        surface: SURFACE.with(|c| c.get()),
+        viewport: theme::viewport_key(),
         class: h,
         x: r.x.round() as i32,
         y: r.y.round() as i32,
@@ -634,19 +730,23 @@ fn key_of(class: &str, r: Rect) -> Key {
 /// enough that a control hidden for a frame or two keeps its fade, short
 /// enough that a scrolled-away list does not sit in memory.
 const KEEP_SECS: f64 = 0.5;
-/// The map size that forces a sweep whatever the clock says — the guard
-/// for a host whose `now` never moves, and for churn faster than the
-/// interval.
-const SWEEP_AT: usize = 2048;
+/// The smallest map the size guard will act on. Below this the clock is
+/// the only thing that sweeps: a handful of entries is not worth walking
+/// for, however fast they churn.
+const SWEEP_FLOOR: usize = 2048;
 
 /// Everything the fades keep between frames: the tracks, the scalar
 /// gates, when the map was last swept, and when the last fade in flight
 /// will land.
-#[derive(Default)]
 struct Fades {
     tracks: HashMap<Key, Track>,
     gates: HashMap<Key, Gate>,
     swept: f64,
+    /// The size at which the next sweep is forced whatever the clock
+    /// says. Raised to twice what SURVIVED the last sweep, so a map that
+    /// is legitimately large is walked on the clock like any other and
+    /// never twice for the same crowd. See [`Fades::sweep`].
+    sweep_at: usize,
     /// The latest `ends` of anything started — what [`pending`] answers
     /// against. It is an upper bound, never a promise that something is
     /// still moving, so a host that redraws one frame too many is the
@@ -654,27 +754,57 @@ struct Fades {
     until: f64,
 }
 
+impl Fades {
+    fn new() -> Fades {
+        Fades {
+            tracks: HashMap::new(),
+            gates: HashMap::new(),
+            swept: f64::NEG_INFINITY,
+            sweep_at: SWEEP_FLOOR,
+            until: f64::NEG_INFINITY,
+        }
+    }
+}
+
 thread_local! {
-    static FADES: RefCell<Fades> = RefCell::new(Fades {
-        tracks: HashMap::new(),
-        gates: HashMap::new(),
-        swept: f64::NEG_INFINITY,
-        until: f64::NEG_INFINITY,
-    });
+    static FADES: RefCell<Fades> = RefCell::new(Fades::new());
 }
 
 impl Fades {
-    /// Drops what is no longer on screen. Cheap and rare: once every
-    /// [`KEEP_SECS`], or when the map grows past [`SWEEP_AT`].
+    /// Drops what is no longer on screen. Called on EVERY ask, so what it
+    /// costs at rest is what the registry costs at rest: two compares.
+    ///
+    /// # The size guard is a HIGH-WATER MARK, not a ceiling
+    ///
+    /// It was `len() >= 2048`, and that is a trap rather than a guard: a
+    /// map over the mark that is entirely FRESH — every entry drawn this
+    /// very frame, which is precisely what a screenful of 2 048 controls
+    /// looks like — retains everything, keeps its length, and so trips
+    /// the same test on the next ask, and the next. The result is a full
+    /// walk of the map per control per frame: quadratic work in the one
+    /// case the guard was written for, on a program with a history of
+    /// spending 100 % of a core on a per-frame job nobody asked for.
+    ///
+    /// So a sweep now RAISES the mark to twice what survived it. Between
+    /// two size-triggered sweeps the map must therefore double, which
+    /// makes the walk amortised O(1) per insertion however a host
+    /// misbehaves; and the mark comes back down the moment a sweep
+    /// actually reclaims something. The clock keeps its own trigger — the
+    /// real one, since a control that leaves the screen stops being seen
+    /// rather than stops existing — and a host whose `now` never moves
+    /// still cannot be reclaimed FROM (every entry looks fresh forever),
+    /// which no sweep policy can fix and which the doubling at least
+    /// stops charging by the frame.
     fn sweep(&mut self, now: f64) {
         let by_clock = now - self.swept >= KEEP_SECS;
-        let by_size = self.tracks.len() + self.gates.len() >= SWEEP_AT;
-        if !by_clock && !by_size {
+        if !by_clock && self.tracks.len() + self.gates.len() < self.sweep_at {
             return;
         }
         self.tracks.retain(|_, t| now - t.seen < KEEP_SECS);
         self.gates.retain(|_, g| now - g.seen < KEEP_SECS);
         self.swept = now;
+        let live = self.tracks.len() + self.gates.len();
+        self.sweep_at = live.saturating_mul(2).max(SWEEP_FLOOR);
     }
 }
 
@@ -924,6 +1054,24 @@ pub fn gate(name: &str, r: Rect, on: bool, effect: &'static str, now: f64) -> f3
 /// it is today. An upper bound, never a promise: a fade retargeted to
 /// where it already stood, or one landing early under a shortened effect,
 /// can leave this true for a few frames more than strictly necessary.
+///
+/// # NOBODY IN THIS REPOSITORY CALLS IT, and that is not an oversight
+///
+/// This is an API FOR THE HOST, and libnacelle has no frame loop to be
+/// its reader: the toolkit is called to draw, it never decides when.
+/// Stating it plainly is the point — a seam quietly assumed to be wired
+/// is worse than one openly waiting.
+///
+/// It is also not load-bearing yet, which is why stone 2 could land
+/// without it. nacelle-desktop drives an unconditional 60 Hz cadence
+/// (`src/main.rs`, the `next_frame`/`FRAME` block that calls
+/// `request_redraw` on every screen), so today every fade gets its
+/// frames whether or not anyone asks. The day that loop learns to sleep
+/// when nothing is moving — stone 3's business — this is the one
+/// question it has to put to the registry before it does, and the tests
+/// in `tests/state_fades.rs` already pin the answer at both ends.
+///
+/// Until then the only readers are those tests.
 pub fn pending(now: f64) -> bool {
     FADES.with(|cell| now < cell.borrow().until)
 }
@@ -945,11 +1093,7 @@ pub fn tracked() -> usize {
 /// from a screen that no longer exists.
 pub fn forget_fades() {
     FADES.with(|cell| {
-        let mut f = cell.borrow_mut();
-        f.tracks.clear();
-        f.gates.clear();
-        f.until = f64::NEG_INFINITY;
-        f.swept = f64::NEG_INFINITY;
+        *cell.borrow_mut() = Fades::new();
     });
 }
 
@@ -1064,6 +1208,11 @@ mod tests {
     /// box.
     #[test]
     fn the_key_is_the_class_and_the_box() {
+        // The key carries the live viewport, so make sure the engine has
+        // published one before any two keys are compared: a theme loading
+        // on another test's thread halfway through would otherwise be a
+        // difference this test never asked about.
+        let _ = theme::resolved();
         let r = Rect::new(10.0, 20.0, 30.0, 40.0);
         assert_eq!(key_of("button", r), key_of("button", Rect::new(10.2, 19.8, 30.0, 40.1)));
         assert_ne!(key_of("button", r), key_of("list.item", r));
@@ -1071,6 +1220,70 @@ mod tests {
         assert_ne!(key_of("button", r), key_of("button", Rect::new(10.0, 20.0, 31.0, 40.0)));
         // A degenerate rectangle is a key like any other, never a panic.
         let _ = key_of("button", Rect::new(f32::NAN, 0.0, -1.0, f32::INFINITY));
+    }
+
+    /// …and the SURFACE, which is the half a call site cannot see. The
+    /// desktop draws one board once per screen, so without this the same
+    /// button in the same rectangle on two monitors is one entry, told
+    /// `Hover` by the screen under the pointer and `Idle` by the other
+    /// one, every frame, forever.
+    ///
+    /// The surface is thread-local, so this test cannot disturb another;
+    /// it puts back what it found all the same.
+    #[test]
+    fn the_key_names_the_surface_too() {
+        let _ = theme::resolved();
+        let r = Rect::new(10.0, 20.0, 30.0, 40.0);
+        let outer = set_surface(0);
+        let a = key_of("button", r);
+        let was = set_surface(0x4450_2d31); // "DP-1", as a host might hash it
+        assert_eq!(was, 0, "set_surface did not answer what it replaced");
+        assert_eq!(surface(), 0x4450_2d31);
+        let b = key_of("button", r);
+        assert_ne!(a, b, "one class in one box on two screens is one entry");
+        // Same class, same box, same screen: the same control again.
+        assert_eq!(key_of("button", r), b);
+        set_surface(0);
+        assert_eq!(key_of("button", r), a, "the first screen's key did not come back");
+        set_surface(outer);
+    }
+
+    /// The size guard is a HIGH-WATER MARK. A map over the mark whose
+    /// entries are all FRESH cannot be reclaimed from, so sweeping it
+    /// again on the next ask is pure cost — and the next ask is the next
+    /// control, this frame. One sweep per crowd, and the clock keeps its
+    /// own trigger.
+    ///
+    /// Mutation: restore `len() >= SWEEP_FLOOR` as the guard and the
+    /// stale entry planted below is gone by the second ask.
+    #[test]
+    fn a_full_map_of_fresh_entries_is_swept_once_not_per_ask() {
+        let _ = theme::resolved();
+        let mut f = Fades::new();
+        for i in 0..SWEEP_FLOOR + 10 {
+            f.tracks.insert(
+                key_of("sweep.test", Rect::new(i as f32, 0.0, 1.0, 1.0)),
+                Track::born(State::Idle, 10.0),
+            );
+        }
+        f.swept = 10.0;
+        // Over the mark and inside the interval: swept for its size, and
+        // nothing is reclaimed because everything was drawn this instant.
+        f.sweep(10.0);
+        assert_eq!(f.tracks.len(), SWEEP_FLOOR + 10, "a fresh entry was reclaimed");
+        assert!(f.sweep_at >= 2 * f.tracks.len(), "the mark was not raised past the crowd");
+        // The second ask at the same instant must not walk the map again.
+        let stale = key_of("sweep.test", Rect::new(0.0, 0.0, 1.0, 1.0));
+        f.tracks.get_mut(&stale).expect("the planted entry").seen = 0.0;
+        f.sweep(10.0);
+        assert!(f.tracks.contains_key(&stale), "the size guard swept twice for one crowd");
+        // The clock is the real trigger, and it does reclaim.
+        f.sweep(10.0 + KEEP_SECS);
+        assert!(!f.tracks.contains_key(&stale), "the clock's sweep kept a stale entry");
+        // A sweep that reclaims brings the mark back down toward the floor.
+        f.tracks.clear();
+        f.sweep(20.0);
+        assert_eq!(f.sweep_at, SWEEP_FLOOR, "the mark never came down");
     }
 
     /// A mixture is a weighting: it sums to one whatever the progress,

@@ -96,6 +96,8 @@ fn the_state_fades_answer_for_the_theme() {
     the_resting_rung_is_the_callers_to_state();
     the_focus_ring_has_a_gate_of_its_own();
     the_host_is_told_when_it_owes_another_frame();
+    two_screens_of_two_heights_settle_independently();
+    two_identical_screens_need_the_hosts_word();
 }
 
 /// A key the registry has never seen is SETTLED on the rung it was asked
@@ -348,4 +350,79 @@ fn the_host_is_told_when_it_owes_another_frame() {
     assert!(motion::pending(80.016), "a fade in flight did not ask for a frame");
     assert!(motion::pending(80.1), "the fade stopped asking before it landed");
     assert!(!motion::pending(80.2), "the fade kept asking after it landed");
+}
+
+/// THE DESKTOP DRAWS THE SAME CONTENT ONCE PER SCREEN. Class and box
+/// alone are therefore not an identity: on a two-monitor desk one button
+/// stands in one rectangle on both screens, and only one of them has the
+/// pointer. Sharing an entry, the track would be told `Hover` and then
+/// `Idle` every frame and would never settle — the control panel's
+/// two-screens-one-slot fault, in another register.
+///
+/// Two screens of two HEIGHTS are two viewports, and the key carries the
+/// viewport without anyone having to say so. `state_mix` rather than
+/// `ink` throughout, because the two bakes are two themes and a `px` may
+/// legitimately differ between them; the weights may not.
+fn two_screens_of_two_heights_settle_independently() {
+    master();
+    let r = Rect::new(700.0, 0.0, 40.0, 20.0);
+    // Each closure IS a screen: it sets the viewport as `draw_screen`
+    // does, then draws the one control.
+    let a = |to, now| {
+        theme::set_viewport(1080.0, 1.0);
+        state_mix("button", r, to, now)
+    };
+    let b = |to, now| {
+        theme::set_viewport(1440.0, 1.0);
+        state_mix("button", r, to, now)
+    };
+    // Frame one: the control is at rest on both.
+    assert!(a(State::Idle, 90.0).is_settled());
+    assert!(b(State::Idle, 90.0).is_settled());
+    assert_eq!(motion::tracked(), 2, "two screens shared one entry");
+    // Frame two: the pointer is on B alone. A must not notice.
+    assert!(a(State::Idle, 90.016).is_settled(), "screen A moved because screen B did");
+    assert!(!b(State::Hover, 90.016).is_settled(), "screen B's fade never set off");
+    // And on, frame by frame: B's fade runs its 90 ms while A stands
+    // still. On one shared entry neither of these holds — the target
+    // turns round twice per frame and the mixture never arrives.
+    for i in 2..14 {
+        let t = 90.0 + 0.016 * i as f64;
+        let stood = a(State::Idle, t);
+        assert!(stood.is_settled() && stood.weight(State::Idle) == 1.0, "screen A was dragged along at {t}");
+        let _ = b(State::Hover, t);
+    }
+    assert!(b(State::Hover, 90.3).is_settled(), "screen B never landed");
+    assert_eq!(b(State::Hover, 90.316).weight(State::Hover), 1.0);
+    master();
+}
+
+/// Two IDENTICAL monitors bake IDENTICALLY — same height, same scale,
+/// one viewport — which is the ordinary desk and the case the viewport
+/// cannot answer. The last step is a word only the host has:
+/// `set_surface`, called where `set_viewport` already is.
+fn two_identical_screens_need_the_hosts_word() {
+    master();
+    let r = Rect::new(760.0, 0.0, 40.0, 20.0);
+    // Two connectors, hashed as a host would hash them. The viewport is
+    // the same 1080 for both — that is the whole point of the stage.
+    let (left, right) = (0x4450_2d31u64, 0x4450_2d32u64);
+    let on = |id: u64, to, now| {
+        motion::set_surface(id);
+        state_mix("button", r, to, now)
+    };
+    assert!(on(left, State::Idle, 100.0).is_settled());
+    assert!(on(right, State::Idle, 100.0).is_settled());
+    assert_eq!(motion::tracked(), 2, "two identical screens shared one entry");
+    assert!(on(left, State::Idle, 100.016).is_settled(), "the left screen moved with the right");
+    assert!(!on(right, State::Hover, 100.016).is_settled(), "the right screen's fade never set off");
+    for i in 2..14 {
+        let t = 100.0 + 0.016 * i as f64;
+        assert!(on(left, State::Idle, t).is_settled(), "the left screen was dragged along at {t}");
+        let _ = on(right, State::Hover, t);
+    }
+    assert!(on(right, State::Hover, 100.3).is_settled(), "the right screen never landed");
+    // Put the thread back where the rest of the file expects it.
+    motion::set_surface(0);
+    master();
 }
