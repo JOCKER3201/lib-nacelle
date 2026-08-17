@@ -200,14 +200,13 @@ pub struct ShapeSpec {
 /// explicit entry — `framed(rect, corners, fill, stroke)` — and it is
 /// the honest one in the abstract: the caller says what it means and
 /// nothing has to be inferred. It was rejected because the meaning is
-/// already there. Fourteen call sites across the toolkit already write
-/// the pair in the same order for the same reason, [`ShapeSpec`] can
-/// already carry both parts, and `shape()` is the door for a caller who
-/// wants to say it outright. A dozen sites already spell it — `button`,
-/// `window`, `menu`, `tooltip`, `text_input`, `winframe`, `elev`,
-/// `segmented`, `tabs`, `surface`, and `paint`'s pill and scrollbar
-/// thumb — every one of them a fill and then a ring with nothing drawn
-/// between. A new entry would ask every object to be rewritten to say
+/// already there. TWELVE call sites across the toolkit already write
+/// the pair in the same order for the same reason — `button`, `window`,
+/// `menu`, `tooltip`, `text_input`, `winframe`, `elev`, `segmented`,
+/// `tabs`, `surface`, and `paint`'s pill and scrollbar thumb — every one
+/// of them a fill and then a ring with nothing drawn between.
+/// [`ShapeSpec`] can already carry both parts, and `shape()` is the door
+/// for a caller who wants to say it outright. A new entry would ask every object to be rewritten to say
 /// what it already says, would leave the old pair
 /// working-but-wrong for anything not rewritten (a plugin, a script
 /// table, a widget written later), and would make the defect's absence
@@ -1748,19 +1747,26 @@ impl DrawList {
         //   two records and the R4 rim was real and visible on every
         //   button, every drop-down row (through `dropdown.rs:337`) and
         //   every field. Now: one record, three calls, one edge.
-        // * SEVEN sites are the plain bed+border pair and were already
+        // * NINE sites are the plain bed+border pair and were already
         //   one record with the border weld alone: `window::frame`
         //   (`window.rs:187`/`:189`), `menu.rs:445`/`:448`,
         //   `tooltip.rs:266`/`:269`, `elev::Level::draw`
-        //   (`elev.rs:121`/`:127`), `paint`'s pill (`paint.rs:559`/
-        //   `:561`) and scrollbar thumb (`:695`/`:700`), and the cells
-        //   of `segmented.rs:149`/`:153` and `tabs.rs:353`/`:362`.
-        // * THREE sites draw fills that are NOT one silhouette and must
-        //   never weld: the meter's track and its bar on a shorter rect
-        //   (`paint.rs:483`/`:491`), the slider's three
-        //   (`slider.rs:60`/`:78`/`:89`), and a list's row plates
-        //   (`list.rs:354`) — one per row. The geometry check refuses
-        //   them by itself; nothing here has to know their names.
+        //   (`elev.rs:121`/`:127`), `view::surface` (`surface.rs:418`/
+        //   `:423`), `paint`'s pill (`paint.rs:559`/`:561`) and
+        //   scrollbar thumb (`:695`/`:700`), and the cells of
+        //   `segmented.rs:149`/`:153` and `tabs.rs:353`/`:362`.
+        // * ONE site draws borders and no fill at all: `winframe`
+        //   (`winframe.rs:453` the frame, `:495` the four button
+        //   plates) — five records, five silhouettes, nothing to weld.
+        //   2 + 9 + 1 = the twelve.
+        //
+        // Three further sites were measured as CONTROLS, outside that
+        // census, because they draw fills that are NOT one silhouette
+        // and must never weld: the meter's track and its bar on a
+        // shorter rect (`paint.rs:483`/`:491`), the slider's three
+        // (`slider.rs:60`/`:78`/`:89`), and a list's row plates
+        // (`list.rs:354`) — one per row. The geometry check refuses
+        // them by itself; nothing here has to know their names.
         // * The GLASS pair (`window.rs:181`/`:184`, `elev.rs:113`/
         //   `:116`) is one record too, but for a different reason and
         //   not a good one: `glass_fill` is a tessellated fan on the
