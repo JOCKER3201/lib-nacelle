@@ -18,6 +18,7 @@ use nacelle::font::FontSystem;
 use nacelle::object::{checkbox, dropdown, focus_ring, slider};
 use nacelle::pointer::Pointer;
 use nacelle::theme;
+use nacelle::view::ScrollView;
 use nacelle::{Ctx, Rect};
 
 const W: f32 = 1920.0;
@@ -236,7 +237,15 @@ fn every_shape_token_the_audit_found_unread_now_moves_the_picture() {
     // anchor` is where that split is stated in full.
     let names = vec!["ALPHA".to_string(), "BETA".to_string()];
     let list = |c: &mut Ctx| {
-        dropdown::accordion(c, ROW, 30.0, &names, 1.0, &dropdown::AccordionStyle::default());
+        dropdown::accordion(
+            c,
+            ROW,
+            30.0,
+            &names,
+            1.0,
+            &dropdown::AccordionStyle::default(),
+            &mut ScrollView::new(),
+        );
     };
     let (rows_body, rows_caption) = pair(
         &mut fonts,
@@ -258,7 +267,15 @@ fn every_shape_token_the_audit_found_unread_now_moves_the_picture() {
     let rects = |fonts: &mut FontSystem| {
         let mut dl = DrawList::new();
         let mut c = ctx(&mut dl, fonts);
-        dropdown::accordion(&mut c, narrow, 30.0, &names, 1.0, &dropdown::AccordionStyle::default())
+        dropdown::accordion(
+            &mut c,
+            narrow,
+            30.0,
+            &names,
+            1.0,
+            &dropdown::AccordionStyle::default(),
+            &mut ScrollView::new(),
+        )
     };
     skin("[menu]\nanchor_width = anchor\n");
     let skew = theme::resolved().px(theme::id("button.skew").expect("[button] declares skew"));

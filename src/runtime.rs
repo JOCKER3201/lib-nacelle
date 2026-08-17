@@ -591,6 +591,82 @@ pub struct HostApi {
         cap: u32,
         seq: *mut u64,
     ) -> u32,
+    /// The TEXT of one of an addon's settings files, written into `buf`
+    /// — never a path, never an open handle.
+    ///
+    /// That asymmetry is the whole point of the entry, and it is the
+    /// clipboard's reasoning again (przynależność, the clipboard
+    /// verdict): a plugin reaches the host's state through a call that
+    /// NAMES what it wants, not through a handle that would let it
+    /// decide. Here the plugin names an addon and a file WITHIN the
+    /// settings directory; the host is the only side that ever holds a
+    /// path, so no argument a plugin can pass reaches `/etc/shadow`, and
+    /// the search order across `~/.config` and `/etc/xdg` stays one
+    /// decision made in one place.
+    ///
+    /// Addressing follows the on-disk arrangement exactly. `addon` is
+    /// the addon's own name; `file` is empty for an addon with ONE
+    /// settings file and names the member for an addon with a
+    /// directory of them:
+    ///
+    /// | call | file read |
+    /// |------|-----------|
+    /// | `("shell", "")` | `<config>/addons/shell.ron` |
+    /// | `("search", "engines")` | `<config>/addons/search/engines.ron` |
+    ///
+    /// Both names are plain names, not path fragments: lower-case
+    /// ASCII, digits, `_` and `-`, at most [`SETTINGS_NAME_MAX`] bytes,
+    /// and the `.ron` suffix is the host's to add. Anything else is
+    /// [`SETTINGS_REFUSED`] — a dot is rejected with everything else,
+    /// so `..` cannot be spelled at all rather than being filtered
+    /// after the fact. The program's own file (`nacelle-desktop.ron`)
+    /// sits a level ABOVE `addons/` and is therefore unreachable
+    /// through this entry by construction, not by a check.
+    ///
+    /// The payload is the file's RON SOURCE, and the plugin parses it
+    /// into its own type. The host does not resolve keys and does not
+    /// hand over values — see [`crate::settings`] for why that contract
+    /// was chosen over a typed key lookup, because it is the decision
+    /// this entry's shape rests on.
+    ///
+    /// Answers the text's FULL length while writing `min(len, cap)`
+    /// bytes, exactly like [`HostApi::channel_read`] and deliberately
+    /// unlike [`HostApi::shell_cwd`]: a prefix of a cwd is a shorter
+    /// path, a prefix of a document is a document that will not parse,
+    /// so the caller must be able to tell a truncation from a fit and
+    /// ask again with room.
+    ///
+    /// `status`, when not null, receives [`SETTINGS_OK`],
+    /// [`SETTINGS_ABSENT`], [`SETTINGS_MALFORMED`] or
+    /// [`SETTINGS_REFUSED`]. It is not a nicety: absent and malformed
+    /// both end in "use your defaults", and a caller that could not
+    /// tell them apart would have no way to know that the user has a
+    /// file which is being ignored. Text is delivered WHATEVER the
+    /// status says — the host's parse is a diagnostic, not a gate; see
+    /// [`SETTINGS_MALFORMED`].
+    pub settings_read: extern "C" fn(
+        addon: *const u8,
+        addon_len: u32,
+        file: *const u8,
+        file_len: u32,
+        buf: *mut u8,
+        cap: u32,
+        status: *mut u32,
+    ) -> u32,
+    /// Bumped whenever a settings file may have changed — the host
+    /// rewrote one from its settings window, or was asked to reload.
+    /// A plugin caching its parsed settings invalidates when this
+    /// moves, exactly as it does for [`HostApi::theme_epoch`].
+    ///
+    /// It shares one gate with [`HostApi::settings_read`] because
+    /// reading without it is not the mechanism: parsing a document per
+    /// frame is not something an immediate-mode widget can afford, so
+    /// every caller caches — and a cache with no invalidation means the
+    /// settings window's Apply button changes a file and nothing on
+    /// screen. That is the clip pair's argument in another costume: a
+    /// half-present mechanism is worse than an absent one, because the
+    /// absent one degrades where it is stated to.
+    pub settings_epoch: extern "C" fn() -> u32,
 }
 
 /// The longest topic name the channel accepts. A name is a constant in
@@ -607,6 +683,49 @@ pub const CHANNEL_VALUE_MAX: usize = 64 * 1024;
 /// that quietly stopped hearing its partner is the failure this whole
 /// entry exists to end.
 pub const CHANNEL_TOPICS_MAX: usize = 256;
+
+/// [`HostApi::settings_read`]: a file was found and the host's own
+/// parse of it succeeded. The text delivered is that file's source.
+pub const SETTINGS_OK: u32 = 0;
+
+/// [`HostApi::settings_read`]: no such file in any settings directory,
+/// and no bytes were delivered. NOT an error and NOT reported to the
+/// user: an empty `~/.config` with nothing packaged beside it is the
+/// ordinary state of a fresh install, and the addon's own defaults are
+/// the whole answer. This is the status almost every call gets.
+pub const SETTINGS_ABSENT: u32 = 1;
+
+/// [`HostApi::settings_read`]: a file was found and the HOST could not
+/// parse it. The user has already been told, with the path and the
+/// line — the host is the only side that knows either.
+///
+/// The text is still delivered, and a caller should still try its own
+/// parse on it. The host's parse is generic (it validates the document,
+/// not the caller's type), so it is the right place to produce a message
+/// about a stray bracket and the wrong place to have the last word about
+/// whether a document is usable. Withholding text on a generic parse
+/// failure would let a disagreement between two parsers turn a working
+/// file into a missing one, silently — which is the failure mode this
+/// whole status set exists to prevent.
+pub const SETTINGS_MALFORMED: u32 = 2;
+
+/// [`HostApi::settings_read`]: the addon or file name was not a plain
+/// name, or the host holds no settings directories at all (nothing was
+/// installed — a test, a headless run). A programming error rather than
+/// a user's, and no bytes were delivered.
+pub const SETTINGS_REFUSED: u32 = 3;
+
+/// The longest addon or file name [`HostApi::settings_read`] accepts.
+/// A name is a constant in somebody's source, never user input, so
+/// anything long is a bug; the bound is here so a plugin passing a wild
+/// length cannot make the host build a path out of it.
+pub const SETTINGS_NAME_MAX: usize = 64;
+
+/// The largest settings file the host will read. A settings file is
+/// written by a person or by the settings window; one past this is not
+/// a settings file, and reading it would be the host spending memory on
+/// a plugin's behalf with no ceiling.
+pub const SETTINGS_FILE_MAX: usize = 256 * 1024;
 
 /// Corner styles for [`HostApi::ring_fill`] and [`HostApi::ring`]. The
 /// numbers are the boundary's own vocabulary, not the theme's enum
@@ -652,6 +771,12 @@ pub const HOST_API_HAS_TOOLTIP: usize =
 /// is waiting for a message nobody in its process can send.
 pub const HOST_API_HAS_CHANNEL: usize =
     std::mem::offset_of!(HostApi, channel_read) + std::mem::size_of::<usize>();
+
+/// The prefix that includes BOTH settings entries — the read and the
+/// epoch it is cached against. One gate for the pair, for the reason
+/// [`HostApi::settings_epoch`] states.
+pub const HOST_API_HAS_SETTINGS: usize =
+    std::mem::offset_of!(HostApi, settings_epoch) + std::mem::size_of::<usize>();
 
 /// [`HostApi::mask_quad`]: blend additively — the quad adds light, the
 /// way the host's own glow does. Without it the quad covers, the way its
@@ -699,6 +824,15 @@ impl HostApi {
     /// nothing has been chosen — never to a wrong choice.
     pub fn has_channel(&self) -> bool {
         self.api_size as usize >= HOST_API_HAS_CHANNEL
+    }
+
+    /// Whether this host can hand a plugin its own settings. Absent: an
+    /// addon runs on the values baked into its type and says so once —
+    /// which is exactly the state every addon was in before this entry
+    /// existed, so an old host degrades to yesterday rather than to a
+    /// blank panel.
+    pub fn has_settings(&self) -> bool {
+        self.api_size as usize >= HOST_API_HAS_SETTINGS
     }
 }
 
@@ -1213,7 +1347,10 @@ pub struct StateStyleC {
 // host-drawn tooltip and the widget-to-widget channel — appended in ONE
 // growth for one reason: every separate growth is a separate migration
 // of eight plugins, and the migration is the expensive part, not the
-// four function pointers.
+// four function pointers. The settings pair came later and alone,
+// because it closed a hole the other four did not share: a plugin could
+// be told what the theme says and what its neighbour published, and had
+// no way at all to be told what its own user asked for.
 pub const ABI_VERSION: u32 = 6;
 
 /// A widget's container declaration, crossing the boundary (u2 §4.3).

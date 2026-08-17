@@ -36,8 +36,8 @@
 //! [`bake_overlay`] return `None` and the program draws no plate at all:
 //! the governing principle's raw run grows no decoration.
 //!
-//! Measured cost (Ryzen 7 9800X3D, release): a 2560x1440 bake with
-//! aurora's traces on lands in ~5 ms; every layer stays inside the
+//! Measured cost (Ryzen 7 9800X3D, release): a 2560x1440 bake with the
+//! former aurora theme's traces on lands in ~5 ms; every layer stays inside the
 //! tens-of-ms budget r1 §8 states per layer (the starfield is the
 //! cheapest of all — a few hundred tiny discs). The application runs the
 //! bakes on a worker thread besides, so even a slow bake never blocks a

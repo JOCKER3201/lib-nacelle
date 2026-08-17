@@ -129,10 +129,13 @@ libnacelle/src/theme/
   abi.rs        ThemeC (#[repr(C)]), accessors, recipe implementations
   mask.rs       procedural R8 mask baking into the glyph atlas (M0)
   plate.rs      CPU decoration-plate rasteriser + worker thread (M10/M11)
-  default.theme the master theme, include_str!-embedded
-  themes/       aurora.theme spring.theme pure.theme crimson.theme lockdown.theme
-                azure.theme cockpit.theme instrument.theme
+  default.theme the master theme, include_str!-embedded — the ONE compiled-in look
 ```
+
+*(Amended 2026-08-16: `themes/` — `aurora spring pure crimson lockdown azure
+cockpit instrument` — was removed at the owner's decision. `default` is the
+only compiled-in look; every other theme is a user file on the search path,
+written by hand or by the editor. §8 keeps the eight as a record.)*
 
 Supporting changes outside `theme/`:
 
@@ -683,7 +686,7 @@ OKLCh lightness (hue and chroma held, 48 bounded steps, then clamp) until it pas
 | `severity.offline.text` | 3.0 | the one state that should recede. |
 | `severity.*.on`, `accent.on`, `text.inverse` | 4.5 vs their own fill | text on a solid chip. |
 | `accent.primary`, `data.line`, borders, glyphs | 3.0 | WCAG 1.4.11 non-text contrast. |
-| `term.fg` vs `term.bg` | 7.0 | measured 15.19–15.52 across all six console themes. |
+| `term.fg` vs `term.bg` | 7.0 | measured 15.19–15.52 across the six original console seeds (§8). |
 | `term.ansi[1..6]` vs `term.bg` | 4.5 | measured min 4.56. |
 | `term.ansi[9..14]` vs `term.bg` | 7.0 | |
 
@@ -708,7 +711,8 @@ pass existed, four of six console palettes had severity pairs at ΔE 0.05–0.10
 visually the same colour.
 
 **Pass C — contrast floors again.** One extra pass suffices; convergence is asserted
-by a golden test over the eight shipped themes.
+by a golden test over a fixture corpus (originally specified over the eight shipped
+themes, which were removed 2026-08-16).
 
 **Pass D — honesty lints.** Advisory unless marked corrective:
 
@@ -750,7 +754,8 @@ by a golden test over the eight shipped themes.
 ### 4.5 What the engine states plainly and does not pretend to fix
 
 Colour-vision-deficiency separation of seven hue-coded severities is **poor**.
-Simulated minimum ΔE across the seven roles, measured on the shipped palettes:
+Simulated minimum ΔE across the seven roles, measured on the original shipped
+palettes (kept as a record — the variants left the binary 2026-08-16):
 
 | theme | protan | deutan | tritan |
 |---|---|---|---|
@@ -1216,7 +1221,7 @@ Placed at fixed OKLab lightness with the accent hue at low chroma:
 `void 0.115 / sunken 0.152 / base 0.178 / panel 0.232 / inset 0.283 / raised 0.330`,
 chroma `0.22 × C_accent × [0.35, 0.40, 0.45, 0.55, 0.60, 0.62]`.
 
-| token | type | default (aurora resolved) | what sits here | image |
+| token | type | default (mint seed, resolved) | what sits here | image |
 |---|---|---|---|---|
 | `surface.void` | col | `#020604` | the absolute bed: terminal background, letterbox, the opaque fallback when a family-B theme sets `base` to alpha 0 | 1–10 |
 | `surface.sunken` | col | `#060D0A` | recessed beds: progress troughs, chart beds, search-field interiors | 1, 2, 7 |
@@ -1255,7 +1260,7 @@ Five-step legibility ladder plus two off-ladder. Placed at OKLab lightness
 `title 0.870 / primary 0.905 / secondary 0.755 / muted 0.590 / disabled 0.435 /
 instrument 0.372`, chroma `C_accent × [0.55, 0.15, 0.24, 0.30, 0.22, 0.34]`.
 
-| token | type | default (aurora) | contrast | what draws it | image |
+| token | type | default (mint seed) | contrast | what draws it | image |
 |---|---|---|---|---|---|
 | `text.title` | col | `#9EE6C8` | 11.90 | panel titles: small caps, wide tracking (`MONITOR ZASOBÓW`) | 1–10 |
 | `text.primary` | col | `#D2E5DC` | 12.96 | the value / the content; `74%`, `21:57:30`, terminal output | all |
@@ -1287,8 +1292,9 @@ thing and are now separated, because a reader who skims the colour half misses
 
 **`border.edge.*` — the seven geometry keys.** (The old flat spellings `border.width`,
 `border.style`, `border.dash`, `border.gap`, `border.phase`, `border.bracket_len`,
-`border.bracket_inset` remain as aliases per §4.2, because `[variant.hc]` and several
-shipped themes write `border.width` and a rename with no alias is a silent regression.)
+`border.bracket_inset` remain as aliases per §4.2, because `[variant.hc]` writes
+`border.width` — as the original shipped themes did — and a rename with no alias is a
+silent regression.)
 
 | token | type | source | use | image |
 |---|---|---|---|---|
@@ -1342,7 +1348,7 @@ The 8-entry ramp is generated: hue `h_d + 40°·i`, lightness cycling
 chroma cap keeps every hue on the ramp inside sRGB at those lightnesses; without it
 the high-chroma themes clipped and two series collapsed onto each other.
 
-Aurora resolves to `#35DCA8 #00A3B3 #60AEF2 #B8B4FF #BD6FBE #EA849B #FFA477 #B48A00`.
+The mint seed resolves to `#35DCA8 #00A3B3 #60AEF2 #B8B4FF #BD6FBE #EA849B #FFA477 #B48A00`.
 Deviating from chrome costs a theme exactly **one line**: `palette.data = #35A7FF`.
 
 ---
@@ -1494,9 +1500,9 @@ theme produced `#C95C00` for ANSI red: unmistakably orange. This is a correctnes
 fix, not a taste call.
 
 A monochrome **UI** is a style choice; a monochrome **terminal palette** breaks `ls`,
-`git diff` and `vim`. Even image 3's pure-green theme ships a chromatic ANSI row; its
-identity comes from slots 0/7/8/15, a 34 % hue pull on the six chromatic slots and a
-global chroma scale of 0.92.
+`git diff` and `vim`. Even image 3's pure-green look keeps a chromatic ANSI row; the
+pure seed's identity came from slots 0/7/8/15, a 34 % hue pull on the six chromatic
+slots and a global chroma scale of 0.92.
 
 **The theme never overrides a program's explicit truecolour** (`CellColor::Rgb` —
 `term.rs:39` passes it through and must keep doing so). The 256-colour cube and
@@ -1535,7 +1541,7 @@ existed. It had nowhere to sit in the ladder: level 1 `board` is documented as n
 glass, and level 2 `panel` is a panel. So the one place in the program where the glass
 recipe is already correct was the one place a theme could not touch, and `frost_wash`
 was wired to a user percentage for ever. `fixture` gets the full 24-token material set:
-`cockpit` gives it rank 3 and a deep wash; `default` gives it rank 0 and
+`cockpit` gave it rank 3 and a deep wash (§8); `default` gives it rank 0 and
 `fill = alpha(@surface.base, 0.92)`, so a silent theme still gets a legible sheet with
 no offscreen pass at all.
 
@@ -1848,11 +1854,12 @@ no LUT loaded. Stated so nobody files it as a bug.
 |---|---|---|---|
 | `grad.<name>.stops` | list | — | **2 to 8** `(position 0..1, colour)` pairs; alpha is a stop channel, so alpha gradients are free |
 | `grad.<name>.axis` | enum | `x` | `x \| y \| diag_down \| diag_up \| angle(deg)` |
-| `grad.<name>.space` | enum | `oklab` | `oklab \| srgb`; `srgb` exists only to reproduce an existing palette exactly. Every shipped theme uses `oklab`. |
+| `grad.<name>.space` | enum | `oklab` | `oklab \| srgb`; `srgb` exists only to reproduce an existing palette exactly. The shipped master uses `oklab`. |
 | `grad.samples` | n | `8` | max 16; the resolver pre-resolves each gradient into this many evenly-spaced RGBA stops |
 
-`GRAD_COUNT = 8` named slots. Reserved names used by the shipped themes:
-`grad.spectrum`, `grad.focus`, `grad.deck`, `grad.hex`.
+`GRAD_COUNT = 8` named slots. Reserved names, declared by the master (and used
+by the original shipped themes): `grad.spectrum`, `grad.focus`, `grad.deck`,
+`grad.hex`.
 
 **Why this is free.** `Vertex` already carries `color: [f32;4]` and the rasteriser
 already interpolates it; `DrawList` simply never exposed it. Adding `quad_c`,
@@ -2134,10 +2141,13 @@ smallcaps_ratio, leading, tabular, fg, alpha, synthetic_bold`.
 
 | global | type | default | note |
 |---|---|---|---|
-| `type.base_scale` | f | `1.3` | today's `UI_FONT_BASE`, folded into the u-conversion |
 | `type.min_px` | px | `8px` | absolute floor |
 | `type.smallcaps_ratio` | f | `0.78` | |
 | `type.snap_px` | bool | `true` | **role px is rounded to whole pixels before rasterisation** |
+
+`UI_FONT_BASE` (1.3) is **not** a token: it is folded into every `size` value
+(`size_u = size_vh × 2.6 = 2 × 1.3`). The live global type knob is
+`metric.density_type`; `metric.ui_scale` scales everything at once.
 
 **`title.panel` quantified** (the brief demands it): tracking 0.140em, small caps at
 0.78, leading 1.45. At 1440p that is **18 px caps, 14 px small caps, +2.5 px between
@@ -3011,8 +3021,8 @@ six console images were unreproducible.
 | `render.silhouette` | `alpha(@data.line, 0.75)` | image 1's small ship at the right |
 | `render.label_role` | `leader.label` | callouts on the render |
 
-`lockdown` therefore stays one line for the two-hue behaviour (`palette.data`), and
-`pure` / `crimson` get their grey hull and coloured rim from **two** more.
+A lockdown-style theme therefore stays one line for the two-hue behaviour
+(`palette.data`), and image 3/4's grey hull with a coloured rim costs **two** more.
 
 **dot** (9) — **new.** The unread marker of `POWIADOMIENIA (4 NOWE)`, which appears in
 images 7, 8, 9 and 10, and which image 7 names by colour ("a red dot"). `badge.*` is
@@ -3488,11 +3498,12 @@ corridor **"desaturated toward green"**, and §6 cites that exact image as the r
 `sat()` survives the function cull. A rule that forbids the effect while another
 section justifies a function by it cannot both be right. So: a **theme** may set
 `tint_strength` up to `0.35` and `saturation` down to `0.35` — enough for image 3's
-green-graded feed and for `crimson`'s deliberately *natural* thumbnail in image 4 — and
+green-graded feed and for image 4's deliberately *natural* thumbnail — and
 a **mood** may set neither, at all, ever (§4.4 pass D 3). An alarm must not recolour
 evidence; a theme grading its own security feed is a look, and the ceilings keep it
 from becoming a claim. Values above the ceiling are clamped and logged with both
-numbers. Reference: `pure`/image 3 sets `tint_strength = 0.30`, `saturation = 0.45`.
+numbers. Reference: image 3's pure-green look used `tint_strength = 0.30`,
+`saturation = 0.45` (§8).
 
 ---
 
@@ -3714,14 +3725,14 @@ all.
 | `mix(a, b, t)` | col, col, 0..1 | linear | premultiplied lerp, then un-premultiply; `out.a ≤ 0 ⇒ rgb = 0` | models physical light mixing. `mix(@palette.black, @palette.accent, 0.06)` is *how a tinted near-black background is made* — `#141E1A` is exactly black with a whisper of mint. Every console background in images 1–6 is this. |
 | `over(a, b)` | col, col | linear | composites translucent `a` onto opaque `b`, returns **opaque** | **required, not convenient**: `surface.panel` is α 0.82, so the contrast of text on a panel is undefined until the panel can be resolved over the base. This is the **authoring** composite and it models physics. It is **not** what §4.4 measures — enforcement uses the internal `composite_as_rendered`, which mirrors the live blend equation in the live encoding (§2.2, §4.4). Two questions, two answers, both stated. |
 | `shade(c, t)` | col, 0..1 | OKLab | perceptual mix toward `@palette.black` | distinct from `mix(c, black, t)`: it moves lightness evenly and drags chroma down smoothly instead of producing muddy midpoints. Every `severity.*.fill`. |
-| `tint(c, t)` | col, 0..1 | OKLab | perceptual mix toward `@palette.white` | `accent.hover = tint(accent, 0.18)` lands azure on `#4FC3F7`, the literal highlight of image 6. |
+| `tint(c, t)` | col, 0..1 | OKLab | perceptual mix toward `@palette.white` | `accent.hover = tint(accent, 0.18)` lands the azure seed on `#4FC3F7`, the literal highlight of image 6. |
 | `lum(c, k)` | col, ≥0 | OKLCh | **multiply** L; hue and chroma exactly preserved | the image-3 function: "severity by brightness because I only have one hue". Not `shade`, which pulls toward black's hue and desaturates. `lum(@accent.primary, 0.62)` stays *the same green*, just dimmer. |
 | `lum_min(c, L)` | col, 0..1 | OKLCh | raise L to at least `L` | libadwaita's standalone-colour rule, ported: "readable on this background" as one constant per variant. |
 | `lum_max(c, L)` | col, 0..1 | OKLCh | lower L to at most `L` | the light-surface counterpart; used by `text.base`-style expressions. |
 | `sat(c, k)` | col, ≥0 | OKLCh | multiply chroma | image 3's photo "desaturated toward green" — which §4.4 pass D 3 and §5.26 now permit a **theme** to do (`component.image.photo.saturation`, ceiling 0.35) while still forbidding a **mood** from doing it; and images 4/5's greyscale hull with a coloured rim, which is `render.hull = sat(@data.line, 0.0)` + `render.rim` (§5.25) — real tokens the recipe writes into, rather than a recipe with nowhere to land. Hand-authoring desaturated variants defeats the one-palette premise. |
 | `hue(c, deg)` | col, deg | OKLCh | rotate hue | generates `accent_alt`, the 8-series data ramp and the ANSI sixteen from one seed. Without it "the ANSI sixteen must feel like the theme" costs 16 hand-picked hexes per theme. |
 | `ramp(c, n, i)` | col, usize, usize | OKLab | step `i` of an `n`-step L ladder centred on `c`'s L, span 0.62 | lets a theme opt *explicitly* into brightness-coded severity without switching `severity.mode`. Image 3 in one expression. |
-| `contrast_on(bg, a, b)` | col, col, col | — | returns whichever of `a`/`b` has the greater WCAG contrast against `bg` | makes `text.inverse` and every `.on` token automatically correct: crimson's `#FF2A35` chip needs light text, azure's `#29B6F6` chip needs dark. Hand-authoring gets this wrong eventually, and unreadable badges in a terminal are a bug. libadwaita hardcodes `white` here and its own docs concede the failure. |
+| `contrast_on(bg, a, b)` | col, col, col | — | returns whichever of `a`/`b` has the greater WCAG contrast against `bg` | makes `text.inverse` and every `.on` token automatically correct: a crimson `#FF2A35` chip needs light text, an azure `#29B6F6` chip needs dark. Hand-authoring gets this wrong eventually, and unreadable badges in a terminal are a bug. libadwaita hardcodes `white` here and its own docs concede the failure. |
 | `ensure(fg, bg, ratio)` | col, col, f32 | OKLCh | walks `fg`'s L away from `bg` until the WCAG ratio is met — 48 bounded steps, hue and chroma held, then clamp | turns §4.4 from an aspiration into a mechanism. |
 
 ### 6.1 Cut, and why
@@ -4194,8 +4205,14 @@ looking at it.
 
 ## 8. THEMES TO SHIP
 
-Nine files. `default` is the master document; the other eight are seeds plus
-deviations. Every "five defining colours" row is
+*(Amended 2026-08-16: the owner removed the eight variant themes from the
+binary. `default` is now the only compiled-in look; every other theme is a
+user file on the search path, written by hand or by the editor. This section
+stays as the record of the original seeds and their derivations — nothing
+below except `default` ships anymore.)*
+
+Nine looks, as originally shipped. `default` is the master document; the other
+eight were seeds plus deviations. Every "five defining colours" row is
 **accent · surface.base · text.primary · severity.critical · data.line**.
 
 | # | theme | one-line identity | images | the five |
@@ -4217,7 +4234,7 @@ raised 0.330`) with the accent hue at low chroma, and text at
 (`title 0.870 / primary 0.905 / secondary 0.755 / muted 0.590 / disabled 0.435 /
 instrument 0.372`). **One derivation, applied six times** — that is the mechanism
 behind "the same layout re-skinned six times by changing the palette alone", and
-every one of the six passes every contrast and separation floor with zero failures
+every one of the six passed every contrast and separation floor with zero failures
 (worst values: `text.primary` 12.86 vs floor 7.0; severity fg 4.52 vs 4.5; min ansi
 4.56 vs 4.5; min severity ΔE 0.117 vs 0.115).
 
@@ -4418,7 +4435,8 @@ the other half of the same loop.
    shipped widgets and it must not trail the four plugins.**
    **8b. `ui.rs`** `table` and `columns` take their roles and colours from
    `component.table.*` / `component.columns.*`.
-9. The eight shipped themes.
+9. The eight shipped themes. *(Done, then removed 2026-08-16 — only `default`
+   remains compiled in; see §8's amendment.)*
 10. Renderer: additive blend (R1), per-run clip (R2), per-run glass **rank** (R3)
     including `Gfx::glass_ranks()`, the host image registry behind
     `create_texture`/`update_texture`, and the two `MAX_VERTS` overflow diagnostics.
@@ -4504,7 +4522,7 @@ not hear otherwise takes the recommendation; none of them blocks the work.
 9. **Do per-surface severity overrides (`surface.glass.severity.<r>`) need to exist for
    family B?** Glass over a bright planet may need lifted severities.
    *Recommended:* **not in v1.** Ship the global `[severity.*]` and see whether
-   `cockpit` actually needs it against a real wallpaper; if it does, add exactly one
+   a real family-B theme actually needs it against a real wallpaper; if it does, add exactly one
    override section rather than reinstating KDE's per-set repetition (80 of 96 colour
    lines in `BreezeDark.colors` are duplicates).
 
@@ -4513,6 +4531,9 @@ not hear otherwise takes the recommendation; none of them blocks the work.
     *Recommended:* **`cockpit` owns 7 and 10, `instrument` owns 8 and 9**, following
     the agent who owned family B. If the owner reads image 10 as image 8 re-lit, the
     fix is to move two gradient definitions between two files.
+    *(Moot since 2026-08-16: both family-B themes left the binary with the other
+    variants; the split stays only as guidance for whoever writes them as user
+    themes.)*
 
 11. **`icon.stroke` is live but only affects the built-in vector fallback.**
     *Recommended:* **keep the token and keep the warning** rather than deleting it — a
@@ -4521,8 +4542,9 @@ not hear otherwise takes the recommendation; none of them blocks the work.
 
 12. **Should the settings UI be able to edit a theme, or only override it?**
     **DECIDED 2026-08-16 by the owner: edit it.** SAVE writes the theme being
-    edited; SAVE AS writes a new one; a built-in theme is materialised into the
-    user's theme directory on its first save, so the shipped one is never touched.
+    edited; SAVE AS writes a new one; the built-in `default` — since 2026-08-16
+    the only one — is materialised into the user's theme directory on its first
+    save, so the embedded master is never touched.
     This overrides the recommendation that used to stand here ("override only,
     plus an export button"), and rules 5 and 8 above were amended with it.
 
@@ -4537,8 +4559,8 @@ not hear otherwise takes the recommendation; none of them blocks the work.
     Two things this decision leaves open, and they are not small:
     - **Values that span more than one line** would break span patching, because
       `value_span.len` measures the joined text while `.line` remembers only the
-      first. None of the nine shipped `.theme` files has one today. A save must
-      refuse rather than corrupt.
+      first. The embedded `default.theme` — the only shipped file since
+      2026-08-16 — has none today. A save must refuse rather than corrupt.
     - **Where a theme lives is not answerable from outside the engine.**
       `FsThemes` is private and `available_themes()` returns names only, so the
       editor cannot ask which file backs a theme or where it may write. That API
@@ -4563,7 +4585,7 @@ Every place the seven agents disagreed, the decision, and the reason.
 | 4 | `layout.*` tokens: board padding, column min/max, portrait breakpoints, control-bar height, `panel.gutter`, density scaling column widths (u1) | **CUT, all of it** | `scope-boundary.md` is the owner's line and overrides the spec: a theme may change what a panel looks like inside its rectangle, never the rectangle. `panel.pad` is renamed `panel.content_pad` because `padded()`/GridPadding is the user's. |
 | 5 | Six *surface* levels (d1) vs six *elevations* + Inset + Overlay (d2) | **Both, mapped one-to-one** | They are different axes: `surface.*` is the colour ladder, `elev.*` the material ladder. Each `Elev.fill` defaults to a `@surface.*` reference (§5.12), so nothing is duplicated. |
 | 6 | Contrast metric: WCAG 2.x with verified floors (d1) vs APCA Lc (u2) | **WCAG enforced, APCA computed and reported** | u2's technical argument is right, but d1 measured six complete palettes against WCAG floors and they pass with margin. Switching the enforced metric would require re-deriving every palette against numbers nobody has verified. Both are computed; one is binding. |
-| 7 | Default severity mode: `hue` (d1) vs `mono_plus_warning` (u2) vs literal roots never derived from accent (s1) | **`hue` by default; explicit per-role overrides always win** | d1's hue-pull-with-a-±14°-clamp was verified numerically across six palettes with zero failures. s1's requirement is still met: amber survives an all-red theme because `crimson` writes `severity.contained.text` explicitly. `mono_plus_warning` ships as a mode because image 4 is literally it. |
+| 7 | Default severity mode: `hue` (d1) vs `mono_plus_warning` (u2) vs literal roots never derived from accent (s1) | **`hue` by default; explicit per-role overrides always win** | d1's hue-pull-with-a-±14°-clamp was verified numerically across six palettes with zero failures. s1's requirement is still met: amber survives an all-red theme because `crimson` wrote `severity.contained.text` explicitly. `mono_plus_warning` ships as a mode because image 4 is literally it. |
 | 8 | Colour storage: linear (d1) vs "whatever the format wants" (d2's M9) vs today's sRGB-encoded u8/255 | **Derive in linear/OKLab; store in the swapchain's encoding** | The only self-consistent reading. `Unorm` → sRGB-encode (matching today exactly), `ScRgbLinear` → leave linear. Without the encode stage the HDR path is silently wrong. |
 | 9 | Cycle: reject the whole theme, loud (d1, s1, s2) | **Per-token fallback to `default`'s expression, loud** | "This program must never fail to start because a theme file is wrong" outranks. It is not silently black — it is `default`'s value, reported with the full cycle path in the log and the settings panel. |
 | 10 | Unknown key: load error (s1) vs warn+ignore (d1, u1, s2). Unknown function: reject (d1) | **Warn + fall back, always; `[meta] strict` raises the log level but never refuses to start** | Same rule as 9. A theme written for a newer engine must degrade, not refuse. |
@@ -4593,14 +4615,14 @@ engine landing; each degrades as stated.
 
 | # | change | size | without it |
 |---|---|---|---|
-| **R1** | **Additive blend pipeline** — `ADD_ATLAS = ImageId(u32::MAX-8)`, one more pipeline (`fs_main` again, `SRC_ALPHA/ONE` colour, `ZERO/ONE` alpha), `Bound::Add` in `record_runs` | ~40 lines, 0 extra passes, 0 extra memory | Glow over a bright backdrop reads as a milky film. The resolver multiplies every `glow.*.alpha` by 0.8 and both holographic themes degrade gracefully. |
+| **R1** | **Additive blend pipeline** — `ADD_ATLAS = ImageId(u32::MAX-8)`, one more pipeline (`fs_main` again, `SRC_ALPHA/ONE` colour, `ZERO/ONE` alpha), `Bound::Add` in `record_runs` | ~40 lines, 0 extra passes, 0 extra memory | Glow over a bright backdrop reads as a milky film. The resolver multiplies every `glow.*.alpha` by 0.8 and a holographic theme degrades gracefully. |
 | **R2** | **Per-run clip** — `DrawRun.clip: Option<[f32;4]>` + `cmd_set_scissor` (already dynamic state), `DrawList::push_clip/pop_clip` maintaining a stack intersected into each new run | ~30 lines | Ribbons must be clipped geometrically per sine quad. Charts, the terminal and every scrolling list want this too — it unblocks four other areas. |
-| **R3** | **Per-run glass RANK** — reserve a handle band `glass_rank(k) = ImageId(u32::MAX-1-k)`; the base-scene scan treats any id `>= u32::MAX-4` as glass; `record_runs` maps rank → **a pyramid target that this frame's `blur_depth` actually wrote** (rank 1 → target 1 always; rank 2 → target 2 only when `blur_depth >= 2`, else 1; rank 3 → target 3 only when `blur_depth == 3`, else the deepest written), plus `Gfx::glass_ranks() -> u8` so the resolver clamps at bake. **Prerequisite: the base-scene target is cleared at alpha 1.0** (§5.5). | ~25 lines, 0 extra passes | Blur radius stays one global scalar. Both holographic themes specify per-level blur and degrade to one rank; the elevation ladder loses its clearest depth cue. **Naively mapping `blur_targets[l.clamp(0,3)]` is not an option**: target 0 is the *unblurred* base scene and targets 2–3 are unwritten at low `blur_depth`, so a legal token value would sample an image in `UNDEFINED` layout. |
+| **R3** | **Per-run glass RANK** — reserve a handle band `glass_rank(k) = ImageId(u32::MAX-1-k)`; the base-scene scan treats any id `>= u32::MAX-4` as glass; `record_runs` maps rank → **a pyramid target that this frame's `blur_depth` actually wrote** (rank 1 → target 1 always; rank 2 → target 2 only when `blur_depth >= 2`, else 1; rank 3 → target 3 only when `blur_depth == 3`, else the deepest written), plus `Gfx::glass_ranks() -> u8` so the resolver clamps at bake. **Prerequisite: the base-scene target is cleared at alpha 1.0** (§5.5). | ~25 lines, 0 extra passes | Blur radius stays one global scalar. A holographic theme that specifies per-level blur degrades to one rank; the elevation ladder loses its clearest depth cue. **Naively mapping `blur_targets[l.clamp(0,3)]` is not an option**: target 0 is the *unblurred* base scene and targets 2–3 are unwritten at low `blur_depth`, so a legal token value would sample an image in `UNDEFINED` layout. |
 | **R4** | `DrawList` colour/UV API: `quad_c`, `rect_grad`, `fan_c`, `image_uv` | libnacelle only | No gradients (five of ten images need them), no drifting scanlines. |
 | **R5** | `FontSystem::mask()` + atlas 1024²→2048² | libnacelle only, 4 MB | No soft glow, no soft shadow, no round-corner fills; glow falls back to `shell` everywhere. |
 | **R6** | Second glass generation (`elev.glass.generations = 2`) | ~60 lines, +1 blit and +4 passes per generation ≈ +0.35 ms at 1440p | Popover-over-focused-over-panel does not genuinely re-blur. **Default 1; the ladder does not need it.** |
 | **R7** | `fs_blur` UV transform (push-constant `mat2x3`; the block is 16 bytes of a guaranteed 128) | ~20 lines | `reflect` stays the honest fake (§5.12). No parallax glass. |
-| **R8** | `composite_alpha = PRE_MULTIPLIED` + alpha-capable surface + swapchain `clear` to `[0,0,0,0]`. **Prerequisite, not optional: the OFFSCREEN base-scene clear stays at alpha 1.0** — `fs_blur` emits `blurred.a * tint.a`, so clearing the base scene transparent deletes the entire glass layer of both family-B themes (§5.5, §5.12). R8 changes the *swapchain* clear only. | swapchain change | `backdrop.source = passthrough` resolves to `solid` with a load warning. Declared, not scheduled. |
+| **R8** | `composite_alpha = PRE_MULTIPLIED` + alpha-capable surface + swapchain `clear` to `[0,0,0,0]`. **Prerequisite, not optional: the OFFSCREEN base-scene clear stays at alpha 1.0** — `fs_blur` emits `blurred.a * tint.a`, so clearing the base scene transparent deletes the entire glass layer of any family-B theme (§5.5, §5.12). R8 changes the *swapchain* clear only. | swapchain change | `backdrop.source = passthrough` resolves to `solid` with a load warning. Declared, not scheduled. |
 
 ---
 
@@ -4680,8 +4702,9 @@ aliases costs five rows in a static table and nothing at runtime.
 
 **2. "Split `border.*` into `border.<role>` and `border.edge.*`" — adopted, with the
 flat spellings kept as aliases.** Same reason. `border.width` is written by
-`[variant.hc]`, by every shipped theme and by half this document's own prose; a rename
-with no alias would silently drop the high-contrast variant's border weight.
+`[variant.hc]`, was written by every original shipped theme, and appears in half this
+document's own prose; a rename with no alias would silently drop the high-contrast
+variant's border weight.
 
 **3. "Delete `shape.<p>.border_color` / `.fill` / `.border_width` where they duplicate
 `elev.*`" — refused; they are defined as `same_as_parent` instead.**

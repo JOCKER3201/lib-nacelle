@@ -20,6 +20,19 @@ taffy = "0.12.2"
 # Loading eDEX-UI theme files (*.json)
 serde_json = "1"
 
+# Addon settings (src/settings.rs). RON rather than TOML because addon
+# settings have shapes nobody has written yet: it carries enum variants,
+# tuples and named structs natively, which is the whole reason the typed
+# parse happens in the addon and not in the host. Theme files are NOT
+# affected — the master is its own schema and documentation.
+# Licence audit: 0.12.2, verdict CLEAR (licencje-zaleznosci.md). Two new
+# packages in the subtree, the other nine were already here. 0.10.0 is
+# yanked; do not widen the requirement to reach it.
+ron = "0.12"
+# Named explicitly because `settings::load` takes a `DeserializeOwned`
+# bound; it was already in the tree under serde_json, so no new package.
+serde = "1"
+
 # ANSI/VT sequence parser (terminal emulation)
 vte = "0.13"
 unicode-width = "0.1"
@@ -34,6 +47,12 @@ rhai = { version = "1.25.1", default-features = false, features = ["std", "sync"
 
 # Wall clock for widgets that show the time
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+# The derive is only ever used by tests here — the toolkit deserialises
+# nothing of its own, it hands `settings::load` an addon's type. Keeping
+# the feature out of the ordinary build keeps a proc macro out of it too.
+serde = { version = "1", features = ["derive"] }
 
 [target.'cfg(unix)'.dependencies]
 # dlopen for compiled widget plugins (widget/loader.rs)

@@ -51,6 +51,39 @@ impl AssetRoots {
         Self { read, write: user }
     }
 
+    /// The XDG CONFIGURATION arrangement, the same shape one rung over:
+    /// `$XDG_CONFIG_HOME/<app>` (or `~/.config/<app>`) first and also
+    /// the write root, then every `$XDG_CONFIG_DIRS` entry (or `/etc/xdg`)
+    /// joined with `<app>`, duplicates dropped.
+    ///
+    /// It is the same type because it is the same question — an ordered
+    /// read path and one write target — asked about a different pair of
+    /// variables. What differs is only what belongs on each side: a
+    /// theme, a layout and a sound set are DATA and live under the data
+    /// dirs; what the user chose is configuration and lives here. See
+    /// [`crate::settings`], which reads addon settings through this.
+    pub fn xdg_config(app: &str) -> Self {
+        let user = match std::env::var("XDG_CONFIG_HOME") {
+            Ok(x) if !x.is_empty() => PathBuf::from(x).join(app),
+            _ => {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                PathBuf::from(home).join(".config").join(app)
+            }
+        };
+        let mut read = vec![user.clone()];
+        let system = std::env::var("XDG_CONFIG_DIRS")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "/etc/xdg".to_string());
+        for base in system.split(':').filter(|b| !b.is_empty()) {
+            let dir = PathBuf::from(base).join(app);
+            if !read.contains(&dir) {
+                read.push(dir);
+            }
+        }
+        Self { read, write: user }
+    }
+
     /// Sub-directories named `sub` that exist, in search order.
     pub fn dirs(&self, sub: &str) -> Vec<PathBuf> {
         self.read
@@ -111,6 +144,35 @@ mod tests {
         }
         assert_eq!(safe_component(" console "), Some("console".into()));
         assert_eq!(safe_component("my.layaut"), Some("my.layaut".into()));
+    }
+
+    /// The config search path reads the config VARIABLES, not the data
+    /// ones. The two builders are one function apart, and mixing them
+    /// would put the user's settings where a theme goes — silently,
+    /// because both directories exist.
+    ///
+    /// The environment is READ here and never written: `theme` and
+    /// `font` read `HOME` and `XDG_CONFIG_HOME` too, the harness runs
+    /// tests in parallel, and a test that set a variable would decide
+    /// what another one saw.
+    #[test]
+    fn config_roots_are_not_data_roots() {
+        let cfg = AssetRoots::xdg_config("nacelle");
+        let data = AssetRoots::xdg("nacelle");
+        assert_ne!(cfg.write, data.write, "settings do not live where themes do");
+        assert_eq!(cfg.read[0], cfg.write, "the user's own directory is the write target");
+        assert!(cfg.read.iter().all(|p| p.ends_with("nacelle")));
+        // The conventional ends of the cascade, on a machine that has
+        // not overridden them — `~/.config/nacelle` over `/etc/xdg/nacelle`,
+        // which is the arrangement the owner's decision names.
+        if std::env::var_os("XDG_CONFIG_HOME").is_none() {
+            if let Ok(home) = std::env::var("HOME") {
+                assert_eq!(cfg.read[0], PathBuf::from(home).join(".config").join("nacelle"));
+            }
+        }
+        if std::env::var_os("XDG_CONFIG_DIRS").is_none() {
+            assert!(cfg.read.contains(&PathBuf::from("/etc/xdg/nacelle")));
+        }
     }
 
     #[test]

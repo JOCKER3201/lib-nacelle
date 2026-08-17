@@ -45,6 +45,7 @@ use nacelle::draw::{Corner, CornerStyle, DrawCmd, DrawList};
 use nacelle::font::FontSystem;
 use nacelle::object::dropdown::{self, AccordionStyle};
 use nacelle::theme::{self, Color};
+use nacelle::view::ScrollView;
 use nacelle::{Ctx, Rect};
 
 const W: f32 = 1920.0;
@@ -110,7 +111,17 @@ fn shoot(fonts: &mut FontSystem, p: f32, mouse: (f32, f32)) -> (DrawList, Vec<(R
             focus: None,
             tips: None,
         };
-        dropdown::accordion(&mut ctx, ANCHOR, ITEM_H, &names, p, &AccordionStyle::default())
+        // A fresh, untouched offset: nine elements fit their frame, so
+        // the scroll is a passenger in every stage of this file.
+        dropdown::accordion(
+            &mut ctx,
+            ANCHOR,
+            ITEM_H,
+            &names,
+            p,
+            &AccordionStyle::default(),
+            &mut ScrollView::new(),
+        )
     };
     (dl, rects)
 }

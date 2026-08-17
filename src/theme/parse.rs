@@ -343,7 +343,7 @@ pub fn parse_file(src: &mut Sources, path: &Path, out: &mut Vec<Diagnostic>) -> 
     Some(parse(src, file, path.parent(), out))
 }
 
-/// Parses a theme that is not a file: the built-in themes carried in the
+/// Parses a theme that is not a file: the built-in `default` carried in the
 /// binary, and anything a caller holds as text. `name` is what diagnostics
 /// will call it. There is no base directory, so `@include` inside such a
 /// theme is refused rather than resolved against the process's cwd.
