@@ -613,4 +613,285 @@ mod tests {
             thin.area
         );
     }
+
+    // ---- The ring of quads, proved pixel by pixel (f3 §7b, remedy 1) -
+    //
+    // The split cuts the interior out of a shape's quad and draws it as
+    // a plain fill, because there the field's answer is known before it
+    // is computed. That is a claim about the PICTURE, and a claim about
+    // the picture is settled by rasterising both and comparing, not by
+    // reasoning about where the ramps land. What follows shades every
+    // pixel of both variants out of the functions above — the same
+    // functions `fs_shape` implements — and asserts the fragments are
+    // equal TO THE BIT.
+
+    use crate::draw::{DrawList, Shape, NO_SHAPE};
+    use crate::theme::Color;
+
+    /// The corner treatments back out of a record's flag word — what
+    /// the fragment shader reads, read the same way.
+    fn record_corners(s: &Shape) -> [Corner; 4] {
+        [0usize, 1, 2, 3].map(|i| Corner {
+            style: match (s.flags >> (2 * i as u32)) & 3 {
+                1 => CornerStyle::Round,
+                2 => CornerStyle::Chamfer,
+                _ => CornerStyle::Square,
+            },
+            size: s.corner[i],
+        })
+    }
+
+    /// One `fs_shape` fragment, spelled out of this file's own
+    /// functions: the shader is the implementation and these are the
+    /// specification, so a proof written here is a proof about the
+    /// shader (the note at the top of this file).
+    ///
+    /// `w`, the AA width, is 1: on a still screen one local pixel is one
+    /// device pixel. It would not matter if it were not — both variants
+    /// evaluate the SAME field at the SAME points, and the screen
+    /// derivatives of `d` are taken over framebuffer-aligned 2×2 blocks
+    /// that neither variant can move.
+    fn fs_shape(rec: &Shape, local: [f32; 2], colour: [f32; 4]) -> [f32; 4] {
+        let d = d_shape(local, rec.half, &record_corners(rec));
+        let has = |bit: u32| f32::from(rec.flags & bit != 0);
+        let fill = [colour[0], colour[1], colour[2], colour[3] * has(Shape::FILL)];
+        compose(
+            fill,
+            rec.stroke_c,
+            coverage(d, 1.0),
+            band_coverage(d, rec.stroke, 1.0) * has(Shape::STROKE),
+        )
+    }
+
+    /// Every fragment a draw list puts on the pixel centred on `p`, in
+    /// emission order — a rasteriser small enough to read whole.
+    ///
+    /// Every quad on this lane is an AXIS-ALIGNED rectangle laid out as
+    /// `v0 v1 v2 v0 v2 v3`, so containment is a half-open box test: the
+    /// partition a top-left fill rule gives, and the reason the shared
+    /// edge between the core and a strip is covered exactly once — no
+    /// gap, no double blend.
+    ///
+    /// A quad outside every record (`NO_SHAPE`) is the ORDINARY FILL
+    /// PATH, and it returns the vertex colour: `fs_main` samples the
+    /// atlas's white pixel — which is 1, at a texel centre, so filtering
+    /// does not touch it — raises it to the text gamma, which leaves 1,
+    /// and multiplies the alpha by it.
+    fn frags(dl: &DrawList, p: [f32; 2]) -> Vec<[f32; 4]> {
+        let mut out = Vec::new();
+        for q in dl.verts.chunks_exact(6) {
+            let (a, b) = (q[0].pos, q[2].pos);
+            let inside = |i: usize| p[i] >= a[i].min(b[i]) && p[i] < a[i].max(b[i]);
+            if !inside(0) || !inside(1) {
+                continue;
+            }
+            out.push(if q[0].shape == NO_SHAPE {
+                q[0].color
+            } else {
+                let rec = &dl.shapes()[q[0].shape as usize];
+                // The uv contract: a shape vertex carries pos − centre.
+                let c = [q[0].pos[0] - q[0].uv[0], q[0].pos[1] - q[0].uv[1]];
+                fs_shape(rec, [p[0] - c[0], p[1] - c[1]], q[0].color)
+            });
+        }
+        out
+    }
+
+    /// Straight alpha over an opaque destination, as the blender does
+    /// it. A fragment with alpha 0 leaves the destination untouched to
+    /// the bit — which is how "the interior of a bare border is empty"
+    /// and "the interior of a bare border is a transparent fragment"
+    /// come out the same picture.
+    fn blend(dl: &DrawList, p: [f32; 2], dst: [f32; 3]) -> [f32; 3] {
+        let mut d = dst;
+        for f in frags(dl, p) {
+            for k in 0..3 {
+                d[k] = f[k] * f[3] + d[k] * (1.0 - f[3]);
+            }
+        }
+        d
+    }
+
+    fn bed() -> Color {
+        Color::rgba8(20, 30, 40, 190)
+    }
+
+    fn edge() -> Color {
+        Color::rgba8(230, 210, 120, 220)
+    }
+
+    /// One framed surface, drawn the way the whole toolkit spells one.
+    /// `warp` is the control: at 2 the split stays out of the way — a
+    /// ride's screen gradient is not one — and the shape rasterises
+    /// through whole quads over the same padded bounds, which is the
+    /// geometry this remedy replaces. The rects are on the integer grid
+    /// and the strokes are whole pixels so that the snap is a no-op and
+    /// the two variants write the SAME RECORD; the assertion below
+    /// checks that rather than trusting it.
+    fn surface(r: Rect, c: &[Corner; 4], fill: bool, stroke: Option<f32>, warp: u8) -> DrawList {
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.set_warp(warp);
+        if fill {
+            dl.ring_fill(r, c, 16, bed());
+        }
+        if let Some(t) = stroke {
+            dl.ring(r, c, 16, t, edge());
+        }
+        dl
+    }
+
+    /// **The proof the split rests on.** For every pixel of every case,
+    /// the frame of five quads and the single quad it replaces leave
+    /// the destination bit for bit the same.
+    ///
+    /// The cases are the ones that can break it: a bare bed, a bed with
+    /// a border welded on (where the band deepens AFTER the geometry
+    /// was laid out and the core has to be re-cut), a bare border with
+    /// no bed at all (where the interior is not drawn at all — §7b's
+    /// risk 1, the window frame that would otherwise cost its area),
+    /// a hairline, square corners (reach 0, the tightest margin the
+    /// core boundary ever gets) and a deep chamfer (the treatment that
+    /// eats furthest in).
+    #[test]
+    fn the_frame_paints_what_the_whole_quad_painted() {
+        /// name, rect, corners, has a bed, the border's width.
+        type Case<'a> = (&'a str, Rect, &'a [Corner; 4], bool, Option<f32>);
+        let deep = [Corner::chamfer(20.0); 4];
+        let mix = &mixed_corners();
+        let cases: [Case; 6] = [
+            ("a bare bed", Rect::new(12.0, 20.0, 200.0, 100.0), mix, true, None),
+            ("bed and border", Rect::new(12.0, 20.0, 200.0, 100.0), mix, true, Some(2.0)),
+            ("a bare border", Rect::new(12.0, 20.0, 200.0, 100.0), mix, false, Some(3.0)),
+            ("a hairline", Rect::new(12.0, 20.0, 200.0, 100.0), mix, true, Some(1.0)),
+            ("square corners", Rect::new(0.0, 0.0, 90.0, 60.0), &[Corner::SQUARE; 4], true, Some(1.0)),
+            ("a deep chamfer", Rect::new(5.0, 7.0, 150.0, 90.0), &deep, true, Some(2.0)),
+        ];
+        for (name, r, c, fill, stroke) in cases {
+            let split = surface(r, c, fill, stroke, 1);
+            let whole = surface(r, c, fill, stroke, 2);
+            assert_eq!(split.shapes(), whole.shapes(), "{name}: not the same record");
+            assert_eq!(split.shape_len(), 1, "{name}: not one record");
+            assert!(
+                split.verts.len() == if fill { 30 } else { 24 },
+                "{name}: {} vertices — the split did not happen",
+                split.verts.len()
+            );
+            let mut lit = 0u32;
+            for py in (r.y as i32 - 3)..(r.y + r.h) as i32 + 3 {
+                for px in (r.x as i32 - 3)..(r.x + r.w) as i32 + 3 {
+                    let p = [px as f32 + 0.5, py as f32 + 0.5];
+                    for dst in [[0.0; 3], [1.0, 0.5, 0.25], [1.0; 3]] {
+                        assert_eq!(
+                            blend(&split, p, dst),
+                            blend(&whole, p, dst),
+                            "{name}: pixel {p:?} over {dst:?}"
+                        );
+                    }
+                    // …and every pixel the frame touches, it touches
+                    // ONCE. A shared edge covered twice would blend the
+                    // fill onto itself; a gap would show the wall.
+                    let n = frags(&split, p).len();
+                    assert!(n <= 1, "{name}: pixel {p:?} covered {n} times");
+                    lit += n as u32;
+                }
+            }
+            assert!(lit > 0, "{name}: nothing was drawn at all");
+            // §7b's risk 1, settled: a border with no bed under it
+            // rasterises its PERIMETER and not its area. The middle of
+            // the window frame is not a transparent fragment — it is
+            // not a fragment.
+            let middle = [r.x + r.w * 0.5, r.y + r.h * 0.5];
+            if !fill {
+                assert!(frags(&split, middle).is_empty(), "{name}: the middle was drawn");
+                assert_eq!(frags(&whole, middle).len(), 1, "{name}: the control");
+                assert!(
+                    (lit as f32) < (r.w + 2.0) * (r.h + 2.0),
+                    "{name}: {lit} pixels, the whole quad"
+                );
+            } else {
+                assert_eq!(frags(&split, middle).len(), 1, "{name}: the bed has a hole");
+            }
+        }
+    }
+
+    /// What the remedy buys, on the document's own panel: 315×175 with
+    /// a 6.5 px corner and a 1 px border. §7b measured the interior at
+    /// ~101 instructions a pixel against ~5 on the ordinary fill path,
+    /// over the whole 55 kpx of the padded quad. After the cut the
+    /// field sees a 10.5 px band round the perimeter — under a fifth of
+    /// the pixels, and the other four fifths pay the fill's price.
+    ///
+    /// The band is `corner + stroke + AA_PAD + CORE_PAD` deep and the
+    /// last two are the margin the proof above needs; a tighter margin
+    /// would buy a few per cent more and would have to be argued for
+    /// against multisampling, which shades at the pixel centre.
+    #[test]
+    fn the_field_stops_paying_for_the_interior() {
+        let r = Rect::new(0.0, 0.0, 315.0, 175.0);
+        let dl = surface(r, &[Corner::round(6.5); 4], true, Some(1.0), 1);
+        let area = |q: &[crate::draw::Vertex]| {
+            ((q[2].pos[0] - q[0].pos[0]) * (q[2].pos[1] - q[0].pos[1])).abs()
+        };
+        let mut field = 0.0f32;
+        let mut plain = 0.0f32;
+        for q in dl.verts.chunks_exact(6) {
+            *if q[0].shape == NO_SHAPE { &mut plain } else { &mut field } += area(q);
+        }
+        let padded = (r.w + 2.0) * (r.h + 2.0);
+        assert!((field + plain - padded).abs() <= 0.01, "the frame is not the quad");
+        assert!(
+            field * 5.0 <= padded,
+            "the field still pays for {field} px of {padded}"
+        );
+        assert!(plain > 0.0);
+
+        // §7b's RISK 1 by name: `winframe.rs:453` draws a border over
+        // the whole window and no fill under it, so the analysis that
+        // counted vertices said "cheap" where the fragment count said
+        // the area of the screen. Cut, it costs its perimeter: a
+        // 1200×800 frame with a 6 px corner and a 1 px border asks the
+        // field for 43 604 px of the 964 004 it covered — a 10 px band
+        // round the edge, twenty-two times less.
+        let w = Rect::new(0.0, 0.0, 1200.0, 800.0);
+        let dl = surface(w, &[Corner::round(6.0); 4], false, Some(1.0), 1);
+        let field: f32 = dl.verts.chunks_exact(6).map(area).sum();
+        let padded = (w.w + 2.0) * (w.h + 2.0);
+        assert!(dl.verts.iter().all(|v| v.shape == 0), "a bed appeared");
+        assert!(
+            field * 20.0 <= padded,
+            "the frame still pays for {field} px of {padded}"
+        );
+    }
+
+    /// The three brakes on the split, each for its own reason (§7b):
+    /// a ride, because the field's screen gradient is no longer one; a
+    /// kind past Box, because the shader draws every record as its box
+    /// distance TODAY and will not tomorrow; and a core too small to
+    /// pay for the four strips around it.
+    #[test]
+    fn a_ride_a_foreign_kind_and_a_small_core_keep_the_whole_quad() {
+        use crate::draw::{ShapeKind, ShapeSpec};
+        let r = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let c = [Corner::round(8.0); 4];
+        let spec = |kind, rect| ShapeSpec {
+            rect,
+            corners: c,
+            kind,
+            fill: Some(bed()),
+            stroke: None,
+        };
+        let emit = |warp: u8, kind, rect| {
+            let mut dl = DrawList::new();
+            dl.set_warp(warp);
+            dl.shape(&spec(kind, rect));
+            dl.verts.len()
+        };
+        assert_eq!(emit(1, ShapeKind::Box, r), 30, "the frame");
+        assert_eq!(emit(3, ShapeKind::Box, r), 54, "a ride keeps whole quads");
+        assert_eq!(emit(1, ShapeKind::Hex, r), 6, "a foreign silhouette");
+        // A core of 4×24 px is 96 px² — under the 256 the four strips
+        // have to earn — so this one stays one quad.
+        assert_eq!(emit(1, ShapeKind::Box, Rect::new(0.0, 0.0, 44.0, 30.0)), 6, "too small");
+    }
 }
