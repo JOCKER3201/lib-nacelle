@@ -21,7 +21,6 @@
 //! class `menu.item` tokens and the `motion.menu_unfold` clock; the
 //! module holds no literal of its own.
 
-use crate::draw::Corner;
 use crate::focus::{Key, KeyEv, Mods};
 use crate::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
 use crate::{ui, Ctx, Rect};
@@ -259,17 +258,39 @@ impl MenuState {
         }
     }
 
+    /// The rung a menu is a surface of, dressed in the menu's own key
+    /// names.
+    ///
+    /// `[elev.popover]` is Elev 5, and the master's gloss on it opens with
+    /// the word "menu". What the menu states for itself is the same five
+    /// tokens its private copy of the rules read before 2026-08-17, so
+    /// joining the ladder moved no pixel; what it gains is the glass pair
+    /// (`elev.popover.glass.*`, rank 0 in the master, so nothing is drawn
+    /// today), the panel-edge bloom, and every key the ladder grows next
+    /// — the shadow and the reflection the master already declares on the
+    /// rung and no object could read.
+    ///
+    /// One `Level` for every level of every menu: it is a table of token
+    /// ids, and every open menu is the same kind of surface. A submenu
+    /// that dressed differently from its parent would be the drift again.
+    fn level() -> &'static super::elev::Level {
+        static LEVEL: OnceLock<super::elev::Level> = OnceLock::new();
+        LEVEL.get_or_init(|| {
+            super::elev::Level::of("elev.popover").worn_as(
+                "component.menu.fill",
+                "menu.corner_mode",
+                "menu.corner",
+                "component.menu.border",
+                "menu.border",
+            )
+        })
+    }
+
     /// Immediate draw + hit info, deepest level last (on top). Hover
     /// tracking happens here — the draw pass is the one place that
     /// knows this frame's geometry.
     pub fn draw(&mut self, ctx: &mut Ctx) -> MenuHit {
-        static FILL: OnceLock<TokenId> = OnceLock::new();
         static BORDER_C: OnceLock<TokenId> = OnceLock::new();
-        static BORDER_W: OnceLock<TokenId> = OnceLock::new();
-        static CORNER: OnceLock<TokenId> = OnceLock::new();
-        static CORNER_MODE: OnceLock<TokenId> = OnceLock::new();
-        static CORNER_IDX: OnceLock<(Option<u16>, Option<u16>)> = OnceLock::new();
-        static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
         static ROW_H: OnceLock<TokenId> = OnceLock::new();
         static PAD: OnceLock<TokenId> = OnceLock::new();
         static MIN_W: OnceLock<TokenId> = OnceLock::new();
@@ -431,28 +452,20 @@ impl MenuState {
 
         // ---- the box ----------------------------------------------------
         let drawn = Rect::new(self.rect.x, self.rect.y, w, pad * 2.0 + visible_h);
-        // The radius says how far, `menu.corner_mode` says how — and the
-        // master points it at the window frame's, so the menu the window
+        // Elev 5, the popover rung — the first surface the master's own
+        // `[elev.popover]` gloss names ("menu, tooltip, context menu, drag
+        // ghost"). Drawn through the ladder's one reader since 2026-08-17;
+        // before that the menu carried a private copy of the rules and so
+        // could not be given glass, a shadow or a rung by any theme.
+        //
+        // Its own keys still say what its BODY, CUT and RING are, and they
+        // say exactly what they said before, so the picture did not move:
+        // the radius says how far, `menu.corner_mode` says how — and the
+        // master points that at the window frame's, so the menu the window
         // draws (winframe.rs) and this one cannot disagree about shape.
-        let style =
-            super::window::corner_style(t, tok(&CORNER_MODE, "menu.corner_mode"), &CORNER_IDX);
-        // `Corner::sized` is where §5.0's `pill` becomes a radius. A
-        // `.max(0.0)` here would swallow it: the master would write
-        // "capsule" and the menu would come out square, silently.
-        let corner = Corner::sized(style, t.px(tok(&CORNER, "menu.corner")), drawn);
-        let c = [corner; 4];
-        let seg = super::window::corner_segments(t, &SEGMENTS, corner.size);
-        ctx.dl.ring_fill(drawn, &c, seg, col(t.bed(tok(&FILL, "component.menu.fill"))));
-        let bw = t.px(tok(&BORDER_W, "menu.border")).max(0.0);
-        if bw > 0.0 {
-            ctx.dl.ring(
-                drawn,
-                &c,
-                seg,
-                bw,
-                col(t.color(tok(&BORDER_C, "component.menu.border"))),
-            );
-        }
+        // (`Corner::sized`, inside the rung, is still where §5.0's `pill`
+        // becomes a radius rather than being clamped to a square.)
+        Self::level().draw(ctx, drawn);
 
         // ---- rows -------------------------------------------------------
         let hint_ink = col(t.color(tok(&HINT_C, "component.menu.hint")));
@@ -822,6 +835,39 @@ mod tests {
     use crate::object::panel::tests::{
         all_in, drawn_text, face_follows_the_theme, measure_in_child, report, role_word,
     };
+
+    /// USTERKA 3, the no-move proof. A menu is a surface of Elev 5 since
+    /// 2026-08-17; before that it carried a private copy of the rules and
+    /// so could be given neither glass nor a shadow nor a rung by any
+    /// theme. Joining had to change the picture by NOTHING under the
+    /// master, and this is that claim as arithmetic: the rung and the
+    /// copy it replaced draw the same commands over the same vertices.
+    ///
+    /// It also pins what "no change" is CONDITIONAL on — the master's
+    /// `elev.popover.glass.rank = 0` and `glow.panel_edge.enabled =
+    /// false`. Neither is a fallback in Rust: raise either in a theme and
+    /// the menu is meant to move, which is the point of joining.
+    #[test]
+    fn joining_the_ladder_moved_no_pixel() {
+        use crate::draw::DrawList;
+        use crate::object::elev::tests::{same_picture, the_private_copy};
+        let t = theme::resolved();
+        let r = Rect::new(64.0, 40.0, 220.0, 132.0);
+        let mut was = DrawList::recording();
+        the_private_copy(
+            &mut was,
+            t,
+            r,
+            "component.menu.fill",
+            "menu.corner_mode",
+            "menu.corner",
+            "component.menu.border",
+            "menu.border",
+        );
+        let mut now = DrawList::recording();
+        MenuState::level().draw_in(&mut now, t, r);
+        same_picture(&was, &now);
+    }
 
     fn item(label: &str, cmd: u32) -> MenuEntry {
         MenuEntry::Item(MenuItem::new(label, cmd))

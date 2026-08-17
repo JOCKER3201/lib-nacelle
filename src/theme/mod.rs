@@ -449,6 +449,32 @@ pub fn load() -> Arc<ThemeDiagnostics> {
     load_with(LoadRequest::default())
 }
 
+/// The master with `extra` appended, baked and handed back — WITHOUT
+/// touching the published theme.
+///
+/// The one way a test drives a drawing routine from a theme other than the
+/// process's own. The alternatives are both worse: `set_preview` publishes,
+/// so a test using it would decide what every other test running beside it
+/// draws from; and a hand-built `ResolvedTheme` would be a second answer to
+/// "what does this file mean", which is the drift these modules are about.
+///
+/// Appending is an override because §4.1 gives the LAST declaration in a
+/// stage the token — and because it declares no new names, the ids of the
+/// returned theme are the ids of [`id`], so a `Level` built from the
+/// process's schema reads this theme correctly.
+#[cfg(test)]
+pub(crate) fn bake_over_master(extra: &str) -> bake::ResolvedTheme {
+    let mut out = Vec::new();
+    let mut src = Sources::new();
+    let f = src.add("default.theme", format!("{DEFAULT_THEME}\n{extra}\n"));
+    let doc = parse::parse(&mut src, f, None, &mut out);
+    let mut schema = Schema::from_default(&doc, &mut out);
+    let d = resolve::resolve_default(&schema, &mut out);
+    schema.adopt_kinds(&d.values);
+    let r = resolve::resolve(&schema, &schema.base_spec(), &mut out);
+    bake::bake(&schema, &r, &BakeInput::default(), &mut out)
+}
+
 pub fn load_with(req: LoadRequest) -> Arc<ThemeDiagnostics> {
     let mut out: Vec<Diagnostic> = Vec::new();
     let mut src = Sources::new();

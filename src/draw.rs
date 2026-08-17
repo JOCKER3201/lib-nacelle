@@ -320,6 +320,18 @@ pub enum DrawCmd {
     ChamferFrame { r: [f32; 4], cut: f32, stroke: f32, color: Color },
     ChamferFill { r: [f32; 4], cut: f32, color: Color },
     Ring { r: [f32; 4], corners: [Corner; 4], stroke: f32, color: Color },
+    /// [`DrawList::ring_grad`] — the same ring under a two-stop gradient.
+    /// `dir` is recorded as given, unnormalised: the direction a theme
+    /// wrote is what the frame is answerable for, and the normalisation is
+    /// a function of it.
+    RingGrad {
+        r: [f32; 4],
+        corners: [Corner; 4],
+        stroke: f32,
+        near: Color,
+        far: Color,
+        dir: [f32; 2],
+    },
     RingFill { r: [f32; 4], corners: [Corner; 4], color: Color },
     GlassFill { r: [f32; 4], corners: [Corner; 4], depth: f32, tint: Color },
     RectGrad { r: [f32; 4], stops: Vec<(f32, Color)>, angle: f32 },
@@ -559,6 +571,18 @@ impl fmt::Display for DrawCmd {
                 corners(f, c)?;
                 field(f, "stroke", *stroke, PX)?;
                 rgba(f, *color)
+            }
+            DrawCmd::RingGrad { r, corners: c, stroke, near, far, dir } => {
+                f.write_str("ring_grad at")?;
+                nums(f, r, PX)?;
+                corners(f, c)?;
+                field(f, "stroke", *stroke, PX)?;
+                f.write_str(" near")?;
+                rgba(f, *near)?;
+                f.write_str(" far")?;
+                rgba(f, *far)?;
+                f.write_str(" dir")?;
+                nums(f, dir, FINE)
             }
             DrawCmd::RingFill { r, corners: c, color } => {
                 f.write_str("ring_fill at")?;
@@ -1163,6 +1187,97 @@ impl DrawList {
                 [outer[i], outer[j], inner[j], inner[i]],
                 [[u, v]; 4],
                 [col; 4],
+            );
+        }
+        self.scratch_a = outer;
+        self.scratch_b = inner;
+    }
+
+    /// [`ring`](Self::ring)'s ring, coloured by a two-stop gradient
+    /// projected along `dir`.
+    ///
+    /// The same tessellation and the same vertex count: `Vertex` already
+    /// carries a colour per corner and the rasteriser already interpolates
+    /// it, so a gradient ring costs exactly what a flat one does — which is
+    /// the master's own claim at `[grad]` ("a gradient border is continuous
+    /// around a frame at the same 24 verts a solid border costs").
+    ///
+    /// `dir` need not be normalised and its sign is the direction of
+    /// travel; `t` is normalised against the RECT's own projected extent,
+    /// so the near stop lands on the least-projected corner and the far
+    /// stop on the most-projected one whatever the box's aspect. A `dir`
+    /// of zero length degrades to the near colour, which is the flat ring
+    /// the caller would have drawn without it.
+    ///
+    /// Kept apart from `ring_verts` rather than folded into it: `lerp` at
+    /// `near == far` is not bit-for-bit `near`, so routing the flat ring
+    /// through this one would move every existing frame's vertices by an
+    /// ulp for no picture.
+    pub fn ring_grad(
+        &mut self,
+        r: Rect,
+        c: &[Corner; 4],
+        segments: u8,
+        stroke: f32,
+        near: Color,
+        far: Color,
+        dir: [f32; 2],
+    ) {
+        self.cmd(|| DrawCmd::RingGrad {
+            r: [r.x, r.y, r.w, r.h],
+            corners: *c,
+            stroke,
+            near,
+            far,
+            dir,
+        });
+        if r.w <= 0.0 || r.h <= 0.0 {
+            return;
+        }
+        let t = stroke.max(0.0).min(r.w.min(r.h) * 0.5);
+        if t <= 0.0 {
+            return;
+        }
+        let inner_r = Rect::new(
+            r.x + t,
+            r.y + t,
+            (r.w - 2.0 * t).max(0.0),
+            (r.h - 2.0 * t).max(0.0),
+        );
+        let ci = [c[0].inset(t), c[1].inset(t), c[2].inset(t), c[3].inset(t)];
+        let mut outer = std::mem::take(&mut self.scratch_a);
+        let mut inner = std::mem::take(&mut self.scratch_b);
+        ring_points(r, c, segments, &mut outer);
+        ring_points(inner_r, &ci, segments, &mut inner);
+        debug_assert_eq!(outer.len(), inner.len());
+        // The rect's own projected extent, from its four corners: the two
+        // extremes of an axis-aligned box under a linear projection are two
+        // of its corners, so `min`/`max` over them is exact and needs no
+        // sampling of the boundary the ring was tessellated into.
+        let (dx, dy) = (dir[0], dir[1]);
+        let lo = r.x * dx + r.y * dy + r.w * dx.min(0.0) + r.h * dy.min(0.0);
+        let hi = r.x * dx + r.y * dy + r.w * dx.max(0.0) + r.h * dy.max(0.0);
+        let span = hi - lo;
+        let at = |p: [f32; 2]| {
+            if span.abs() <= 1e-6 {
+                return near;
+            }
+            lerp(near, far, ((p[0] * dx + p[1] * dy - lo) / span).clamp(0.0, 1.0))
+        };
+        let (u, v) = FontSystem::white_uv();
+        let n = outer.len();
+        for i in 0..n {
+            let j = (i + 1) % n;
+            self.push_quad4(
+                None,
+                [outer[i], outer[j], inner[j], inner[i]],
+                [[u, v]; 4],
+                [
+                    at(outer[i]).to_array(),
+                    at(outer[j]).to_array(),
+                    at(inner[j]).to_array(),
+                    at(inner[i]).to_array(),
+                ],
             );
         }
         self.scratch_a = outer;
@@ -2226,6 +2341,84 @@ mod tests {
             let [px, py] = v.pos;
             assert!(px >= r.x - e && px <= r.x + r.w + e && py >= r.y - e && py <= r.y + r.h + e);
         }
+    }
+
+    /// The gradient ring is the SAME ring: same tessellation, same vertex
+    /// count, same flush boundary — only the colour per vertex differs.
+    /// That equality is the master's own argument for declaring a gradient
+    /// border on all nine rungs ("the same 24 verts a solid border
+    /// costs"), so it is worth a test rather than a comment.
+    #[test]
+    fn a_gradient_ring_is_a_ring_that_costs_the_same() {
+        let r = Rect::new(10.0, 20.0, 200.0, 100.0);
+        let c = [
+            Corner::round(16.0),
+            Corner::chamfer(24.0),
+            Corner::SQUARE,
+            Corner::round(8.0),
+        ];
+        let a = Color::rgb8(10, 200, 30).alpha(0.7);
+        let b = Color::rgb8(250, 40, 90);
+        let mut flat = DrawList::new();
+        flat.ring(r, &c, 6, 3.0, a);
+        let mut grad = DrawList::new();
+        grad.ring_grad(r, &c, 6, 3.0, a, b, [1.0, 0.0]);
+        assert_eq!(flat.verts.len(), grad.verts.len());
+        for (f, g) in flat.verts.iter().zip(&grad.verts) {
+            assert_eq!(f.pos, g.pos, "the gradient moved a vertex");
+        }
+        // The two ends land ON the box: t is normalised against the rect's
+        // own projected extent, so the extremes are exact and nothing in
+        // between leaves the pair.
+        let e = 1e-6;
+        let mut saw_near = false;
+        let mut saw_far = false;
+        for v in &grad.verts {
+            if (v.pos[0] - r.x).abs() < 1e-3 {
+                assert!((v.color[0] - a.r).abs() < e, "near end drifted: {:?}", v.color);
+                saw_near = true;
+            }
+            if (v.pos[0] - r.right()).abs() < 1e-3 {
+                assert!((v.color[0] - b.r).abs() < e, "far end drifted: {:?}", v.color);
+                saw_far = true;
+            }
+        }
+        assert!(saw_near && saw_far);
+    }
+
+    /// A direction of zero length is not a direction. The ring draws the
+    /// NEAR colour flat rather than dividing by the span it does not have
+    /// — the raw degradation, not a fallback design.
+    #[test]
+    fn a_gradient_with_no_direction_is_the_flat_ring() {
+        let r = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let c = [Corner::SQUARE; 4];
+        let a = Color::rgb8(10, 200, 30);
+        let mut dl = DrawList::new();
+        dl.ring_grad(r, &c, 4, 2.0, a, Color::rgb8(250, 40, 90), [0.0, 0.0]);
+        assert!(!dl.verts.is_empty());
+        for v in &dl.verts {
+            assert_eq!(v.color, a.to_array());
+        }
+    }
+
+    /// The register witnesses a gradient ring as its own command, with
+    /// both ends and the direction the theme wrote — a frame that says
+    /// "ring" where a gradient was asked for cannot be told from one that
+    /// drew the bug this command exists to fix.
+    #[test]
+    fn the_register_tells_a_gradient_ring_from_a_flat_one() {
+        let r = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let c = [Corner::SQUARE; 4];
+        let mut dl = DrawList::recording();
+        dl.ring(r, &c, 4, 2.0, ink());
+        dl.ring_grad(r, &c, 4, 2.0, ink(), wash(), [1.0, -1.0]);
+        let lines: Vec<String> = dl.cmds().iter().map(|c| c.to_string()).collect();
+        assert!(lines[0].starts_with("ring at"), "{}", lines[0]);
+        assert!(lines[1].starts_with("ring_grad at"), "{}", lines[1]);
+        assert!(lines[1].contains(" near rgba"), "{}", lines[1]);
+        assert!(lines[1].contains(" far rgba"), "{}", lines[1]);
+        assert!(lines[1].ends_with(" dir 1.000000 -1.000000"), "{}", lines[1]);
     }
 
     /// The two-stop fast path is one quad whose extreme corners carry the
