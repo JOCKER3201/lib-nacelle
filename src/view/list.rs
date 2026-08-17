@@ -15,7 +15,7 @@ use super::hits::{Hit, Hits};
 use super::model::{RowBuf, RowModel};
 use super::paint::{self, RoleLook};
 use super::scroll::{ScrollPhysics, ScrollView, ScrollbarEdge, ScrollbarLook};
-use super::surface::Surface;
+use super::surface::{StateInk, Surface};
 use super::table::Extent;
 use super::virt;
 use crate::draw::CornerStyle;
@@ -340,19 +340,24 @@ pub fn list<S: Surface, M: RowModel>(
                 && mouse.1 < r.bottom();
             let chosen = selected_key == Some(buf.key.as_str());
             let rung = match (chosen, hovered) {
-                (true, true) => Some(State::SelectedHover),
-                (true, false) => Some(State::Selected),
-                (false, true) => Some(State::Hover),
-                _ => None,
+                (true, true) => State::SelectedHover,
+                (true, false) => State::Selected,
+                (false, true) => State::Hover,
+                _ => State::Idle,
             };
-            if let Some(rung) = rung {
-                // `list.item` — the class the master already declares
-                // for exactly this. No new selection colour exists, or
-                // needs to.
-                let style = sf.class_state("list.item", rung);
-                if style.fill.a > 0.0 {
-                    sf.ring_fill(row_r, look.plate_cut, look.plate_radius, style.fill);
-                }
+            // `list.item` — the class the master already declares for
+            // exactly this. No new selection colour exists, or needs to.
+            //
+            // A RESTING row draws no plate, and that is what
+            // `StateInk::CLEAR` says here: the ladder's own idle rung is
+            // a visible wash (`alpha(base, 0.07)`), and fading back into
+            // it would leave one under every row in the list. The plate
+            // fades out to nothing instead — and at rest its alpha is
+            // exactly zero, so the guard below skips the draw as it
+            // always has.
+            let style = sf.class_ink_resting("list.item", rung, row_r, StateInk::CLEAR);
+            if style.fill.a > 0.0 {
+                sf.ring_fill(row_r, look.plate_cut, look.plate_radius, style.fill);
             }
         }
         // Recorded whatever `select` says: a row rectangle is also how

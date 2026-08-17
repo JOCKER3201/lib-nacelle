@@ -102,7 +102,5 @@ pub fn track(ctx: &mut Ctx, track: Rect, t: f32) {
 pub fn track_focusable(ctx: &mut Ctx, r: Rect, t: f32, id: FocusId) {
     let f = ctx.focus.as_deref_mut().map(|fc| fc.register(id, r, Caps::GREEDY_ARROWS));
     track(ctx, r, t);
-    if f.map_or(false, |f| f.ring) {
-        focus_ring::draw(ctx, r);
-    }
+    focus_ring::draw_faded(ctx, r, f.map_or(false, |f| f.ring));
 }

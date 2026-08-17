@@ -8,6 +8,14 @@
 //! press has hidden it since. At boot neither has happened, so the boot
 //! frame keeps its pixels.
 //!
+//! Because it is not a rung, it cannot ride the class ladder's own
+//! crossfade — so it rides a GATE instead ([`crate::motion::gate`] under
+//! `motion.focus`, the catalogue entry that had no reader until it),
+//! and [`draw_faded`] is what a control calls: every frame, ring or no
+//! ring, because a band drawn only while focused has nothing left on
+//! screen to fade away. [`draw`] is the unfaded band, for a caller with
+//! no clock of its own.
+//!
 //! Every token is read per frame: `focus.ring.enabled` is
 //! a11y-protected and the hc variant may thicken `focus.ring.width`
 //! mid-run, so only `TokenId`s are cached (the `OnceLock` idiom the
@@ -97,9 +105,39 @@ fn treatment() -> Option<Ring> {
 /// plus the `glow.focus_ring` halo when a theme enables that class.
 /// No-op when `focus.ring.enabled` is false.
 pub fn draw(ctx: &mut Ctx, r: Rect) {
-    let Some(t) = treatment() else {
+    ring(ctx, r, 1.0);
+}
+
+/// [`draw`], but the ring ARRIVES and LEAVES over `motion.focus` rather
+/// than appearing and vanishing between two frames.
+///
+/// `on` is what the focus chain answers — call this EVERY frame, with
+/// false as readily as with true, because a ring that is only drawn while
+/// focused has nothing left on screen to fade out. At rest with `on`
+/// false the gate is exactly 0 and nothing is drawn at all, which is the
+/// pixel this file has always produced; at rest with `on` true the gate
+/// is exactly 1 and every colour is the theme's own, untouched.
+///
+/// Focus is NOT a rung of the state ladder (§5.21) — that is why it needs
+/// a gate of its own rather than a rung of `class_state`, and why
+/// `motion.focus` sat in the closed catalogue with no reader until here.
+pub fn draw_faded(ctx: &mut Ctx, r: Rect, on: bool) {
+    let g = crate::motion::gate("focus.ring", r, on, "focus", ctx.t);
+    if g > 0.0 {
+        ring(ctx, r, g);
+    }
+}
+
+/// The band itself, at `alpha` of its themed presence.
+fn ring(ctx: &mut Ctx, r: Rect, alpha: f32) {
+    let Some(mut t) = treatment() else {
         return;
     };
+    if alpha < 1.0 {
+        // Clamped: an overshooting `custom` curve is meaningful for a
+        // position and meaningless for a coverage.
+        t.color = t.color.alpha((t.color.a * alpha).clamp(0.0, 1.0));
+    }
     // The ring strokes INSIDE its rect, so the rect grows by offset +
     // width on every side and the band lands wholly outside the control:
     // [offset, offset + width] past its edge.
@@ -137,9 +175,37 @@ fn segments_ceiling() -> u8 {
 /// The parallelogram variant — a button's slanted quad. Same treatment,
 /// stroked as a closed polyline centred on the outward-offset outline.
 pub fn draw_quad(ctx: &mut Ctx, q: [[f32; 2]; 4]) {
-    let Some(t) = treatment() else {
+    ring_quad(ctx, q, 1.0);
+}
+
+/// [`draw_quad`] on [`draw_faded`]'s clock — the parallelogram's half of
+/// the same contract. The key is the quad's bounding box, which is what
+/// the shared registry can hold.
+pub fn draw_quad_faded(ctx: &mut Ctx, q: [[f32; 2]; 4], on: bool) {
+    let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+    let (mut x1, mut y1) = (f32::MIN, f32::MIN);
+    for p in q {
+        x0 = x0.min(p[0]);
+        y0 = y0.min(p[1]);
+        x1 = x1.max(p[0]);
+        y1 = y1.max(p[1]);
+    }
+    let box_ = Rect::new(x0, y0, x1 - x0, y1 - y0);
+    let g = crate::motion::gate("focus.ring", box_, on, "focus", ctx.t);
+    if g > 0.0 {
+        ring_quad(ctx, q, g);
+    }
+}
+
+fn ring_quad(ctx: &mut Ctx, q: [[f32; 2]; 4], alpha: f32) {
+    let Some(mut t) = treatment() else {
         return;
     };
+    if alpha < 1.0 {
+        // Clamped: an overshooting `custom` curve is meaningful for a
+        // position and meaningless for a coverage.
+        t.color = t.color.alpha((t.color.a * alpha).clamp(0.0, 1.0));
+    }
     // polyline centres its stroke on the path, so the path runs through
     // the band's middle: offset + width/2 out from the control's edge.
     let outer = offset_convex_quad(q, t.off + t.w * 0.5);

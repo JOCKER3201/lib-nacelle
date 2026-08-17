@@ -89,10 +89,24 @@ pub fn draw(ctx: &mut Ctx, row: Rect, label: &str, checked: bool, hover: bool) {
     // The box is its own length now, not a cut of the caller's row.
     let s = t.px(tok(&SIZE, "checkbox.size"));
     let bx = Rect::new(row.x, row.y + (row.h - s) / 2.0, s, s);
-    let style = match *CLASS.get_or_init(|| theme::class_id("checkbox")) {
-        Some(c) => t.class_state(c, if hover { State::Hover } else { State::Idle }),
-        None => StateStyle::RAW,
-    };
+    // The ring's colour crossfades under `motion.hover` rather than
+    // snapping. Keyed by the BOX, not the row: the box is what the ladder
+    // dresses, and a row that changed width around a still box is the
+    // same control.
+    let cls = *CLASS.get_or_init(|| theme::class_id("checkbox"));
+    let style: StateStyle = crate::motion::state_ink(
+        "checkbox",
+        bx,
+        if hover { State::Hover } else { State::Idle },
+        ctx.t,
+        |s| {
+            crate::view::surface::StateInk::from(match cls {
+                Some(c) => t.class_state(c, s),
+                None => StateStyle::RAW,
+            })
+        },
+    )
+    .into();
     let (corners, seg) = shape(t, bx);
     ctx.dl.ring(
         bx,
@@ -151,9 +165,7 @@ pub fn draw_focusable(
 ) {
     let f = ctx.focus.as_deref_mut().map(|fc| fc.register(id, row, Caps::NONE));
     draw(ctx, row, label, checked, hover);
-    if f.map_or(false, |f| f.ring) {
-        focus_ring::draw(ctx, row);
-    }
+    focus_ring::draw_faded(ctx, row, f.map_or(false, |f| f.ring));
 }
 
 // ---------------------------------------------------------------------

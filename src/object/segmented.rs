@@ -137,7 +137,7 @@ pub fn control<S: Surface>(
         // `button` — the class the matrix lends this control. The whole
         // ladder, including the Selected rung the chosen cell always
         // stands on.
-        let ink = sf.class_state("button", st.rung(i));
+        let ink = sf.class_ink("button", st.rung(i), *cell);
         // Per cell, and through the one translator: `segmented.corner`
         // may hold `@corner.pill`, which bakes to a NEGATIVE number and
         // means "as round as THIS cell can be". A `.max(0.0)` here would
@@ -205,10 +205,8 @@ pub fn draw_focusable(
         .as_deref_mut()
         .map(|fc| fc.register(id, r, Caps::GREEDY_ARROWS));
     let cells = draw(ctx, r, labels, st);
-    if f.map_or(false, |f| f.ring) {
-        if let Some(cell) = cells.get(st.active) {
-            focus_ring::draw(ctx, *cell);
-        }
+    if let Some(cell) = cells.get(st.active) {
+        focus_ring::draw_faded(ctx, *cell, f.map_or(false, |f| f.ring));
     }
     cells
 }

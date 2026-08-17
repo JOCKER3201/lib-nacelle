@@ -3652,7 +3652,8 @@ ring.gap      = @border.edge.gap    # length of the gap between two dashes · 7 
 ring.enabled  = true            # draw a focus ring at all · 7 · bool · MUST survive high_contrast and reduced motion
 
 # =========================================================================
-# 5.22  motion.* — a CLOSED catalogue (18 effects x 8 keys + 2 globals = 146)
+# 5.22  motion.* — a CLOSED catalogue (18 effects x 8 keys + board_ride's
+#       6 extras + 2 globals = 152)
 #
 # The theme owns: whether an effect exists, its duration, its easing, its
 # period and amplitude, and a global scale. The theme does NOT own: the frame
@@ -3671,6 +3672,16 @@ ring.enabled  = true            # draw a focus ring at all · 7 · bool · MUST 
 # duration_ms drives one-shot transitions; period_ms drives cyclic effects.
 # An entry uses one or the other; the unused one is 0ms and is documented as
 # such rather than omitted, because a theme file is documentation.
+#
+# ONE entry carries more than eight: motion.board_ride adds perspective,
+# gesture_frac, rubber_gain, rubber_max, epsilon and void. They are not a
+# ninth key of the SHAPE - no other effect has them, and none may grow
+# them - but the six numbers that decide what the board ride IS, and they
+# all have readers (nacelle-desktop main.rs for the first five, deco.rs
+# for the void). The header counted 146 for a while, which is 18 x 8 + 2:
+# the arithmetic of the shape, applied to a catalogue that has one entry
+# it does not describe. `the_catalogue_is_closed_and_counted` in
+# src/motion.rs is what keeps the two from parting again.
 #
 # Six prohibitions, enforced by the grammar because there is no token for
 # them: per-cell terminal colour · blur radius · anything that affects layout
@@ -3757,7 +3768,7 @@ enabled     = true                    # run this effect at all; -; bool; -
 
 # ---- menu_unfold · accordion / window-menu unfold ------------------------
 [motion.menu_unfold]
-duration_ms = 150ms                   # the unfold; image 7's taskbar menus; ms, 0ms .. 2000ms; -
+duration_ms = 150ms                   # the whole pull - the slide out from under the anchor AND the unfold, one duration; image 7's taskbar menus; ms, 0ms .. 2000ms; the boundary between the two phases is the list's own geometry (owner 2026-08-16), not a token
 period_ms   = 0ms                     # unused - one-shot transition; -; ms; -
 amplitude   = 0.00                    # unused outside cyclic effects; -; 0..1; -
 floor       = 0.00                    # unused outside step easing; -; 0..1; -
@@ -3796,18 +3807,18 @@ enabled     = true                    # run this effect at all; -; bool; a rigid
 
 # ---- hold · hold-to-confirm, today's HOLD_SECS ---------------------------
 [motion.hold]
-duration_ms = 5000ms                  # how long a destructive control must be held; image 5's SYSTEM LOCKDOWN; ms, 1500ms .. 8000ms; clamped to that range
+duration_ms = 5000ms                  # how long a destructive control must be held; image 5's SYSTEM LOCKDOWN; ms, 1500ms .. 8000ms; clamped to that range — object/button.rs draw_hold through motion::hold, which runs it on UNSCALED wall time: this ramp is the interlock, and motion.scale = 0 must not make it a click
 period_ms   = 0ms                     # unused - one-shot ramp; -; ms; -
 amplitude   = 0.00                    # unused outside cyclic effects; -; 0..1; -
 floor       = 0.00                    # unused outside step easing; -; 0..1; -
 duty        = 0.00                    # unused outside step easing; -; 0..1; -
-easing      = linear                  # curve · - · enum: linear | ease_out | ease_in | ease_in_out | sine | step | custom · linear because the ring IS the progress readout
+easing      = linear                  # curve · - · enum: linear | ease_out | ease_in | ease_in_out | sine | step | custom · linear because the ring IS the progress readout — and NOT honoured: motion::hold runs linear whatever the word says, because `step` with duty 0 and an overshooting `custom` both reach 1.0 early, and this number is the interlock
 easing_p    = [0.25, 0.10, 0.25, 1.00] # bezier points for easing = custom; -; 4 x f; TODO(default): chosen here, spec silent
 enabled     = true                    # run this effect at all; -; bool; setting false makes the control fire immediately - a safety decision
 
 # ---- window_open · a window or dialog appearing --------------------------
 [motion.window_open]
-duration_ms = 180ms                   # window/dialog entry; image 7; ms, 0ms .. 2000ms; -
+duration_ms = 180ms                   # window/dialog entry; image 7; ms, 0ms .. 2000ms; object/winframe.rs present() through motion::gate_dir — and this entry is the one a TOOLTIP and a TOAST arrive on too: the catalogue names EVENTS, not objects, so there is no motion.tooltip_* or motion.toast_* and there will not be
 period_ms   = 0ms                     # unused - one-shot transition; -; ms; -
 amplitude   = 0.00                    # unused outside cyclic effects; -; 0..1; -
 floor       = 0.00                    # unused outside step easing; -; 0..1; -
@@ -3818,7 +3829,7 @@ enabled     = true                    # run this effect at all; -; bool; -
 
 # ---- window_close · a window or dialog leaving ---------------------------
 [motion.window_close]
-duration_ms = 140ms                   # window/dialog exit, faster than entry; image 7; ms, 0ms .. 2000ms; -
+duration_ms = 140ms                   # window/dialog exit, faster than entry; image 7; ms, 0ms .. 2000ms; object/winframe.rs present(); the pair is TWO entries precisely so the exit may be faster and curve the other way, which is what motion::gate_dir exists for
 period_ms   = 0ms                     # unused - one-shot transition; -; ms; -
 amplitude   = 0.00                    # unused outside cyclic effects; -; 0..1; -
 floor       = 0.00                    # unused outside step easing; -; 0..1; -
@@ -3842,12 +3853,12 @@ enabled     = true                    # run this effect at all; -; bool; the the
 [motion.glow_pulse]
 duration_ms = 0ms                     # unused - glow_pulse is cyclic; -; ms; -
 period_ms   = 1600ms                  # one breath of the panel-edge halo; images 2,7; ms, 200ms .. 8000ms; -
-amplitude   = 0.25                    # +/- swing applied to glow_alpha; images 2,7; 0..1; freezes at its mean under reduced motion
+amplitude   = 0.25                    # +/- swing applied to glow_alpha; images 2,7; 0..1; freezes at its mean under reduced motion — motion::Effect::cyclic_amplitude, a path of its own precisely because a BLINK freezes fully visible and a BREATH freezes at the middle
 floor       = 0.00                    # unused outside step easing; -; 0..1; -
 duty        = 0.00                    # unused outside step easing; -; 0..1; -
 easing      = sine                    # curve · images 2,7 · enum: linear | ease_out | ease_in | ease_in_out | sine | step | custom · sine is legal on cyclic effects only
 easing_p    = [0.25, 0.10, 0.25, 1.00] # bezier points for easing = custom; -; 4 x f; TODO(default): chosen here, spec silent
-enabled     = false                   # OFF in default, like every glow class (5.13); -; bool; costs one of motion.idle_cap sources when on
+enabled     = false                   # OFF in default, like every glow class (5.13); -; bool; costs one of motion.idle_cap sources when on — and a theme must ask TWICE before anything moves, because object/window.rs's panel_edge_glow returns on glow.panel_edge.enabled before it ever asks the clock
 
 # ---- alarm_blink · cyclic alarm emphasis (CYCLIC SOURCE) -----------------
 [motion.alarm_blink]
@@ -3924,7 +3935,7 @@ hit_pad_mode    = grow     # how the hit rect reaches min_hit · - · enum: grow
 grab_pad        = 1.5u     # the invisible band that starts a resize/drag; -; u, 0.5u .. 4u; editor.rs's EDGE = 8.0, generalised
 grab_pad_min_px = 6px      # absolute floor for grab_pad; -; device px, 3px .. 24px; companion of grab_pad (3.2)
 drag_slop       = 1.5u     # travel between press and release under which the gesture is a CLICK, not a drag; -; u, 0u .. 6u; the companion of grab_pad on the other side of the gesture
-reduced_motion  = system   # honour the platform's reduce-motion preference · - · enum: off | system | on · forces motion.scale to 0 when active
+reduced_motion  = system   # honour the platform's reduce-motion preference · - · enum: off | system | on · forces motion.scale to 0 when active — motion::reduce_motion reads the WORD (an index would freeze at whatever schema it was interned against), and `system` asks the host through motion::set_platform_reduce_motion (no preference known = animate)
 contrast_floor  = false    # when true the contrast lint CORRECTS instead of reporting; -; bool; lifts OKLab L at constant hue and chroma
 lc_term_fg      = 90       # advisory APCA minimum for terminal foreground vs term.background; -; f, 0 .. 108; 4.4 pass D 4
 lc_primary      = 75       # advisory minimum for text.primary, data values, table cells; -; f, 0 .. 108; 4.4 pass D 4

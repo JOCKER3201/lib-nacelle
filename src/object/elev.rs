@@ -206,22 +206,31 @@ impl Level {
     /// box — would otherwise settle the same cut a second time and be
     /// free to settle it differently.
     pub(crate) fn draw(&self, ctx: &mut Ctx, r: Rect) -> ([Corner; 4], u8) {
-        self.draw_in(ctx.dl, theme::resolved(), r)
+        self.draw_in(ctx.dl, theme::resolved(), r, ctx.t)
     }
 
-    /// [`Level::draw`] with the theme in hand and no frame around it.
+    /// [`Level::draw`] with the theme and the clock in hand and no frame
+    /// around it.
     ///
-    /// A rung touches nothing of a `Ctx` but its draw list, and taking the
-    /// theme as an argument is what lets one rung be drawn from a theme
-    /// that is not the published one — which is how the picture this rung
-    /// makes is put under test at all, gradient ring included, without a
-    /// test reaching into the process-wide theme every other test is
-    /// reading at the same time.
+    /// A rung touches nothing of a `Ctx` but its draw list and its clock,
+    /// and taking the theme as an argument is what lets one rung be drawn
+    /// from a theme that is not the published one — which is how the
+    /// picture this rung makes is put under test at all, gradient ring
+    /// included, without a test reaching into the process-wide theme every
+    /// other test is reading at the same time.
+    ///
+    /// `now` is `Ctx::t`, seconds since application start, and it exists
+    /// here for one reader: the edge bloom breathes on `motion.glow_pulse`
+    /// and a cyclic effect has to be told what time it is. A caller with no
+    /// frame around it — every test below — passes a time of its own
+    /// choosing, which is the only way a pulse can be sampled at a stated
+    /// phase instead of at whenever the suite happened to run.
     pub(crate) fn draw_in(
         &self,
         dl: &mut crate::draw::DrawList,
         t: &theme::ResolvedTheme,
         r: Rect,
+        now: f64,
     ) -> ([Corner; 4], u8) {
         let (c, seg) = self.cut(t, r);
         // Glass INSTEAD of the fill, never on top of it — the master's own
@@ -260,8 +269,12 @@ impl Level {
             // `glow_ring` is one additive sprite ring with one vertex
             // colour, so a gradient halo is not a thing this call can carry
             // and inventing a midpoint here would be a decision made in
-            // Rust.
-            super::window::panel_edge_glow(dl, t, r, &c, seg, edge);
+            // Rust. Its ALPHA breathes on `motion.glow_pulse`, which is
+            // what the clock is for; a two-colour ring and a breathing
+            // bloom are orthogonal — the gradient decides the ring's two
+            // ends, the pulse decides how brightly the halo over it is
+            // laid, and neither reads the other.
+            super::window::panel_edge_glow(dl, t, r, &c, seg, edge, now);
         }
         (c, seg)
     }
@@ -271,6 +284,18 @@ impl Level {
 pub(crate) mod tests {
     use super::*;
     use crate::draw::{DrawCmd, DrawList};
+
+    /// The clock every proof in and under this module draws at.
+    ///
+    /// A stated instant, not "whenever the suite ran": `draw_in`'s only
+    /// reader of the clock is the edge bloom's breath on
+    /// `motion.glow_pulse`, and a picture compared against another picture
+    /// has to be taken at the same phase as it. The master ships
+    /// `glow.panel_edge.enabled = false`, so under it the bloom returns
+    /// before the pulse is ever sampled and the number does not matter —
+    /// which is exactly why it must be written down rather than left to a
+    /// theme that turns the glow on later.
+    pub(crate) const AT_REST: f64 = 0.0;
 
     // ------------------------------------------- the no-move proof
     //
@@ -368,7 +393,7 @@ pub(crate) mod tests {
     fn ring_under(mode: &str, color2: &str, axis: &str) -> DrawCmd {
         let t = theme::bake_over_master(&overlay(mode, color2, axis));
         let mut dl = DrawList::recording();
-        popover().draw_in(&mut dl, &t, box_());
+        popover().draw_in(&mut dl, &t, box_(), AT_REST);
         ring_cmd(&dl)
     }
 
@@ -398,7 +423,7 @@ pub(crate) mod tests {
     fn a_gradient_edge_is_drawn_as_one() {
         let t = theme::bake_over_master(&overlay("gradient", "#FF00FF / 1.0", "diag_down"));
         let mut dl = DrawList::recording();
-        popover().draw_in(&mut dl, &t, box_());
+        popover().draw_in(&mut dl, &t, box_(), AT_REST);
         match ring_cmd(&dl) {
             DrawCmd::RingGrad { near, far, dir, stroke, .. } => {
                 // The near end is `edge.color`, untouched: the sugar pair
@@ -462,13 +487,13 @@ pub(crate) mod tests {
         let t = theme::resolved();
         let flat = {
             let mut dl = DrawList::new();
-            popover().draw_in(&mut dl, t, box_());
+            popover().draw_in(&mut dl, t, box_(), AT_REST);
             dl.verts.len()
         };
         let grad = {
             let g = theme::bake_over_master(&overlay("gradient", "#FF00FF / 1.0", "x"));
             let mut dl = DrawList::new();
-            popover().draw_in(&mut dl, &g, box_());
+            popover().draw_in(&mut dl, &g, box_(), AT_REST);
             dl.verts.len()
         };
         assert_eq!(flat, grad);
@@ -489,7 +514,7 @@ pub(crate) mod tests {
             overlay("gradient", "#FF00FF / 1.0", "x")
         ));
         let mut dl = DrawList::new();
-        popover().draw_in(&mut dl, &t, box_());
+        popover().draw_in(&mut dl, &t, box_(), AT_REST);
         let r = box_();
         let left = dl
             .verts

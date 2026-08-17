@@ -395,7 +395,10 @@ impl MenuState {
         self.rect = Rect::new(pos.0, pos.1, w, h);
 
         // ---- unfold -----------------------------------------------------
-        let p = unfold_p(self.opened_t, ctx.t);
+        // The shared resolver (`crate::motion`): reduced motion, a
+        // disabled effect and a zero duration all FREEZE AT FULLY OPEN —
+        // "already open", never "never opens".
+        let p = crate::motion::Effect::of("menu_unfold").one_shot(self.opened_t, ctx.t);
         let visible_h = p * rows_h;
 
         // The box claims the ground it covers ([`crate::pointer`]) before
@@ -514,13 +517,36 @@ impl MenuState {
                     } else {
                         State::Idle
                     };
-                    let style = match class {
-                        Some(cl) => t.class_state(cl, state),
-                        None => StateStyle::RAW,
-                    };
-                    // The highlight wash; idle rows rest on the menu's
-                    // own bed (the window-menu idiom, winframe.rs).
-                    if state != State::Idle {
+                    // Crossfaded under `motion.hover` / `.select` /
+                    // `.disable`. The row's IDLE rung keeps the ladder's
+                    // text — a resting label is a themed colour — but no
+                    // fill: an idle row rests on the menu's own bed (the
+                    // window-menu idiom, winframe.rs), and fading back
+                    // into `idle.fill` would paint a wash under every
+                    // row. So the highlight fades out to nothing, and at
+                    // rest its alpha is exactly zero.
+                    let style: StateStyle = crate::motion::state_ink(
+                        "menu.item",
+                        r,
+                        state,
+                        ctx.t,
+                        |s| {
+                            let ink = crate::view::surface::StateInk::from(match class {
+                                Some(cl) => t.class_state(cl, s),
+                                None => StateStyle::RAW,
+                            });
+                            match s {
+                                State::Idle => crate::view::surface::StateInk {
+                                    fill: crate::theme::Color::TRANSPARENT,
+                                    ..ink
+                                },
+                                _ => ink,
+                            }
+                        },
+                    )
+                    .into();
+                    // The highlight wash; a row at rest has none.
+                    if style.fill.a > 0.0 {
                         ctx.dl.rect(r.x, r.y, r.w, r.h, col(style.fill));
                     }
                     if rh >= text_threshold {
@@ -772,57 +798,11 @@ fn grown(r: Rect, min_hit: f32) -> Rect {
     Rect::new(r.x - gw, r.y - gh, r.w + 2.0 * gw, r.h + 2.0 * gh)
 }
 
-/// The unfold progress 0..1 at `now` for a level opened at `opened_t`,
-/// from `motion.menu_unfold`. A one-shot: reduced motion
-/// (`motion.scale = 0`), a disabled effect or a zero duration FREEZE
-/// AT FULLY OPEN — "already open", never "never opens" (the
-/// freeze-at-visible rule; `blink_factor`'s cyclic freeze is not for
-/// one-shots).
-fn unfold_p(opened_t: f64, now: f64) -> f32 {
-    static DUR: OnceLock<TokenId> = OnceLock::new();
-    static ENABLED: OnceLock<TokenId> = OnceLock::new();
-    static SCALE: OnceLock<TokenId> = OnceLock::new();
-    static EASING: OnceLock<TokenId> = OnceLock::new();
-    static DUTY: OnceLock<TokenId> = OnceLock::new();
-    static FLOOR: OnceLock<TokenId> = OnceLock::new();
-    static WORDS: OnceLock<[Option<u16>; 5]> = OnceLock::new();
-    let t = theme::resolved();
-    let scale = t.px(tok(&SCALE, "motion.scale"));
-    if scale <= 0.0 || !t.flag(tok(&ENABLED, "motion.menu_unfold.enabled")) {
-        return 1.0;
-    }
-    let dur = (t.px(tok(&DUR, "motion.menu_unfold.duration_ms")) * scale) as f64;
-    if dur <= 0.0 {
-        return 1.0;
-    }
-    let t01 = (((now - opened_t) * 1000.0 / dur).clamp(0.0, 1.0)) as f32;
-    // The easing, picked by the motion token's word — the board ride's
-    // resolver (deco.rs), applied to this effect's tokens. An
-    // unrecognised word runs linear, the enum's own fallback.
-    let id = tok(&EASING, "motion.menu_unfold.easing");
-    let w = WORDS.get_or_init(|| {
-        ["ease_out", "ease_in", "ease_in_out", "sine", "step"]
-            .map(|word| theme::enum_index(id, word))
-    });
-    let e = Some(t.enum_of(id));
-    if e == w[0] {
-        1.0 - (1.0 - t01) * (1.0 - t01)
-    } else if e == w[1] {
-        t01 * t01
-    } else if e == w[2] {
-        t01 * t01 * (3.0 - 2.0 * t01)
-    } else if e == w[3] {
-        0.5 - 0.5 * (std::f32::consts::PI * t01).cos()
-    } else if e == w[4] {
-        if t01 >= t.px(tok(&DUTY, "motion.menu_unfold.duty")) {
-            1.0
-        } else {
-            t.px(tok(&FLOOR, "motion.menu_unfold.floor"))
-        }
-    } else {
-        t01
-    }
-}
+// The unfold progress used to be resolved here, by a private copy of the
+// easing table over a cache of ENUM INDICES — the pattern scroll.rs
+// documents as broken across a theme swap. `crate::motion::Effect` is
+// that resolver shared, index-cache excised; the freeze-at-visible rule
+// this file first wrote down now lives on `Effect::one_shot`.
 
 // ---------------------------------------------------------------------
 
@@ -850,7 +830,7 @@ mod tests {
     #[test]
     fn joining_the_ladder_moved_no_pixel() {
         use crate::draw::DrawList;
-        use crate::object::elev::tests::{same_picture, the_private_copy};
+        use crate::object::elev::tests::{same_picture, the_private_copy, AT_REST};
         let t = theme::resolved();
         let r = Rect::new(64.0, 40.0, 220.0, 132.0);
         let mut was = DrawList::recording();
@@ -865,7 +845,7 @@ mod tests {
             "menu.border",
         );
         let mut now = DrawList::recording();
-        MenuState::level().draw_in(&mut now, t, r);
+        MenuState::level().draw_in(&mut now, t, r, AT_REST);
         same_picture(&was, &now);
     }
 

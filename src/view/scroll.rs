@@ -51,41 +51,12 @@ pub enum Snap {
     Row(f32),
 }
 
-/// The curve a settle runs on — the five words every `motion.*` effect's
-/// `easing` enum takes, plus the enum's own linear fallback for a word
-/// this build does not know.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Easing {
-    Linear,
-    EaseOut,
-    EaseIn,
-    EaseInOut,
-    Sine,
-    /// `t < duty ? floor : 1`. A step on a one-shot is a hard cut, which
-    /// is a legitimate thing for a theme to ask for.
-    Step { duty: f32, floor: f32 },
-}
-
-impl Easing {
-    /// The eased 0..1 factor at linear progress `t01`.
-    pub fn at(self, t01: f32) -> f32 {
-        let t = t01.clamp(0.0, 1.0);
-        match self {
-            Easing::Linear => t,
-            Easing::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
-            Easing::EaseIn => t * t,
-            Easing::EaseInOut => t * t * (3.0 - 2.0 * t),
-            Easing::Sine => 0.5 - 0.5 * (std::f32::consts::PI * t).cos(),
-            Easing::Step { duty, floor } => {
-                if t >= duty {
-                    1.0
-                } else {
-                    floor.clamp(0.0, 1.0)
-                }
-            }
-        }
-    }
-}
+/// The curve a settle runs on. The enum was born here and moved to
+/// [`crate::motion`] when the third private copy of its word table was
+/// found; re-exported so the type's path in [`ScrollPhysics`] — and in
+/// every host that names it — survives the move. The settle gained
+/// `custom`/`easing_p` in the same step, for free.
+pub use crate::motion::Easing;
 
 /// Everything the physics reads from the theme.
 ///
@@ -137,7 +108,10 @@ impl ScrollPhysics {
             fling_scale: t.px(tok(&FLING, "scroll.fling_scale")),
             glide_halflife_ms: t.px(tok(&HALFLIFE, "scroll.glide_halflife_ms")),
             settle_ms,
-            settle_easing: settle_easing(),
+            // The shared resolver picks the curve by the live theme's
+            // WORD — the settle is a one-shot, so `sine` is policed and
+            // `custom`'s `easing_p` is honoured, both by the one table.
+            settle_easing: crate::motion::Effect::of("scroll_settle").one_shot_easing(),
             motion_scale: t.px(tok(&SCALE, "motion.scale")),
         }
     }
@@ -153,62 +127,30 @@ impl ScrollPhysics {
         } else {
             0.0
         };
+        // The word decides, exactly as it does on the host, because a
+        // word is the one thing both sides of the boundary can compare —
+        // and the word table it feeds is `crate::motion`'s one table.
+        let settle_easing = {
+            let word = sf.word("motion.scroll_settle.easing");
+            let duty = sf.px("motion.scroll_settle.duty");
+            let floor = sf.px("motion.scroll_settle.floor");
+            let p = [
+                sf.px("motion.scroll_settle.easing_p[0]"),
+                sf.px("motion.scroll_settle.easing_p[1]"),
+                sf.px("motion.scroll_settle.easing_p[2]"),
+                sf.px("motion.scroll_settle.easing_p[3]"),
+            ];
+            crate::motion::one_shot_easing_of(&word, duty, floor, p, "scroll_settle")
+        };
         ScrollPhysics {
             wheel_px: sf.px("scroll.wheel_px"),
             fling_scale: sf.px("scroll.fling_scale"),
             glide_halflife_ms: sf.px("scroll.glide_halflife_ms"),
             settle_ms,
-            settle_easing: settle_easing_on(sf),
+            settle_easing,
             motion_scale: sf.px("motion.scale"),
         }
     }
-}
-
-/// The curve a word names. ONE table, reached from both sides: the host
-/// and the plugin were reading the same key through two different
-/// spellings of the same question, and two spellings of one question is
-/// how they come to disagree.
-///
-/// The comparison is by WORD and it is made every time it is asked.
-/// Indices are the tempting alternative and they cannot be cached across
-/// a theme swap — an index only names a word against the schema it was
-/// interned in — and, when the master's declaration carries no `enum:`
-/// list, `theme::enum_index` answers `None` until some theme happens to
-/// use the word, which froze this curve at `linear` for the life of the
-/// process.
-fn easing_of(word: &str, duty: f32, floor: f32) -> Easing {
-    match word {
-        "ease_out" => Easing::EaseOut,
-        "ease_in" => Easing::EaseIn,
-        "ease_in_out" => Easing::EaseInOut,
-        "sine" => Easing::Sine,
-        "step" => Easing::Step { duty, floor },
-        _ => Easing::Linear,
-    }
-}
-
-/// [`settle_easing`] through a [`Surface`]: the word decides, exactly as
-/// it does on the host, because a word is the one thing both sides of
-/// the boundary can compare.
-fn settle_easing_on(sf: &mut impl Surface) -> Easing {
-    let word = sf.word("motion.scroll_settle.easing");
-    let duty = sf.px("motion.scroll_settle.duty");
-    let floor = sf.px("motion.scroll_settle.floor");
-    easing_of(&word, duty, floor)
-}
-
-/// `motion.scroll_settle.easing` on the host, through the same memoised
-/// word every role binding is read through.
-fn settle_easing() -> Easing {
-    static EASING: OnceLock<TokenId> = OnceLock::new();
-    static DUTY: OnceLock<TokenId> = OnceLock::new();
-    static FLOOR: OnceLock<TokenId> = OnceLock::new();
-    let t = theme::resolved();
-    easing_of(
-        &crate::ui::theme_word(tok(&EASING, "motion.scroll_settle.easing")),
-        t.px(tok(&DUTY, "motion.scroll_settle.duty")),
-        t.px(tok(&FLOOR, "motion.scroll_settle.floor")),
-    )
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -2707,6 +2707,38 @@ being told what to change.
 `custom` exists because an author will eventually want a specific overshoot, and it is
 deliberately the awkward one so it is not the default.
 
+The shared motion resolver these words run through is `src/motion.rs` (`Easing`,
+`Effect`, `Crossfade`) — the resolver `deco.rs` used to promise. It is where `easing_p`
+has its reader, where the word is compared as a WORD on every ask (an enum-index cache
+does not survive a theme swap), and where a one-shot that writes `sine` is warned once
+and run linear.
+
+**The state fades — `hover`, `press`, `select`, `disable` — live in the same file, in
+one registry**, and nothing above it carries a byte of them. Almost every control in the
+toolkit is a free function handed a rectangle and a bool, so giving each one somewhere to
+keep a fade would mean giving every CALLER somewhere to keep the control. Instead the
+registry is keyed by the interaction CLASS and the RECTANGLE, which a call site already
+holds: `motion::state_mix` answers where a control stands between its rungs, and
+`motion::state_ink` blends the ink. Three rules make the key honest — a key seen for the
+first time is **born on its rung** with no fade owed (so a scrolling row or a dragged
+thumb reads instantly rather than smearing), a transition **needs a clock that moved**
+(two asks at one `now` are one frame asked twice), and an entry **not asked about is
+swept** (the map is bounded by what is on screen). At rest a track is a hash lookup and
+four compares: no token is read, nothing allocates, and nothing asks for a redraw —
+`motion::pending` answers false the moment the last fade lands.
+
+Only the TIME of arrival is animated, never the colours arrived at: a settled mix reads
+one rung and returns it untouched, so `motion.scale = 0` and a disabled effect both draw
+the picture a build without any of this draws. The RESTING rung is the caller's to state
+(`Surface::class_ink_resting`), because a list row, a table heading and a menu item draw
+nothing at rest while `state.idle.fill` is a visible wash — they hand in a clear idle and
+the highlight fades out to nothing.
+
+`motion.focus` is not a ladder rung (§5.21 says so), so it rides `motion::gate`, a scalar
+`Crossfade` keyed the same way; `focus_ring::draw_faded` is its reader, and it is called
+every frame — ring or no ring — because a band drawn only while focused has nothing left
+on screen to fade away.
+
 **Six prohibitions, enforced by the grammar** (there is no token for them), each with
 its reason:
 

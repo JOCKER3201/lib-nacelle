@@ -342,7 +342,10 @@ pub fn strip<S: Surface>(
         None => (None, 0),
     };
     for (i, cell) in cells.iter().enumerate() {
-        let ink = sf.class_state("tab", st.rung(i));
+        // The rung reached over time: a tab does not snap between chosen
+        // and resting, it crossfades under `motion.select` (and under
+        // `motion.hover` when only the pointer moved).
+        let ink = sf.class_ink("tab", st.rung(i), *cell);
         // A sheared tab is a quad; an unsheared one is the family's
         // rounded or chamfered rect, like every other control.
         let q = quad(cell, look.skew);
@@ -438,11 +441,9 @@ pub fn draw_focusable(
         .as_deref_mut()
         .map(|fc| fc.register(id, r, Caps::GREEDY_ARROWS));
     let cells = draw(ctx, r, labels, st);
-    if f.map_or(false, |f| f.ring) {
-        if let Some(cell) = cells.get(st.active) {
-            let skew = theme::resolved().px(tok(&SKEW, "tab.skew")).max(0.0);
-            focus_ring::draw_quad(ctx, quad(cell, skew));
-        }
+    if let Some(cell) = cells.get(st.active) {
+        let skew = theme::resolved().px(tok(&SKEW, "tab.skew")).max(0.0);
+        focus_ring::draw_quad_faded(ctx, quad(cell, skew), f.map_or(false, |f| f.ring));
     }
     cells
 }

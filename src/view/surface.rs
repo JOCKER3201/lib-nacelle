@@ -49,11 +49,50 @@ pub struct StateInk {
 }
 
 impl StateInk {
+    /// Nothing at all: no colour, no ring, no halo.
+    ///
+    /// The resting rung of a control that draws NOTHING at rest — a list
+    /// row, a table heading, a menu item's wash. The master's `idle.fill`
+    /// is not transparent, so a fade out of hover that ran toward the
+    /// ladder's idle would leave a wash under every resting row; these
+    /// controls hand this in as their idle instead and keep the pixels
+    /// they have always drawn (see [`crate::motion::state_ink`]).
+    pub const CLEAR: StateInk = StateInk {
+        fill: Color::TRANSPARENT,
+        edge: Color::TRANSPARENT,
+        text: Color::TRANSPARENT,
+        glyph: Color::TRANSPARENT,
+        edge_width: 0.0,
+        glow_radius: 0.0,
+        glow_alpha: 0.0,
+        elevation: 0.0,
+    };
+
     /// What a control looks like when no theme says otherwise — the
     /// engine's own raw rung, so a build with no such class still draws
     /// something honest instead of nothing.
     pub fn raw() -> StateInk {
         StateInk::from(theme::bake::StateStyle::RAW)
+    }
+}
+
+/// The shape crossing back to the bake's own vocabulary, for a caller
+/// whose signature was written in it — [`crate::object::button::dress`]
+/// answers a `StateStyle` and its callers read one. The two structs have
+/// always held the same eight fields; this is the second direction of a
+/// conversion that already existed, not a second shape.
+impl From<StateInk> for theme::bake::StateStyle {
+    fn from(s: StateInk) -> theme::bake::StateStyle {
+        theme::bake::StateStyle {
+            fill: s.fill,
+            edge: s.edge,
+            text: s.text,
+            glyph: s.glyph,
+            edge_width: s.edge_width,
+            glow_radius: s.glow_radius,
+            glow_alpha: s.glow_alpha,
+            elevation: s.elevation,
+        }
     }
 }
 
@@ -264,6 +303,46 @@ pub trait Surface {
         self.word(name) == word
     }
     fn class_state(&mut self, class: &str, state: State) -> StateInk;
+
+    /// [`Surface::class_state`] with the rung reached over TIME rather
+    /// than at once: the ink of the control drawn as `class` in `r`,
+    /// crossfading toward `state` under `motion.hover` / `.press` /
+    /// `.select` / `.disable`.
+    ///
+    /// A DEFAULT method, and deliberately so: the fades live in one
+    /// registry ([`crate::motion::state_mix`]) keyed by the class and the
+    /// box, so no surface has to implement anything, no view has to carry
+    /// a field, and no caller of a view has to hold one for it. The one
+    /// argument added is the rectangle the caller was already drawing in.
+    ///
+    /// At rest this is [`Surface::class_state`] and nothing else — one
+    /// lookup, the ladder's own ink, no token read by the registry at
+    /// all. Under `motion.scale = 0` it is that at every instant.
+    fn class_ink(&mut self, class: &str, state: State, r: Rect) -> StateInk {
+        let now = self.now();
+        crate::motion::state_ink(class, r, state, now, |s| self.class_state(class, s))
+    }
+
+    /// [`Surface::class_ink`] for a control whose RESTING look is not the
+    /// ladder's idle rung but nothing at all — a list row, a table
+    /// heading, a selectable script row. `rest` is what Idle means to
+    /// this caller, and it is what the fade runs back to; passing
+    /// [`StateInk::CLEAR`] keeps a resting view exactly as unpainted as
+    /// it is today.
+    fn class_ink_resting(
+        &mut self,
+        class: &str,
+        state: State,
+        r: Rect,
+        rest: StateInk,
+    ) -> StateInk {
+        let now = self.now();
+        crate::motion::state_ink(class, r, state, now, |s| match s {
+            State::Idle => rest,
+            s => self.class_state(class, s),
+        })
+    }
+
     /// Bumped on every theme swap. A view caching resolved values
     /// invalidates when this moves.
     fn epoch(&mut self) -> u32;

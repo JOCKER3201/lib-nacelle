@@ -32,7 +32,13 @@
 //!   lowers the last answered pixel, and the px floor holds it up when
 //!   the fraction collapses;
 //! * elements outside the frame REGISTER NOTHING: the focus chain holds
-//!   exactly the elements reported whole, and nothing else.
+//!   exactly the elements reported whole, and nothing else;
+//! * the CORD AND THE OFFSET COMPOSE as `stowed + min(p·D, d_i) −
+//!   offset` and in that order — scrolling a half-open list translates
+//!   the whole column, piled slats and landed ones alike, and the cord
+//!   still reaches the end. Every other stage here draws at `p = 1.0`,
+//!   where the two candidate compositions agree; this one separates
+//!   them.
 //!
 //! One test in a binary of its own: the resolved theme is process-wide
 //! (§7.1 hands every draw path the same `&'static ResolvedTheme`), and
@@ -102,12 +108,24 @@ fn frame(n: usize) -> (f32, f32, f32) {
     (pitch, content, content.min(cap))
 }
 
-/// One drawing of the fully open blind: the register it wrote and the
-/// rectangles it handed back, through the caller's own scroll state and
-/// (optionally) under a foreign clip.
+/// One drawing of the FULLY OPEN blind — [`shoot_at`] at `p = 1.0`,
+/// which is the progress every stage but the composition one wants.
 fn shoot(
     fonts: &mut FontSystem,
     n: usize,
+    sv: &mut ScrollView,
+    clip: Option<Rect>,
+) -> (DrawList, Vec<(Rect, bool)>) {
+    shoot_at(fonts, n, 1.0, sv, clip)
+}
+
+/// One drawing of the blind at unfold progress `p`: the register it
+/// wrote and the rectangles it handed back, through the caller's own
+/// scroll state and (optionally) under a foreign clip.
+fn shoot_at(
+    fonts: &mut FontSystem,
+    n: usize,
+    p: f32,
     sv: &mut ScrollView,
     clip: Option<Rect>,
 ) -> (DrawList, Vec<(Rect, bool)>) {
@@ -130,7 +148,7 @@ fn shoot(
             focus: None,
             tips: None,
         };
-        dropdown::accordion(&mut ctx, ANCHOR, ITEM_H, &names, 1.0, &AccordionStyle::default(), sv)
+        dropdown::accordion(&mut ctx, ANCHOR, ITEM_H, &names, p, &AccordionStyle::default(), sv)
     };
     match clip {
         Some(c) => assert_eq!(
@@ -186,6 +204,109 @@ fn a_long_list_scrolls_inside_its_frame() {
     a_foreign_clip_and_the_frame_cut_together(&mut fonts);
     the_tokens_move_the_frame(&mut fonts);
     elements_outside_the_frame_join_no_chain(&mut fonts);
+    the_cord_and_the_offset_compose(&mut fonts);
+}
+
+/// THE TWO LAWS COMPOSE, AND IN ONE ORDER. The unfold (`min(p·D, d_i)`,
+/// the two-phase cord) is written in the BODY's coordinates and the
+/// offset slides the FRAME over that body, so element `i` stands at
+/// `stowed + min(p·D, d_i) − offset`. Scrolling a HALF-OPEN list
+/// therefore translates the whole column rigidly: a slat still piled
+/// under the cord rides the wheel exactly as far as one that has landed.
+///
+/// The negative control is the other composition, `min(p·D, d_i −
+/// offset)`. Under it a landed slat would still stand at `d_i − offset`
+/// — so every stage of this file, which draws at `p = 1.0` where every
+/// slat has landed, would pass unchanged — while a PILED one stayed at
+/// `p·D`, unmoved by the wheel, and the cord would run short by the
+/// offset so the list jammed before its end. Nothing on either side of
+/// the merge that produced this law measured it: the scroll stages are
+/// all at rest, and the blind file's phase stages are a list short
+/// enough never to scroll. This stage is the seam between them.
+fn the_cord_and_the_offset_compose(fonts: &mut FontSystem) {
+    let (pitch, content, body) = frame(LONG);
+    let horizon = ANCHOR.bottom();
+    let stowed = horizon - ITEM_H;
+    let ph = ScrollPhysics::from_theme();
+    // The whole cord: `d_(n-1)`, and `d_i = item_h + gap + pitch·i` is
+    // `pitch·(i+1)`, so the run is `pitch·n`.
+    let total = pitch * LONG as f32;
+    assert!(content > body + 0.5, "the long list stopped scrolling — this stage is vacuous");
+
+    // A payout that leaves the column MID-UNFOLD with both phases on
+    // screen: past a notch and two pitches, so landed slats survive the
+    // scroll above the horizon, and no further than the frame, so what
+    // this stage measures is the law and not the frame's cutting.
+    let notch = ph.wheel_px;
+    let payout = (ITEM_H + notch + 2.0 * pitch).max(body * 0.5).min(body);
+    assert!(
+        payout >= ITEM_H + notch + 2.0 * pitch,
+        "the master's frame ({body} px) is too short to hold a notch ({notch} px) and \
+         two pitches — this stage cannot see both phases at once"
+    );
+    let p = payout / total;
+
+    let (_, still) = shoot_at(fonts, LONG, p, &mut ScrollView::new(), None);
+    let mut sv = ScrollView::new();
+    sv.wheel(1.0, &ph, 0.0);
+    let (_, moved) = shoot_at(fonts, LONG, p, &mut sv, None);
+    let offset = sv.offset();
+    assert!(offset > 1.0, "the wheel did not move the half-open list at all");
+
+    let (mut landed, mut piled) = (0, 0);
+    for i in 0..LONG {
+        let d_i = pitch * (i + 1) as f32;
+        // Where the composition puts this slat, unscrolled.
+        let want = stowed + payout.min(d_i);
+        if still[i].1 {
+            assert!(
+                close(still[i].0.y, want),
+                "element {i} stands at {} mid-unfold where min(payout {payout}, d_i \
+                 {d_i}) says {want}",
+                still[i].0.y
+            );
+        }
+        // …and the wheel moves it by the offset, WHATEVER phase it is
+        // in. Only slats reported whole in both shots: a cut one is
+        // reported at the frame's edge, which is the frame speaking and
+        // not the law.
+        if !still[i].1 || !moved[i].1 {
+            continue;
+        }
+        assert!(
+            close(still[i].0.y - moved[i].0.y, offset),
+            "element {i} moved {} px on an offset of {offset} — a slat must ride the \
+             wheel the same whether it has landed or is still under the cord",
+            still[i].0.y - moved[i].0.y
+        );
+        if d_i <= payout {
+            landed += 1;
+        } else {
+            piled += 1;
+        }
+    }
+    assert!(
+        landed > 0 && piled > 0,
+        "the stage measured {landed} landed and {piled} piled slats — it must see \
+         both phases at once or it rules the wrong composition out of nothing"
+    );
+
+    // AND THE CORD STILL REACHES. The offset is not inside the `min`,
+    // so the payout is untouched by scrolling: fully open and scrolled
+    // to the end, the last slat still lands on the frame's bottom edge
+    // — the jam the wrong composition would cause, measured directly.
+    let mut sv = ScrollView::new();
+    for _ in 0..1000 {
+        sv.wheel(1.0, &ph, 0.0);
+    }
+    let (_, at_end) = shoot_at(fonts, LONG, 1.0, &mut sv, None);
+    let (last, last_full) = at_end[LONG - 1];
+    assert!(
+        last_full && close(last.y + last.h, horizon + body),
+        "scrolled to the end of a fully open list, the last slat is {last:?} against a \
+         frame ending at {} — the cord ran short by the offset",
+        horizon + body
+    );
 }
 
 // ---------------------------------------------------------------------

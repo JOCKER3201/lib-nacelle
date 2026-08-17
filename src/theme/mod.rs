@@ -102,12 +102,25 @@ use cascade::ThemeSource;
 use parse::{Document, LangTag, SectionKind, Sources};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// The master theme. It is the documentation as much as the configuration
 /// (§1.1(8), §5.0b), and it is the schema (see the module docs).
 const DEFAULT_THEME: &str = include_str!("default.theme");
+
+/// The master's own text, for the tests that read it as a DOCUMENT rather
+/// than through the engine.
+///
+/// A resolved theme cannot answer "how many keys does §5.22 declare": the
+/// baker fills every declared token whether the file wrote it or not, and
+/// a section's own arithmetic is a fact about the FILE. The one reader is
+/// `motion::tests::the_catalogue_is_closed_and_counted`, which is what
+/// keeps §5.22's header count and §5.22's body from parting again.
+#[cfg(test)]
+pub(crate) fn master_source() -> &'static str {
+    DEFAULT_THEME
+}
 
 // --------------------------------------------------------------- diagnostics
 
@@ -216,7 +229,41 @@ static RESOLVES: AtomicU32 = AtomicU32::new(0);
 /// Bumped when the theme's CONTENT changes — a load, a mood, a variant — and
 /// never when the viewport does. See [`content_epoch`].
 static CONTENT_EPOCH: AtomicU32 = AtomicU32::new(0);
+/// The live [`Viewport`] as ONE word — `screen_h`'s bits in the high half,
+/// `ui_scale`'s in the low — so a hot path can ask which viewport is
+/// standing without taking the engine's lock. See [`viewport_key`].
+static VIEWPORT_KEY: AtomicU64 = AtomicU64::new(0);
 static DIAGS: OnceLock<Mutex<Arc<ThemeDiagnostics>>> = OnceLock::new();
+
+fn publish_viewport(v: Viewport) {
+    VIEWPORT_KEY.store(
+        ((v.screen_h.to_bits() as u64) << 32) | v.ui_scale.to_bits() as u64,
+        Ordering::Release,
+    );
+}
+
+/// Which viewport the engine is baking for, as an opaque word: equal
+/// between two frames of one screen, different between two screens of
+/// different height or interface scale.
+///
+/// The cheap half of [`set_viewport`]'s question. A caller that needs to
+/// tell one SCREEN from another cannot ask [`epoch`] (it names the bake,
+/// and on a mixed-height desktop it alternates every frame by design) and
+/// must not ask the engine (a mutex per drawn control is a mutex per
+/// control per frame). This is a relaxed-cost atomic load of the numbers
+/// the host itself passed in.
+///
+/// **It names a viewport, not a monitor.** Two identical screens share
+/// one word, because they bake the same and the engine has no reason to
+/// tell them apart. Anything that has to tell THEM apart needs the
+/// host's own word for it — `crate::motion::set_surface` is the first
+/// caller with that problem, and its header carries the reasoning.
+///
+/// The value is opaque on purpose: it is an identity to compare, never a
+/// pair of numbers to compute with.
+pub fn viewport_key() -> u64 {
+    VIEWPORT_KEY.load(Ordering::Acquire)
+}
 
 fn diags_slot() -> &'static Mutex<Arc<ThemeDiagnostics>> {
     DIAGS.get_or_init(|| Mutex::new(Arc::new(ThemeDiagnostics::default())))
@@ -703,6 +750,10 @@ pub fn load_with(req: LoadRequest) -> Arc<ThemeDiagnostics> {
             .and_then(|slot| slot.lock().ok().map(|g| g.viewport))
             .unwrap_or_default()
     });
+    // The word the hot paths read follows the engine's own field, here as
+    // well as in [`set_viewport`] — a load that keeps the running
+    // viewport must not leave the published word naming the last one.
+    publish_viewport(viewport);
     let mut engine = Engine {
         schema,
         sources: src,
@@ -884,6 +935,7 @@ pub fn set_viewport(screen_h: f32, ui_scale: f32) {
         return;
     }
     g.viewport = next;
+    publish_viewport(next);
     let mut out = Vec::new();
     let t = g.bake_active(&mut out);
     let cur = ACTIVE.load(Ordering::Acquire);

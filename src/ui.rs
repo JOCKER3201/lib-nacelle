@@ -62,6 +62,28 @@ pub(crate) fn theme_word(token: TokenId) -> String {
     word_of(token)
 }
 
+/// The same word, LENT rather than handed over.
+///
+/// `theme_word` clones out of the cache, which is right for a caller that
+/// keeps the string — and wrong for the ones that only compare it. Motion
+/// asks for the easing word on every frame of every fade, so a clone there
+/// is an allocation per control per frame; borrowing inside the map's own
+/// borrow costs nothing and cannot outlive it.
+pub(crate) fn with_theme_word<R>(token: TokenId, f: impl FnOnce(&str) -> R) -> R {
+    thread_local! {
+        static WORDS: RefCell<HashMap<(u32, usize, u16), String>> = RefCell::new(HashMap::new());
+    }
+    let i = theme::resolved().enum_of(token);
+    let epoch = theme::epoch();
+    WORDS.with(|w| {
+        let mut w = w.borrow_mut();
+        let word = w
+            .entry((epoch, token.index(), i))
+            .or_insert_with(|| theme::enum_word_of(token).unwrap_or_default());
+        f(word)
+    })
+}
+
 fn word_of(token: TokenId) -> String {
     thread_local! {
         static WORDS: RefCell<HashMap<(u32, usize, u16), String>> = RefCell::new(HashMap::new());
@@ -451,45 +473,15 @@ pub fn figures(fonts: &mut FontSystem, font: u8, px: f32, tabular: bool) -> Figu
 // reduced motion (`motion.scale = 0`) or when the effect is disabled.
 
 /// The 0..1 factor of the cyclic motion effect `motion.<id>` at time `t`.
+///
+/// A door into the shared resolver: [`crate::motion::Effect::cyclic`]
+/// carries the whole contract now — the memoised token lookup, the
+/// warn-once on an id outside the catalogue, the freeze at fully visible
+/// (reduced motion, a disabled effect, a zero period: a separator that
+/// never returns is a content change), and the step curve the cyclic
+/// sources run on.
 pub fn blink_factor(id: &str, t: f64) -> f32 {
-    thread_local! {
-        static MOTION: RefCell<HashMap<String, (TokenId, TokenId, TokenId, TokenId)>> =
-            RefCell::new(HashMap::new());
-    }
-    static SCALE: OnceLock<TokenId> = OnceLock::new();
-    let (period, duty, floor, enabled) = MOTION.with(|m| {
-        *m.borrow_mut().entry(id.to_string()).or_insert_with(|| {
-            let g = |member: &str| {
-                theme::id(&format!("motion.{id}.{member}")).unwrap_or(TokenId::MISSING)
-            };
-            if theme::id(&format!("motion.{id}.period_ms")).is_none() {
-                warn_once(
-                    &format!("blink:{id}"),
-                    &format!("unknown motion effect \"{id}\" — the run stays visible"),
-                );
-            }
-            (g("period_ms"), g("duty"), g("floor"), g("enabled"))
-        })
-    });
-    let th = theme::resolved();
-    let scale = th.px(tok(&SCALE, "motion.scale"));
-    // Reduced motion and a disabled effect both FREEZE the run at fully
-    // visible: a separator that never returns is a content change.
-    if scale <= 0.0 || !th.flag(enabled) {
-        return 1.0;
-    }
-    let p = th.px(period) * scale;
-    if p <= 0.0 {
-        return 1.0;
-    }
-    // The cyclic sources are step-eased (`t < duty ? 1 : floor`); the other
-    // easings belong to one-shot transitions and no run carries those.
-    let phase = ((t * 1000.0) % p as f64) / p as f64;
-    if (phase as f32) < th.px(duty) {
-        1.0
-    } else {
-        th.px(floor).clamp(0.0, 1.0)
-    }
+    crate::motion::Effect::of(id).cyclic(t)
 }
 
 // `role_px` stood here: one `type.<name>.size` read by NAME, with the
@@ -1461,20 +1453,29 @@ pub fn table_surface<S: Surface>(
             if interactive {
                 let hovered = band.contains(mouse.0, mouse.1);
                 let rung = match (pressed_head == Some(i), hovered, sorted) {
-                    (true, _, _) => Some(theme::parse::State::Press),
-                    (_, true, true) => Some(theme::parse::State::SelectedHover),
-                    (_, true, false) => Some(theme::parse::State::Hover),
-                    (_, false, true) => Some(theme::parse::State::Selected),
-                    _ => None,
+                    (true, _, _) => theme::parse::State::Press,
+                    (_, true, true) => theme::parse::State::SelectedHover,
+                    (_, true, false) => theme::parse::State::Hover,
+                    (_, false, true) => theme::parse::State::Selected,
+                    _ => theme::parse::State::Idle,
                 };
-                if let Some(rung) = rung {
-                    let style = sf.class_state("table.head", rung);
-                    if style.fill.a > 0.0 {
-                        sf.rect(band, style.fill);
-                    }
-                    if style.text.a > 0.0 {
-                        text_c = style.text;
-                    }
+                // The resting heading is the one this file has always
+                // drawn: no band behind it, and the head role's own ink
+                // in front. Handing that in as the idle rung is what
+                // lets the wash fade out to nothing and the label fade
+                // back to its resting colour, instead of snapping —
+                // while a table nobody is pointing at keeps every pixel
+                // it had.
+                let rest = crate::view::surface::StateInk {
+                    text: head_c,
+                    ..crate::view::surface::StateInk::CLEAR
+                };
+                let style = sf.class_ink_resting("table.head", rung, band, rest);
+                if style.fill.a > 0.0 {
+                    sf.rect(band, style.fill);
+                }
+                if style.text.a > 0.0 {
+                    text_c = style.text;
                 }
                 if let Some(h) = hits.as_deref_mut() {
                     h.push(band, crate::view::Hit::TableHead { id: view_id, col: i });
@@ -1562,19 +1563,24 @@ pub fn table_surface<S: Surface>(
                 && mouse.1 < body_y + body_h;
             let chosen = selected_key == Some(key.as_str());
             let rung = match (chosen, hovered) {
-                (true, true) => Some(theme::parse::State::SelectedHover),
-                (true, false) => Some(theme::parse::State::Selected),
-                (false, true) => Some(theme::parse::State::Hover),
-                _ => None,
+                (true, true) => theme::parse::State::SelectedHover,
+                (true, false) => theme::parse::State::Selected,
+                (false, true) => theme::parse::State::Hover,
+                _ => theme::parse::State::Idle,
             };
-            if let Some(rung) = rung {
-                // `script.row` — the class the master already declares
-                // for "a selectable row a script widget draws". No new
-                // selection colour exists, or needs to.
-                let style = sf.class_state("script.row", rung);
-                if style.fill.a > 0.0 {
-                    sf.rect(rect, style.fill);
-                }
+            // `script.row` — the class the master already declares for
+            // "a selectable row a script widget draws". No new selection
+            // colour exists, or needs to. A resting row wears the zebra
+            // and nothing else, so its idle rung is CLEAR (list.rs's
+            // reason, in full).
+            let style = sf.class_ink_resting(
+                "script.row",
+                rung,
+                rect,
+                crate::view::surface::StateInk::CLEAR,
+            );
+            if style.fill.a > 0.0 {
+                sf.rect(rect, style.fill);
             }
         }
         // Recorded whatever `select` says: a row rectangle is also how

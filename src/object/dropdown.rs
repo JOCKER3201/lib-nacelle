@@ -31,15 +31,36 @@
 //! THE BLIND. At `p = 0` every element is stowed UNDER the anchor — one
 //! stack, out of sight. At `p = 1` element `i` stands at
 //! `anchor.bottom() + gap + i·(item_h + gap)`. The distance element `i`
-//! travels is therefore `item_h + gap + i·(item_h + gap)`, which grows
-//! LINEARLY with `i`: the last element goes furthest, and while the
-//! stack is still stowed it is the one on top of it — which it is,
-//! because the elements are drawn in index order and the painter's
-//! algorithm puts the last one over its neighbours. Pull the cord and
-//! the slat that was on top of the pile ends up at the bottom of the
-//! blind. The order of the NAMES never changes: `DEFAULT` is the first
-//! element at `p = 0` and the first element at `p = 1`. The blind is how
-//! they arrive, not what they say.
+//! ends up travelling is therefore `d_i = item_h + gap + i·(item_h +
+//! gap)`, which grows LINEARLY with `i`: the last element goes furthest,
+//! and while the stack is still stowed it is the one on top of it —
+//! which it is, because the elements are drawn in index order and the
+//! painter's algorithm puts the last one over its neighbours. Pull the
+//! cord and the slat that was on top of the pile ends up at the bottom
+//! of the blind. The order of the NAMES never changes: `DEFAULT` is the
+//! first element at `p = 0` and the first element at `p = 1`. The blind
+//! is how they arrive, not what they say.
+//!
+//! TWO PHASES, ONE CORD (the owner's ask, 2026-08-16: the stack comes
+//! OUT from under the anchor first, and only then unfolds — the old law
+//! spread every slat from frame zero, so there was nothing between the
+//! click and the spread). The cord is pulled at ONE speed: with
+//! `D = d_(n-1)` the whole run, element `i` stands at
+//! `stowed + min(p·D, d_i)` —
+//!
+//! * PHASE A, `p·D < d_0`: no element has reached its own distance, so
+//!   every `min` answers `p·D` and the stack slides out from under the
+//!   anchor as ONE PILE;
+//! * PHASE B, after: elements whose `d_i` the cord has passed have
+//!   LANDED and stand still; the rest are still the pile, sliding on.
+//!   The first element lands first — the blind fills from the top.
+//!
+//! Where the phases meet is `d_0 / D`, a ratio of travel distances: the
+//! split is GEOMETRY, a fact of the layout the theme has no token for
+//! (§5.22 — the geometry of motion is a layout fact), so
+//! `motion.menu_unfold.duration_ms` covers the whole pull, slide-out and
+//! unfold together. At `p = 1` every `min` answers `d_i` and the resting
+//! picture is exactly what it always was.
 //!
 //! FROM UNDER, NOT OVER. The application draws the anchor and this
 //! library draws the list AFTERWARDS, so without a clip the elements
@@ -73,6 +94,17 @@
 //! the frame is reported with no area and registers nothing: the frame
 //! cuts the hits exactly as it cuts the picture, the same rule the
 //! foreign-clip fix states one paragraph down.
+//!
+//! THE CORD AND THE FRAME ARE TWO LAWS, AND THEY COMPOSE IN THIS ORDER:
+//! `y_i = stowed + min(p·D, d_i) − offset`. The `min` is the unfold and
+//! it is written in the BODY's coordinates — where a slat has got to on
+//! its way out from under the anchor — while the offset is the FRAME
+//! sliding over that finished body. Capping the sum instead (`min(p·D,
+//! d_i − offset)`) would make the cord shorter for every slat the user
+//! has scrolled past, and the list would jam short of its end. The
+//! frame's own arithmetic (`content`, the cap, the bar) is the RESTING
+//! body's, `pitch · n`, and never `p`'s: a list must not shrink its own
+//! scrollbar while it is still opening.
 
 use super::button::ButtonState;
 use super::focus_ring;
@@ -145,6 +177,14 @@ pub struct AccordionStyle {
 /// platform's delta — and this function ticks, clamps and draws the bar.
 /// A list shorter than its frame never moves and never shows one, so a
 /// caller with a three-element list loses nothing by carrying the state.
+///
+/// A host that wants the OPENING ANIMATION should not run a clock of
+/// its own to make this `p`: [`accordion_at`] takes the moment the list
+/// opened and asks `motion.menu_unfold` itself, so the duration, the
+/// curve, `motion.scale` and the enabled flag are all the theme's — a
+/// private `Instant` with a hard-coded ease honours none of them. This
+/// entry stays for the caller that already HAS a progress: the tests,
+/// and a list drawn at rest with `1.0`.
 ///
 /// [`AccordionStyle`] carries the rest: whether the elements join the
 /// focus chain, and which of them is the one already in force. A list
@@ -238,6 +278,11 @@ pub fn accordion(
     // the same place, none of it showing.
     let stowed = horizon - item_h;
     let pitch = item_h + gap;
+    // The whole cord: the last element's travel. `p` runs the cord at
+    // one speed and every element rides it until its own distance is
+    // paid out — the two phases of the header, in one `min`. Safe on
+    // `len() - 1`: the empty list returned above.
+    let total = item_h + gap + pitch * (names.len() - 1) as f32;
     // THE FRAME. The finished body is one pitch per element — the seam
     // under the anchor plus a slat plus a seam, `names.len()` times over
     // — and it may stand no taller than `menu.max_h_frac` of the
@@ -269,12 +314,24 @@ pub fn accordion(
     let at_rest = p >= 1.0;
     let mut ring: Option<Rect> = None;
     for (i, name) in names.iter().enumerate() {
-        // Element `i`'s travel: `item_h` to clear the anchor, the gap
-        // below it, and one pitch for every element that stands above
-        // it. Linear in `i`, so the last one goes furthest — and the
-        // whole column stands `offset` higher than its resting place,
+        // Element `i`'s DESTINATION distance: `item_h` to clear the
+        // anchor, the gap below it, and one pitch for every element that
+        // stands above it — linear in `i`, so the last one goes
+        // furthest. What it has travelled so far is the cord's payout
+        // capped at that distance: one pile while the cord is short of
+        // `d_0` (phase A), landed and still once the cord passes `d_i`
+        // (phase B).
+        //
+        // …and the whole column then stands `offset` higher than that,
         // which is what scrolling a fixed frame over a longer body IS.
-        let y = stowed + p * (item_h + gap + pitch * i as f32) - offset;
+        // The two laws compose in this order and only this order: the
+        // `min` is the UNFOLD, written in the body's own coordinates,
+        // and the offset is the FRAME sliding over the finished body.
+        // Subtracting inside the `min` would cap the scroll instead of
+        // the travel — an element scrolled up would stop at its landing
+        // place and the list would jam a pitch short of its end.
+        let d_i = item_h + gap + pitch * i as f32;
+        let y = stowed + (p * total).min(d_i) - offset;
         let slat = Rect::new(anchor.x, y, row_w, item_h);
         // What of it is inside the frame. The scissor's own arithmetic,
         // repeated here because the rect handed back has to BE the rect
@@ -389,4 +446,34 @@ pub fn accordion(
         }
     }
     out
+}
+
+/// [`accordion`] with the toolkit holding the cord: `opened_t` is the
+/// moment (on `Ctx.t`'s clock) the list was opened, and the unfold
+/// progress is `motion.menu_unfold`'s — duration, easing, `motion.scale`
+/// and `enabled` all honoured by [`crate::motion::Effect::one_shot`],
+/// which freezes AT FULLY OPEN when any of them says "no animation".
+///
+/// This is the entry a host should call every frame while its list is
+/// open (today's hosts keep an `Instant` and a hard-coded ease around
+/// `accordion(p)` — the settings window's `draw_dropdown` is the one to
+/// migrate). Time comes in as a parameter, so nothing here reads a
+/// clock of its own.
+///
+/// `scroll` is [`accordion`]'s, passed straight through: the toolkit
+/// holding the cord does not make the toolkit hold the OFFSET as well.
+/// The offset outlives the frame and the unfold does not — a host that
+/// let this function own the scroll state would find its list jumping
+/// back to the top on every redraw.
+pub fn accordion_at(
+    ctx: &mut Ctx,
+    anchor: Rect,
+    item_h: f32,
+    names: &[String],
+    opened_t: f64,
+    style: &AccordionStyle,
+    scroll: &mut ScrollView,
+) -> Vec<(Rect, bool)> {
+    let p = crate::motion::Effect::of("menu_unfold").one_shot(opened_t, ctx.t);
+    accordion(ctx, anchor, item_h, names, p, style, scroll)
 }

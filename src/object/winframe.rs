@@ -9,9 +9,15 @@
 //! The title bar reads, left to right: the options button, the title
 //! centred on the window, and the minimize, maximize and close
 //! buttons. The options button opens the window menu, anchored to the
-//! icon's corner. The frame draws STATES, never transitions: how a
-//! menu unfolds, how focus fades — that is animation, and animation
-//! belongs to the compositor drawing the frame, not to the frame.
+//! icon's corner. The frame stages NO animation of its own — how a
+//! window opens, how a menu unfolds, how a board rides: that belongs to
+//! whoever draws the frame. What it does do is ask the toolkit's one
+//! state resolver ([`crate::motion::state_ink`]) for its rungs, exactly
+//! as a button in a panel does, so a close button and a button in a
+//! dialog cannot disagree about how long a hover takes to arrive. Under
+//! the owner's ONE WINDOW MODEL there is no separate class of "our"
+//! controls, and this file's own window menu is `menu.item` — the very
+//! class the context menu is drawn on, one object drawn twice.
 //!
 //! The frame computes, draws and answers where a point landed. What a
 //! hit MEANS — moving, closing, focusing, resizing the actual window —
@@ -60,6 +66,37 @@ fn class_state(
         Some(c) => t.class_state(c, state),
         None => theme::bake::StateStyle::RAW,
     }
+}
+
+/// [`class_state`], reached over TIME: the same baked rungs, crossfaded
+/// under `motion.hover` / `.press` / `.select` / `.disable` instead of
+/// snapped between. `r` is the box the control occupies, which is how the
+/// shared registry tells one plate from the next without this file
+/// keeping a single byte between frames.
+///
+/// `bare_idle` is for a control that draws NOTHING at rest — a menu row
+/// sits on the frame's own bed, so its idle rung has no fill and the
+/// highlight fades out to nothing rather than into `state.idle.fill`,
+/// which would paint a wash under every row of the window menu.
+fn class_fade(
+    t: &theme::ResolvedTheme,
+    cell: &'static OnceLock<Option<u16>>,
+    name: &'static str,
+    state: State,
+    r: Rect,
+    now: f64,
+    bare_idle: bool,
+) -> theme::bake::StateStyle {
+    crate::motion::state_ink(name, r, state, now, |s| {
+        let ink = crate::view::surface::StateInk::from(class_state(t, cell, name, s));
+        match (bare_idle, s) {
+            (true, State::Idle) => {
+                crate::view::surface::StateInk { fill: Color::TRANSPARENT, ..ink }
+            }
+            _ => ink,
+        }
+    })
+    .into()
 }
 
 /// Frame measurements. The theme bakes them to device pixels for the
@@ -442,16 +479,24 @@ impl Frame {
         ctx.dl.rect(c.x + c.w, c.y, m.border, c.h, body);
         // Focus swaps the edge role (§5.21): the focused ring is
         // `border.focus`, the resting one the window class's idle edge.
-        let line = if focused {
-            col(t.color(tok(&BORDER_FOCUS, "border.focus")))
-        } else {
-            col(class_state(t, &WINDOW_CLASS, "window", State::Idle).edge)
-        };
+        //
+        // Over `motion.focus`, and NOT as a courtesy: the master's own
+        // note on that entry is "the edge re-role and the subtree dim,
+        // together", so the two ride one gate and cannot come apart.
+        // The gate is keyed on the frame's own box, so a window being
+        // moved or resized is a new key born at its state — a drag is
+        // not a change of focus and must not be drawn as one.
+        let g = crate::motion::gate("winframe.focus", outer, focused, "focus", ctx.t);
+        let line = crate::motion::mix_color(
+            col(class_state(t, &WINDOW_CLASS, "window", State::Idle).edge),
+            col(t.color(tok(&BORDER_FOCUS, "border.focus"))),
+            g,
+        );
         let style = corner_style(t, tok(&MODE, "winframe.corner_mode"), &MODE_IDX);
         let corners = [Corner { style, size: m.cut }; 4];
         let seg = corner_segments(t, &SEGMENTS, m.cut);
         ctx.dl.ring(outer, &corners, seg, m.border, line);
-        panel_edge_glow(ctx.dl, t, outer, &corners, seg, line);
+        panel_edge_glow(ctx.dl, t, outer, &corners, seg, line, ctx.t);
         // The title bar's floor.
         ctx.dl.line(
             outer.x + m.border,
@@ -461,10 +506,19 @@ impl Frame {
             t.px(tok(&RULE_W, "winframe.rule")).max(0.0),
             col(t.color(tok(&TITLEBAR_RULE, "component.titlebar.rule"))),
         );
-        let dim = if focused {
-            1.0
-        } else {
-            t.px(tok(&UNFOCUSED_DIM, "focus.unfocused_dim")).clamp(0.0, 1.0)
+        // The subtree dim, on the same gate as the edge above. The ENDS
+        // ARE EXACT — a resting frame is dimmed by the number the theme
+        // wrote, and a focused one is not dimmed at all — because a
+        // multiplier that arrives at 0.999 is a frame nobody asked for.
+        let dim = {
+            let off = t.px(tok(&UNFOCUSED_DIM, "focus.unfocused_dim")).clamp(0.0, 1.0);
+            if g >= 1.0 {
+                1.0
+            } else if g <= 0.0 {
+                off
+            } else {
+                off + (1.0 - off) * g
+            }
         };
         let bw = t.px(tok(&BUTTON_BORDER, "winframe.button.border")).max(0.0);
         let ink_idle = col(t.color(tok(&WC_IDLE, "component.window_control.idle")));
@@ -475,11 +529,14 @@ impl Frame {
         // the one destructive control and hovers in its own colour.
         let plate = |ctx: &mut Ctx, r: Rect, close: bool| -> Color {
             let hot = ctx.mouse.over(r);
-            let st = class_state(
+            let st = class_fade(
                 t,
                 &ICON_BUTTON,
                 "icon_button",
                 if hot { State::Hover } else { State::Idle },
+                r,
+                ctx.t,
+                false,
             );
             let ring = col(st.edge);
             // `winframe.button.corner` carries the LENGTH alone: the
@@ -499,15 +556,17 @@ impl Frame {
                 bw,
                 ring.alpha(ring.a * dim),
             );
-            let ink = if hot {
-                if close {
-                    ink_close
-                } else {
-                    ink_hover
-                }
-            } else {
-                ink_idle
-            };
+            // The glyph fades on the SAME clock as the plate's ring: it
+            // is a different pair of tokens, not a ladder, so it rides
+            // `motion.hover` through a gate instead. A ring that
+            // brightens over 90 ms above a glyph that snapped would
+            // read as two controls.
+            let g = crate::motion::gate("winframe.control", r, hot, "hover", ctx.t);
+            let ink = crate::motion::mix_color(
+                ink_idle,
+                if close { ink_close } else { ink_hover },
+                g,
+            );
             ink.alpha(ink.a * dim)
         };
         let stroke = t.px(tok(&ICON_STROKE, "winframe.icon.stroke")).max(0.0);
@@ -708,13 +767,16 @@ impl Frame {
         for (i, (_, label)) in MENU.iter().enumerate() {
             let row = menu_row(mr, i);
             let hot = ctx.mouse.over(row);
-            let st = class_state(
+            let st = class_fade(
                 t,
                 &MENU_ITEM,
                 "menu.item",
                 if hot { State::Hover } else { State::Idle },
+                row,
+                ctx.t,
+                true,
             );
-            if hot {
+            if st.fill.a > 0.0 {
                 ctx.dl.rect(row.x, row.y, row.w, row.h, col(st.fill));
             }
             ctx.dl.text_fig(
@@ -758,6 +820,111 @@ fn fit_title(
     tabular: bool,
 ) -> String {
     paint::fit_end_tab(&mut CtxSurface::new(ctx), face, px, text, room, spacing, tabular)
+}
+
+// ------------------------------------------------------- arrive and leave
+
+/// How far a window has ARRIVED, and the box to draw it in while it is
+/// still on its way.
+///
+/// [`present`] is what fills it in; a caller holds it for one frame and
+/// hands the two halves to two different places, which is the whole
+/// reason it is a pair rather than one number.
+#[derive(Clone, Copy, Debug)]
+pub struct Present {
+    /// 0..1 — how much of the window is on screen. Every colour the
+    /// window draws is multiplied by it.
+    ///
+    /// **Exactly 0 means GONE**, and it is the host's signal that a
+    /// closing window may be forgotten: the frame it reaches zero is the
+    /// last frame worth drawing. Exactly 1 means arrived, and at rest it
+    /// is always one of the two — a settled gate reads no token at all.
+    pub alpha: f32,
+    /// The box to DRAW in. The window's own rectangle at rest; a little
+    /// smaller about its own centre while it arrives or leaves.
+    ///
+    /// **Never hit-test this.** See [`present`].
+    pub rect: Rect,
+}
+
+/// How much smaller a window is at the very start of its arrival, as a
+/// fraction of its settled size.
+///
+/// A literal in Rust, deliberately, and §5.22 is the authority: "the theme
+/// does NOT own … the GEOMETRY of the motion. Geometry of motion is a
+/// layout fact … and a theme that could change it could produce an
+/// unhittable menu." The catalogue is CLOSED at eighteen effects of eight
+/// keys, none of which is a distance; a token for this would be a
+/// nineteenth thing to declare, and the sentence above is the reason the
+/// catalogue does not have one.
+///
+/// A theme that wants no growth at all still has a switch, and it is the
+/// one the catalogue gives it: `motion.window_open.enabled = false`
+/// freezes the presence at 1, and a presence of 1 is the rectangle
+/// untouched.
+const ARRIVE_FROM: f32 = 0.96;
+
+/// Where a window stands between "not there" and "there" —
+/// `motion.window_open` and `motion.window_close`, the pair §5.22 has
+/// carried since it was written with nothing reading either.
+///
+/// Call it EVERY frame the window might exist, with `open` false as
+/// readily as true: a window that is only asked about while open has
+/// nothing left on screen to leave. The host keeps drawing until
+/// [`Present::alpha`] reaches exactly 0, and then forgets it.
+///
+/// # The hits stay on the RESOLVED rectangle
+///
+/// [`Present::rect`] is a rigid transform of `r` about its own centre —
+/// the same box, smaller — and it exists only to be drawn into. Every
+/// hit test, every layout, every rectangle handed to a child stays `r`.
+///
+/// This is not fussiness. §5.22's prohibition list has "anything that
+/// affects layout" in it, and the paragraph above it says a theme able to
+/// move the geometry of a motion "could produce an unhittable menu". A
+/// control whose hit box breathed for 180 ms after the window opened
+/// would be that, on the toolkit's side rather than the theme's, and a
+/// pointer arriving during the animation is the ordinary case rather than
+/// the rare one: a window usually opens because the hand is already
+/// moving toward it.
+///
+/// # The two directions are two entries
+///
+/// The master gives the exit its own duration and its own curve — 140 ms
+/// of `ease_in` against 180 ms of `ease_out`, "so the exit accelerates
+/// away" — which is why this runs on [`crate::motion::gate_dir`] rather
+/// than on `gate`.
+pub fn present(ctx: &mut Ctx, r: Rect, open: bool) -> Present {
+    // BORN AT ZERO, whatever `open` says: a window the registry has never
+    // seen did not exist a frame ago, and a host has nothing to draw on
+    // that frame, so it cannot seed the gate by asking with false first.
+    let a = crate::motion::gate_born(
+        "winframe.present",
+        r,
+        open,
+        "window_open",
+        "window_close",
+        0.0,
+        ctx.t,
+    );
+    Present { alpha: a, rect: arrive_rect(r, a) }
+}
+
+/// `r` shrunk about its own centre to [`ARRIVE_FROM`] at `a = 0`, and `r`
+/// itself at `a = 1`.
+///
+/// The ends are EXACT: a settled window is drawn in the rectangle it was
+/// given, not in a rectangle that rounds to it. Everything in this file
+/// is placed against `outer` down to the half pixel, so a frame arriving
+/// at 0.99998 of its size is a chrome that no longer lines up with its
+/// own client area.
+fn arrive_rect(r: Rect, a: f32) -> Rect {
+    if a >= 1.0 {
+        return r;
+    }
+    let k = ARRIVE_FROM + (1.0 - ARRIVE_FROM) * a.clamp(0.0, 1.0);
+    let (w, h) = (r.w * k, r.h * k);
+    Rect::new(r.x + (r.w - w) * 0.5, r.y + (r.h - h) * 0.5, w, h)
 }
 
 #[cfg(test)]

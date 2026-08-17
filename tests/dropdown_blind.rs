@@ -19,10 +19,15 @@
 //! * ONE GAP. `[menu].anchor_gap` stands between the anchor and the
 //!   first element AND between every pair of elements — one number,
 //!   measured in every seam;
-//! * THE BLIND. Element `i`'s travel grows linearly with `i`; at `p→0`
-//!   the whole column is stowed at one place under the anchor; the last
-//!   element travels furthest and is drawn over its neighbours while the
-//!   pile is still a pile;
+//! * THE BLIND. Element `i`'s RESTING travel grows linearly with `i`; at
+//!   `p→0` the whole column is stowed at one place under the anchor; the
+//!   last element travels furthest and is drawn over its neighbours
+//!   while the pile is still a pile;
+//! * TWO PHASES (the owner's ask, 2026-08-16: out from under the anchor
+//!   FIRST, then unfold). The cord pays out at one speed: while
+//!   `p·D < d_0` the column slides as one pile (phase A); past it the
+//!   elements land one after another from the top, each at its own
+//!   `d_i`, while the rest ride on (phase B);
 //! * FROM UNDER. The list clips to the anchor's bottom edge, so an
 //!   element on its way out never crosses the anchor's face;
 //! * WHAT IS RETURNED IS WHAT IS DRAWN. The caller hit-tests the
@@ -333,9 +338,9 @@ fn out_of_one_pile(fonts: &mut FontSystem) {
         );
     }
 
-    // Travel. Element i's distance is `item_h + gap + pitch·i`: linear in
-    // i, so the last goes furthest — which is what makes the top slat of
-    // the pile the bottom row of the blind.
+    // Travel. Element i's RESTING distance is `item_h + gap + pitch·i`:
+    // linear in i, so the last goes furthest — which is what makes the
+    // top slat of the pile the bottom row of the blind.
     let (open, _) = shoot(fonts, 1.0, AWAY);
     let rest = drawn(&open);
     let travel: Vec<f32> = rest.iter().map(|r| r[1] - stowed).collect();
@@ -346,16 +351,53 @@ fn out_of_one_pile(fonts: &mut FontSystem) {
             "element {i} travelled {t} px where a blind gives it {want}"
         );
     }
-    // Strictly increasing, by exactly one pitch each time. THIS is the
-    // negative control against the accordion the owner sent back: an
-    // accordion translates the whole column by one distance, so every
-    // difference here would be zero.
+    // Strictly increasing, by exactly one pitch each time. The negative
+    // control AT REST: the owner sent back the version that arrived as
+    // one translated column and STAYED one — under the 2026-08-16 ask
+    // the one-body ride is legal ONLY as phase A, on the way, and a
+    // column whose differences were still zero here would be a blind
+    // that never unfolded at all.
     for pair in travel.windows(2) {
         assert!(
             (pair[1] - pair[0] - pitch).abs() < 0.01,
             "two neighbours travelled {} apart and one pitch is {pitch} — a column \
-             that moves as one body is the accordion, not the blind",
+             that RESTS as one body is the accordion the owner sent back, not the \
+             blind",
             pair[1] - pair[0]
+        );
+    }
+
+    // PHASE A: while the cord's payout `p·D` is short of the first
+    // element's own distance, every element has travelled exactly the
+    // payout — the column is one pile on its way out from under the
+    // anchor, which is the owner's "come out first, then unfold".
+    let total = pitch * NAMES.len() as f32; // d_(n-1) = item_h + gap + pitch·(n-1)
+    let p_a = (ITEM_H * 0.5) / total; // payout item_h/2: under the anchor still
+    let (sliding, _) = shoot(fonts, p_a, AWAY);
+    let payout = p_a * total;
+    for (i, r) in drawn(&sliding).iter().enumerate() {
+        assert!(
+            (r[1] - stowed - payout).abs() < 0.01,
+            "element {i} travelled {} in phase A where the pile's payout is {payout} — \
+             the stack is spreading before it is out",
+            r[1] - stowed
+        );
+    }
+
+    // PHASE B: with the cord paid out past the first two distances, the
+    // landed elements stand at their OWN `d_i` and everything still
+    // flying is one pile at the payout. The blind fills from the top.
+    let p_b = (2.5 * pitch) / total;
+    let (landing, _) = shoot(fonts, p_b, AWAY);
+    let payout = p_b * total;
+    for (i, r) in drawn(&landing).iter().enumerate() {
+        let d_i = ITEM_H + gap + pitch * i as f32;
+        let want = d_i.min(payout);
+        assert!(
+            (r[1] - stowed - want).abs() < 0.01,
+            "element {i} travelled {} mid-unfold where min(d_i {d_i}, payout {payout}) \
+             says {want}",
+            r[1] - stowed
         );
     }
 
@@ -371,13 +413,17 @@ fn out_of_one_pile(fonts: &mut FontSystem) {
         .collect();
     assert_eq!(labels, NAMES.to_vec(), "the blind reordered the names");
 
-    // Z ORDER. While the pile is a pile the element that travels
+    // Z ORDER. While the pile is a pile the element that ENDS UP
     // furthest is the one on top of it, which in a painter's list means
     // drawn LAST. The register is in that order, so the y of the first
-    // shape of each element rises down the register.
+    // shape of each element never falls down the register. In phase A
+    // the pile rides as ONE body (the owner's 2026-08-16 ask), so at a
+    // hair off zero the tops COINCIDE — equality is the pile being a
+    // pile, and only an element drawn ABOVE its later neighbour would
+    // put the wrong slat on top.
     for (i, pair) in pile.windows(2).enumerate() {
         assert!(
-            pair[1][1] > pair[0][1],
+            pair[1][1] >= pair[0][1],
             "element {} is drawn after element {i} but sits above it — the slat on \
              top of the pile is not the one that comes out furthest",
             i + 1
@@ -459,8 +505,14 @@ fn what_is_returned_is_what_is_drawn(fonts: &mut FontSystem) {
          with destinations, not with what is on the screen"
     );
     // ...and a moving element is reported SHORTER than a resting one,
-    // which is the half that is out from under the anchor.
-    assert!(!half[0].1 && half[0].0.h < ITEM_H, "the first element is not part-way out");
+    // which is the part that is out from under the anchor. The probe
+    // sits in PHASE A — by `p = 0.5` the cord has already landed the
+    // first element at its own distance, so the claim "part-way out"
+    // has to be made while the pile is still emerging.
+    let gap = px_of("menu.anchor_gap");
+    let total = (ITEM_H + gap) * NAMES.len() as f32;
+    let (_, early) = shoot(fonts, (ITEM_H * 0.5) / total, AWAY);
+    assert!(!early[0].1 && early[0].0.h < ITEM_H, "the first element is not part-way out");
 
     // A closed blind is nothing at all: no rectangle to aim at, no
     // command in the register.

@@ -847,24 +847,14 @@ fn shown(s: &str, mask: Option<char>) -> String {
 /// visible when the effect is off or under reduced motion (the
 /// freeze-at-visible rule).
 fn caret_on(model: &mut InputModel, t_now: f64) -> bool {
-    static PERIOD: OnceLock<TokenId> = OnceLock::new();
-    static DUTY: OnceLock<TokenId> = OnceLock::new();
-    static ENABLED: OnceLock<TokenId> = OnceLock::new();
-    static SCALE: OnceLock<TokenId> = OnceLock::new();
     if model.blink.0 != model.edit_seq {
         model.blink = (model.edit_seq, t_now);
     }
-    let t = theme::resolved();
-    let scale = t.px(tok(&SCALE, "motion.scale"));
-    if scale <= 0.0 || !t.flag(tok(&ENABLED, "motion.caret_blink.enabled")) {
-        return true;
-    }
-    let period = (t.px(tok(&PERIOD, "motion.caret_blink.period_ms")) * scale) as f64;
-    if period <= 0.0 {
-        return true;
-    }
-    let phase = ((t_now - model.blink.1) * 1000.0 % period) / period;
-    (phase as f32) < t.px(tok(&DUTY, "motion.caret_blink.duty"))
+    // The shared resolver, fed the FIELD's clock: `cyclic` takes "time"
+    // and this field's time starts at its last accepted edit, which is
+    // what keeps a typing caret always visible. Fully visible — 1.0,
+    // the freeze answer included — is the caret being ON.
+    crate::motion::Effect::of("caret_blink").cyclic(t_now - model.blink.1) >= 1.0
 }
 
 /// The `field.caret_style` word, resolved to a shape.
@@ -960,10 +950,17 @@ pub fn draw(
     } else {
         State::Idle
     };
-    let wash = match *CLASS.get_or_init(|| theme::class_id("field")) {
-        Some(cl) => t.class_state(cl, state),
-        None => StateStyle::RAW,
-    };
+    // Crossfaded, not snapped: `motion.hover` on the way under the
+    // pointer, `motion.disable` — the slowest of the state fades, by the
+    // master's own note — on the way out of the world.
+    let cls = *CLASS.get_or_init(|| theme::class_id("field"));
+    let wash: StateStyle = crate::motion::state_ink("field", r, state, ctx.t, |s| {
+        crate::view::surface::StateInk::from(match cls {
+            Some(cl) => t.class_state(cl, s),
+            None => StateStyle::RAW,
+        })
+    })
+    .into();
     ctx.dl.ring_fill(r, &c, seg, col(wash.fill));
     // The ring: colour from the component group, width stepping up
     // while the field holds the caret (`field.border_focused`).
@@ -1217,9 +1214,7 @@ pub fn draw(
     }
     ctx.dl.pop_clip();
 
-    if f.map_or(false, |f| f.ring) {
-        focus_ring::draw(ctx, r);
-    }
+    focus_ring::draw_faded(ctx, r, f.map_or(false, |f| f.ring));
     FieldDraw { focused, caret: caret_rect }
 }
 

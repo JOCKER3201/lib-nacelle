@@ -82,6 +82,16 @@ pub(crate) fn corner_segments(
 /// names a different tint) at `panel_edge.alpha`, scaled by the one global
 /// knob `glow.alpha_scale`. Default ships it off; a theme opts in, and a
 /// raw master draws nothing because a missing flag reads false.
+///
+/// `now` is the caller's clock (`Ctx.t`) and it drives ONE thing:
+/// `motion.glow_pulse`, §5.22's breathing halo, whose `amplitude` key is
+/// documented as "± swing applied to glow_alpha" and had no reader
+/// anywhere. The swing is on the halo's ALPHA and nothing else — a
+/// breathing RADIUS is a different sprite every frame, and the master's
+/// own prohibition list has "anything that affects layout" for the same
+/// reason. `glow_pulse` ships disabled and so does `glow.panel_edge`, so
+/// the master's picture is what it was, and a theme has to ask twice
+/// before this costs a token read.
 pub(crate) fn panel_edge_glow(
     dl: &mut DrawList,
     t: &theme::ResolvedTheme,
@@ -89,6 +99,7 @@ pub(crate) fn panel_edge_glow(
     c: &[Corner; 4],
     segments: u8,
     edge: Color,
+    now: f64,
 ) {
     static ON: OnceLock<TokenId> = OnceLock::new();
     static RADIUS: OnceLock<TokenId> = OnceLock::new();
@@ -102,6 +113,14 @@ pub(crate) fn panel_edge_glow(
         * t.px(tok(&SCALE, "glow.alpha_scale")))
     .clamp(0.0, 1.0);
     if radius <= 0.0 || alpha <= 0.0 {
+        return;
+    }
+    // The breath, applied last so the theme's own number is the one it
+    // swings about. A frozen pulse — off, no amplitude, or reduced motion
+    // — answers exactly 1.0, and `alpha * 1.0` is `alpha`.
+    let alpha =
+        (alpha * crate::motion::Effect::of("glow_pulse").cyclic_amplitude(now)).clamp(0.0, 1.0);
+    if alpha <= 0.0 {
         return;
     }
     dl.glow_ring(r, c, segments, radius, edge.alpha(alpha), FontSystem::mask_soft_uv());
@@ -187,5 +206,5 @@ pub fn frame(ctx: &mut Ctx, r: Rect) {
         ctx.dl.ring_fill(r, &c, seg, fill);
     }
     ctx.dl.ring(r, &c, seg, width, line);
-    panel_edge_glow(ctx.dl, t, r, &c, seg, line);
+    panel_edge_glow(ctx.dl, t, r, &c, seg, line, ctx.t);
 }
