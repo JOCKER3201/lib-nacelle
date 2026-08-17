@@ -68,11 +68,47 @@ pub const ADD_ATLAS: ImageId = ImageId(u32::MAX - 8);
 /// The vector core's lane (f3 §2.9): a run tagged SHAPE draws through
 /// the renderer's `fs_shape` — every vertex carries the index of one
 /// [`Shape`] record and its `uv` is the local position in px from that
-/// record's centre. Normal blend. The additive and glass lanes
-/// (`SHAPE_ADD`, `SHAPE_GLASS_*`) are still ahead — see the note on
-/// [`DrawList::glow_ring`] for why; this handle alone is what
-/// ring/ring_fill need.
+/// record's centre. Normal blend, and nothing sampled: the record IS
+/// the picture. The additive lane (`SHAPE_ADD`) is still ahead — see
+/// the note on [`DrawList::glow_ring`] for why.
 pub const SHAPE: ImageId = ImageId(u32::MAX - 4);
+/// The vector core's GLASS lanes (f3 §3.3, K3b): a run tagged with one
+/// of these draws through `fs_shape_glass` — the same record, the same
+/// analytic silhouette, and one sample of the pyramid rank the HANDLE
+/// names, composed with the record's tint and the vertex's wash in a
+/// single fragment under a single coverage.
+///
+/// The rank rides in the handle rather than in the record because the
+/// blurred target is a DESCRIPTOR: the renderer binds one per run, so
+/// the rank is already a property of the run and a field would only
+/// have said it twice (the question left open at [`DrawList::glow_ring`],
+/// answered here). Three handles, three rungs of the pyramid, in step
+/// with [`GLASS_RANK_1`]`..3` — a frosted surface's core still rides
+/// those, and only its perimeter band comes here.
+pub const SHAPE_GLASS_1: ImageId = ImageId(u32::MAX - 5);
+pub const SHAPE_GLASS_2: ImageId = ImageId(u32::MAX - 6);
+pub const SHAPE_GLASS_3: ImageId = ImageId(u32::MAX - 7);
+
+/// The shape-lane handle that serves pyramid rank `rank` (1..=3), the
+/// twin of [`glass_rank_handle`]. Out-of-range ranks resolve to the
+/// deepest, as the renderer's own clamp does.
+pub fn shape_glass_handle(rank: u8) -> ImageId {
+    match rank {
+        1 => SHAPE_GLASS_1,
+        2 => SHAPE_GLASS_2,
+        _ => SHAPE_GLASS_3,
+    }
+}
+
+/// The tessellated glass handle for rank `rank` (1..=3) — the core of a
+/// frosted surface, and every frosted surface drawn off the vector lane.
+pub fn glass_rank_handle(rank: u8) -> ImageId {
+    match rank {
+        1 => GLASS_RANK_1,
+        2 => GLASS_RANK_2,
+        _ => GLASS_RANK_3,
+    }
+}
 
 /// Whether a handle is one of the reserved instructions rather than a
 /// registered texture.
@@ -81,10 +117,25 @@ pub fn is_reserved(id: ImageId) -> bool {
 }
 
 /// What the fragment shader reads to compute one shape (f3 §2.5).
-/// std430, 64 B — half a cache line; the index into the frame's array
-/// rides in [`Vertex::shape`]. The fill colour is NOT here: it stays on
-/// the vertex, like every fill before it, so a dot matrix of one
-/// geometry is one record however many colours it wears (f3 §3.4).
+/// std430, 80 B; the index into the frame's array rides in
+/// [`Vertex::shape`]. The fill colour is NOT here: it stays on the
+/// vertex, like every fill before it, so a dot matrix of one geometry
+/// is one record however many colours it wears (f3 §3.4).
+///
+/// **Why it is 80 and not the 64 §2.5 pinned.** K3b (§3.3) put frosted
+/// glass on this lane, and a frosted band composes THREE colours in one
+/// fragment: the tint that multiplies the blurred scene, the wash the
+/// vertex carries, and the border in `stroke_c`. Two of the three were
+/// already here; the third had nowhere to sit. The record has three
+/// spare floats — `arc_half`, `arc_dir`, `_pad` — and a fourth in
+/// `feather`, and a glass Box uses none of them, so the tint COULD have
+/// been read out of that hole. It is not, for one reason: the arc pair
+/// belongs to `Ring` and `feather` to the soft profiles, both under way
+/// on other branches, and a union of two live features in one memory
+/// area is a defect the compiler cannot see and a merge cannot report.
+/// A named field costs 16 B on records that never read it and buys a
+/// meaning that survives being merged with work nobody has written yet.
+/// The array stride stays a multiple of 16, which is all std430 asks.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Shape {
@@ -103,15 +154,24 @@ pub struct Shape {
     pub stroke_c: [f32; 4],
     /// Bits 0-7: [`CornerStyle`] × 4 (tl, tr, br, bl), 2 bits each.
     /// Bits 8-11: [`ShapeKind`]. Bit 12 [`Shape::FILL`], bit 13
-    /// [`Shape::STROKE`]. Bits 14-31 are unclaimed and MUST be zero.
+    /// [`Shape::STROKE`], bit 17 [`Shape::GLASS`]. Bits 14-16 and 18-31
+    /// are unclaimed and MUST be zero — 14 and 15 are spoken for by
+    /// §2.5's table (`OUTSIDE_ONLY`, `GAUSS`, both with the soft
+    /// profiles) and 16 by its kind modifier, which is why glass took
+    /// the first bit past all three rather than the first bit free.
     pub flags: u32,
     /// Half the arc's sweep, radians; >= PI = a full ring. Ring only.
     pub arc_half: f32,
     /// Direction of the arc's middle, radians. Ring only.
     pub arc_dir: f32,
     pub _pad: f32,
+    /// What the blurred scene behind a GLASS band is multiplied by
+    /// before the wash lies over it (§3.3) — the same product `fs_blur`
+    /// draws for the surface's core, so band and core frost alike.
+    /// Meaningless, and zero, without [`Shape::GLASS`].
+    pub tint: [f32; 4],
 }
-const _: () = assert!(std::mem::size_of::<Shape>() == 64);
+const _: () = assert!(std::mem::size_of::<Shape>() == 80);
 const _: () = assert!(std::mem::align_of::<Shape>() == 4);
 
 impl Shape {
@@ -119,6 +179,11 @@ impl Shape {
     pub const FILL: u32 = 1 << 12;
     /// Bit 13: draw the inward stroke band with `stroke_c`.
     pub const STROKE: u32 = 1 << 13;
+    /// Bit 17: the record's `tint` is live and the run's handle names a
+    /// pyramid rank — the fragment samples the blurred scene, tints it,
+    /// and lays the vertex's wash over that before the band goes on.
+    /// A record without this bit reads no texture at all.
+    pub const GLASS: u32 = 1 << 17;
     /// Bits 8-11 carry the [`ShapeKind`].
     pub const KIND_SHIFT: u32 = 8;
     /// Bits 0-11: everything that describes the SILHOUETTE — the four
@@ -158,6 +223,25 @@ pub struct ShapeSpec {
     pub fill: Option<Color>,
     /// Width and colour of the inward band; rides the record.
     pub stroke: Option<(f32, Color)>,
+    /// The frosted layer UNDER the fill, or none for an ordinary
+    /// surface (f3 §3.3). It is part of the spec rather than a call of
+    /// its own because it is part of the same silhouette: one record,
+    /// one edge, one coverage — the whole reason K3b exists.
+    pub glass: Option<Frost>,
+}
+
+/// The blurred scene behind a surface, as a shape carries it (f3 §3.3).
+///
+/// `rank` is the pyramid rung, 1..=3, lightest to deepest blur — the
+/// renderer clamps it against the depth the frame actually wrote, so a
+/// theme asking for more blur than the frame built gets the deepest
+/// there is rather than an unwritten image. `tint` MULTIPLIES what the
+/// rank samples, which is why the master's ladder says it can only
+/// darken; the wash that can brighten is the surface's own fill.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frost {
+    pub rank: u8,
+    pub tint: Color,
 }
 
 /// A bed still open to the parts that belong to it (f3 §2.10).
@@ -217,9 +301,14 @@ pub struct ShapeSpec {
 struct Weld {
     idx: usize,
     /// The bed's own quads, `from..verts` of the vertex buffer — the
-    /// vertices a second fill rewrites the colour of. `verts` doubles
-    /// as the "nothing drawn since" mark.
+    /// geometry a deepening band re-cuts. `verts` doubles as the
+    /// "nothing drawn since" mark.
     from: usize,
+    /// Where the vertices a welding fill RECOLOURS begin. The same as
+    /// `from` for an ordinary bed, and one quad later on a frosted one:
+    /// a frost's core rides the tessellated glass lane and carries the
+    /// TINT, which a wash must lie over and must never overwrite.
+    paint: usize,
     verts: usize,
     runs: usize,
     centre: [f32; 2],
@@ -270,16 +359,13 @@ struct Weld {
 ///
 /// Like the band's own composition, this happens BEFORE the fragment's
 /// `grade()` — one fragment per silhouette is the lane's whole premise.
+///
+/// The arithmetic itself lives in [`crate::sdf::over`], with the rest of
+/// the lane's specification, because the fragment shader needs the same
+/// identity for a wash over frosted glass (§3.3) and two copies of one
+/// composite is how a lane grows two answers.
 fn fill_over(top: [f32; 4], bottom: [f32; 4]) -> [f32; 4] {
-    let (ta, ba) = (top[3], bottom[3]);
-    let a = ta + ba * (1.0 - ta);
-    if a <= 0.0 {
-        // Nothing was laid at all; the colour is unobservable, and the
-        // top's is as good a nothing as any.
-        return top;
-    }
-    let ch = |t: f32, b: f32| (t * ta + b * ba * (1.0 - ta)) / a;
-    [ch(top[0], bottom[0]), ch(top[1], bottom[1]), ch(top[2], bottom[2]), a]
+    crate::sdf::over(top, bottom)
 }
 
 /// How far past the silhouette a shape's quad reaches, so the coverage
@@ -367,6 +453,26 @@ fn frame_rects(centre: [f32; 2], ext: [f32; 2], core: [f32; 2]) -> [[f32; 4]; 5]
         [x0, iy0, ix0, iy1],
         [ix1, iy0, x1, iy1],
     ]
+}
+
+/// Where a split shape's CORE quad goes: the core rect while it has a
+/// colour to carry, and nothing at all — a rectangle of no area, at the
+/// centre — while it has not.
+///
+/// The quad stays in the LAYOUT either way (the cores then four strips,
+/// six vertices each, the arithmetic [`DrawList::respan_frame`] walks
+/// by), because a weld recolours quads and never adds one. What it does
+/// not do is cost fragments: an interior the width of a panel, blended
+/// at alpha zero, is a read-modify-write per pixel for a picture that
+/// does not change. The case that made this necessary is a frosted
+/// surface (§3.3), whose bed is laid empty and filled by a wash that
+/// arrives one call later — or never.
+fn bed_rect(core: [f32; 4], centre: [f32; 2], colour: [f32; 4]) -> [f32; 4] {
+    if colour[3] > 0.0 {
+        core
+    } else {
+        [centre[0], centre[1], centre[0], centre[1]]
+    }
 }
 
 /// One axis-aligned rectangle as six vertices, in `push_quad4`'s own
@@ -1680,6 +1786,7 @@ impl DrawList {
                 kind: ShapeKind::Box,
                 fill: None,
                 stroke: Some((stroke, color)),
+                glass: None,
             });
             return;
         }
@@ -1764,7 +1871,7 @@ impl DrawList {
     /// lane's analytic coverage.
     ///
     /// Widening the record to a stop pair is K4's business, not a merge's:
-    /// it is a change to the 64-byte shape record and to `fs_shape`, on
+    /// it is a change to the shape record itself and to `fs_shape`, on
     /// the far side of a repository boundary, and it wants deciding
     /// together with the NAMED `edge.gradient` slot the theme engine still
     /// bakes no stops for.
@@ -1865,6 +1972,7 @@ impl DrawList {
                 kind: ShapeKind::Box,
                 fill: Some(color),
                 stroke: None,
+                glass: None,
             });
             return;
         }
@@ -1926,7 +2034,13 @@ impl DrawList {
             return;
         }
         let stroke = s.stroke.filter(|&(w, _)| w > 0.0);
-        if s.fill.is_none() && stroke.is_none() {
+        let fill = s.fill;
+        // A FROST is a part in its own right: a record carrying nothing
+        // but glass still draws the blurred scene through its own
+        // silhouette. Without this clause the guard would throw away a
+        // frosted layer that has no wash of its own — which is every
+        // lower rung of a fractional depth.
+        if fill.is_none() && stroke.is_none() && s.glass.is_none() {
             return;
         }
         let snap = self.warp <= 1;
@@ -2004,11 +2118,14 @@ impl DrawList {
             flags |= (c.style as u32) << (2 * i as u32);
         }
         flags |= (s.kind as u32) << Shape::KIND_SHIFT;
-        if s.fill.is_some() {
+        if fill.is_some() {
             flags |= Shape::FILL;
         }
         if stroke.is_some() {
             flags |= Shape::STROKE;
+        }
+        if s.glass.is_some() {
+            flags |= Shape::GLASS;
         }
         let half = [r.w * 0.5, r.h * 0.5];
         let centre = [r.x + half[0], r.y + half[1]];
@@ -2023,16 +2140,36 @@ impl DrawList {
                 && bed.centre == centre
                 && bed.half == half
                 && bed.corner == corner
-                && bed.bits == flags & Shape::SILHOUETTE;
+                && bed.bits == flags & Shape::SILHOUETTE
+                // A FROST never welds onto anything. Two frosted layers
+                // of one outline are the two rungs a fractional depth
+                // mixes between (`glass_fill`), and a run binds ONE
+                // pyramid target — so a fragment cannot read both and
+                // the second layer needs its own record and its own
+                // run. The wash and the border that follow have no such
+                // trouble: they read no target at all.
+                && s.glass.is_none();
             if fits {
                 // A second fill goes into the quad that is already
                 // there. The record keeps its FILL bit — one bed, one
                 // colour, one edge.
-                let fill = match s.fill {
+                let fill = match fill {
                     Some(c) => {
                         let mixed = fill_over(c.to_array(), bed.fill);
-                        for v in &mut self.verts[bed.from..bed.verts] {
+                        for v in &mut self.verts[bed.paint..bed.verts] {
                             v.color = mixed;
+                        }
+                        // An EMPTY bed carries no area ([`bed_rect`]) —
+                        // a frosted surface lays one, because its wash
+                        // comes a call later than the geometry that
+                        // holds it. This is that call: the frame is cut
+                        // again at the band it already has, which opens
+                        // the bed and is the identity on every other
+                        // quad.
+                        if let (Some(band), true) = (bed.frame, bed.fill[3] <= 0.0) {
+                            if mixed[3] > 0.0 {
+                                self.respan_frame(&bed, band);
+                            }
                         }
                         mixed
                     }
@@ -2074,14 +2211,14 @@ impl DrawList {
             arc_half: 0.0,
             arc_dir: 0.0,
             _pad: 0.0,
+            tint: s.glass.map_or([0.0; 4], |g| g.tint.to_array()),
         });
         // The quad reaches one pixel past the silhouette so the AA ramp
         // has somewhere to land (a feather would join this margin). The
         // vertex colour is the fill's — or the stroke's when there is
         // no fill, so §2.10's mix starts from the band's own colour and
         // the band's inner AA edge cannot pick up a foreign tint.
-        let colour = s
-            .fill
+        let colour = fill
             .or(stroke.map(|(_, c)| c))
             .unwrap_or(Color::WHITE)
             .to_array();
@@ -2138,30 +2275,58 @@ impl DrawList {
                 (core[0] * core[1] * 4.0 >= CORE_MIN).then_some((band, core))
             })
             .flatten();
+        // Which lane the strips ride: the plain shape pipeline, or the
+        // one that samples the pyramid rung this frost asked for
+        // (§3.3). One record either way — the rank is the RUN's, because
+        // the blurred target is a descriptor and the renderer binds one
+        // per run.
+        let lane = s.glass.map_or(SHAPE, |g| shape_glass_handle(g.rank));
         let from;
+        let paint;
         match split {
             Some((_, core)) => {
                 let frame = frame_rects(centre, ext, core);
-                // The core FIRST: it is the bed, it joins whatever
-                // ordinary run precedes it, and `from` has to be the
-                // record's first vertex for a wash to recolour all of
-                // them at once.
-                if s.fill.is_some() {
-                    self.run_for(None);
-                    from = self.verts.len();
-                    self.verts
-                        .extend_from_slice(&quad6(frame[0], None, colour, NO_SHAPE));
+                from = self.verts.len();
+                // THE FROST'S OWN CORE, and it goes first because it is
+                // the bottom layer of the three. It rides the
+                // tessellated glass lane exactly as the whole surface
+                // did before K3b — same handle, same tint, same
+                // fragment — because the interior of a silhouette has
+                // no edge to be smooth about, and the picture there is
+                // the one that shipped, to the bit. Only the perimeter
+                // band, where the stair-steps were, moves to the field.
+                if let Some(g) = s.glass {
+                    let tint = g.tint.to_array();
+                    self.run_for(Some(glass_rank_handle(g.rank)));
+                    self.verts.extend_from_slice(&quad6(
+                        bed_rect(frame[0], centre, tint),
+                        None,
+                        tint,
+                        NO_SHAPE,
+                    ));
                     self.seal();
-                } else {
-                    // A band with no bed leaves the interior EMPTY —
-                    // not filled, not shaded, not rasterised at all.
-                    // This is what makes a window frame cost its
-                    // perimeter instead of its area (f3 §7b, risk 1:
-                    // `winframe.rs:453` draws a border over the whole
-                    // window and nothing else).
-                    from = self.verts.len();
                 }
-                self.run_for(Some(SHAPE));
+                // Then the bed: it joins whatever ordinary run precedes
+                // it, and `paint` has to be its first vertex for a wash
+                // to recolour every quad that carries one at once —
+                // every quad from here on, and not the frost below.
+                paint = self.verts.len();
+                if fill.is_some() {
+                    self.run_for(None);
+                    self.verts.extend_from_slice(&quad6(
+                        bed_rect(frame[0], centre, colour),
+                        None,
+                        colour,
+                        NO_SHAPE,
+                    ));
+                    self.seal();
+                }
+                // A band with no bed leaves the interior EMPTY — not
+                // filled, not shaded, not rasterised at all. This is
+                // what makes a window frame cost its perimeter instead
+                // of its area (f3 §7b, risk 1: `winframe.rs:453` draws
+                // a border over the whole window and nothing else).
+                self.run_for(Some(lane));
                 for r in &frame[1..] {
                     self.verts
                         .extend_from_slice(&quad6(*r, Some(centre), colour, idx));
@@ -2169,8 +2334,9 @@ impl DrawList {
                 self.seal();
             }
             None => {
-                self.run_for(Some(SHAPE));
+                self.run_for(Some(lane));
                 from = self.verts.len();
+                paint = from;
                 let step = [ext[0] * 2.0 / n as f32, ext[1] * 2.0 / n as f32];
                 let (x0, y0) = (centre[0] - ext[0], centre[1] - ext[1]);
                 for j in 0..n {
@@ -2239,14 +2405,15 @@ impl DrawList {
         // (`list.rs:354`) — one per row. The geometry check refuses
         // them by itself; nothing here has to know their names.
         // * The GLASS pair (`window.rs:181`/`:184`, `elev.rs:113`/
-        //   `:116`) is one record too, but for a different reason and
-        //   not a good one: `glass_fill` is a tessellated fan on the
-        //   `GLASS_RANK_*` lane, not a shape record at all, so it has
-        //   no AA edge to double — and none to smooth either. See the
-        //   note on [`DrawList::glass_fill`].
+        //   `:116`) is the thirteenth site and the one K3b was for: it
+        //   is one record now, and for the right reason. The frost
+        //   opens the offer with an EMPTY bed, the wash welds into it,
+        //   the border welds after — three calls, one silhouette, one
+        //   coverage over all three layers (§3.3).
         self.weld = (flags & (Shape::FILL | Shape::STROKE) == Shape::FILL).then_some(Weld {
             idx: idx as usize,
             from,
+            paint,
             verts: self.verts.len(),
             runs: self.runs.len(),
             centre,
@@ -2318,6 +2485,9 @@ impl DrawList {
             arc_half: 0.0,
             arc_dir: 0.0,
             _pad: 0.0,
+            // The oblique lane draws ticks, arms and joint discs, and
+            // none of them is a surface: no frost has an orientation.
+            tint: [0.0; 4],
         });
         let ext = [half[0] + AA_PAD, half[1] + AA_PAD];
         let l = [
@@ -2405,24 +2575,41 @@ impl DrawList {
     /// the four strips grow to meet it.
     ///
     /// A rewrite rather than an emission, because the layout is fixed —
-    /// core, top, bottom, left, right, six vertices each — and every
-    /// vertex keeps the colour and the record index it already had.
-    /// Only positions and the uv that trails them move. Where the new
-    /// band swallows the shape whole the core collapses to nothing and
-    /// the two horizontal strips meet on the centre line, which is the
-    /// unsplit quad again: correct, and five quads where one would have
-    /// done. That costs four degenerate triangles on a shape whose
-    /// border is half its size, and it buys the invariant that a bed
-    /// never has to guess how deep a border it has not seen yet will be.
+    /// the cores, then top, bottom, left, right, six vertices each —
+    /// and every vertex keeps the colour and the record index it
+    /// already had. Only positions and the uv that trails them move.
+    /// Where the new band swallows the shape whole the core collapses
+    /// to nothing and the two horizontal strips meet on the centre
+    /// line, which is the unsplit quad again: correct, and five quads
+    /// where one would have done. That costs four degenerate triangles
+    /// on a shape whose border is half its size, and it buys the
+    /// invariant that a bed never has to guess how deep a border it has
+    /// not seen yet will be.
+    ///
+    /// A frosted bed has TWO cores over the one rectangle — the frost
+    /// on the glass lane and the wash over it (§3.3) — so the count is
+    /// read off the geometry rather than assumed. Both take the core
+    /// rect; only the four strips carry a local origin, because only
+    /// they read the field.
     fn respan_frame(&mut self, bed: &Weld, band: f32) {
-        debug_assert_eq!(bed.verts - bed.from, 30, "a frame is five quads");
+        let quads = (bed.verts - bed.from) / 6;
+        debug_assert!(quads >= 5, "a frame is four strips and at least one core");
+        debug_assert_eq!((bed.verts - bed.from) % 6, 0, "a frame is whole quads");
+        let cores = quads - 4;
         let ext = [bed.half[0] + AA_PAD, bed.half[1] + AA_PAD];
         let frame = frame_rects(bed.centre, ext, core_half(bed.half, band));
-        for (i, r) in frame.iter().enumerate() {
+        for i in 0..quads {
             let at = bed.from + i * 6;
             let (colour, shape) = (self.verts[at].color, self.verts[at].shape);
-            let local = (i > 0).then_some(bed.centre);
-            self.verts[at..at + 6].copy_from_slice(&quad6(*r, local, colour, shape));
+            // The cores share the first rect; the strips follow it in
+            // order.
+            let r = if i < cores {
+                bed_rect(frame[0], bed.centre, colour)
+            } else {
+                frame[i - cores + 1]
+            };
+            let local = (i >= cores).then_some(bed.centre);
+            self.verts[at..at + 6].copy_from_slice(&quad6(r, local, colour, shape));
         }
     }
 
@@ -2504,31 +2691,34 @@ impl DrawList {
     /// what the frame actually wrote); 0 is not a rank — a surface with no
     /// glass simply does not call this.
     ///
-    /// **This is NOT on the shape lane, and K3's acceptance criterion
-    /// needs it to be.** The plan's condition for flipping
-    /// `render.vector` reads "smooth corners; no dark rim on a
-    /// translucent panel over glass" (`.gap-program/f3-vector-svg.md`,
-    /// §6 K3), and glass is exactly what stands between the panel and
-    /// its wash in that sentence. What the 2026-08-17 census measured:
-    /// `window.rs:181`/`:184` and `elev.rs:113`/`:116` emit ONE shape
-    /// record, not two — the wash and the border weld, and the fan
-    /// below them is not a record at all. So R4, the dark rim, is not
-    /// what is wrong here. What is wrong is the other half of the
-    /// criterion: this fan is a TESSELLATED polygon with hard edges, so
-    /// after the flip a frosted surface would wear a smooth wash and a
-    /// smooth border over a frost whose own corners are still
-    /// stair-stepped, and the mismatch shows precisely where the eye
-    /// goes — the arc. Today it does not show, because everything on
-    /// screen is equally hard.
+    /// **K3b, and what it moved** (§3.3). Off the vector lane this is
+    /// what it always was: a fan of the silhouette on `GLASS_RANK_*`,
+    /// hard-edged like everything else on the screen, and the picture
+    /// is bit for bit the shipped one. On the lane it becomes the same
+    /// three layers the plan asked for:
     ///
-    /// The fix is not a weld: the fan reads a blurred target through a
-    /// different pipeline, so it cannot join a record that reads none.
-    /// It is the `SHAPE_GLASS_*` lane the [`SHAPE`] handle's note
-    /// already names — the tint on the record, the wash on the vertex,
-    /// the blurred sample and both layers composed in one fragment with
-    /// one coverage. **It belongs to K3**, not after it, because K3 is
-    /// the step that makes the mismatch visible; the plan carries this
-    /// as a named sub-step.
+    /// * the **core** — an axis-aligned quad inside the band, on
+    ///   `GLASS_RANK_*`, the same handle and the same tint. The
+    ///   interior of a silhouette has no edge, so there is nothing
+    ///   there to antialias and nothing there to change;
+    /// * the **band** — four strips on [`SHAPE_GLASS_1`]`..3`, carrying
+    ///   the record this call opens: tint on the record, wash on the
+    ///   vertex, the pyramid sample taken by screen position, and all
+    ///   of it composed in ONE fragment under ONE coverage.
+    ///
+    /// The wash and the border are not drawn here and never were: they
+    /// arrive as the `ring_fill`/`ring` pair every framed surface in
+    /// the toolkit writes (`window.rs`, `elev.rs`), and they WELD into
+    /// the record this call leaves open (§2.10). That is the whole
+    /// point — three draws, one silhouette, one antialiased edge. Drawn
+    /// as three coverages they would leave `c·(1 − c)·a·b` of excess
+    /// alpha on the shared boundary, which is R4 by another name and
+    /// reads as a heavy rim exactly where the eye goes.
+    ///
+    /// The fan could not be welded and was never going to be: it reads
+    /// a blurred target through a different pipeline, so it cannot join
+    /// a record that reads none. What K3b did was give the record a
+    /// pipeline that reads one.
     pub fn glass_fill(&mut self, r: Rect, c: &[Corner; 4], segments: u8, depth: f32, tint: Color) {
         let depth = depth.clamp(1.0, 3.0);
         self.cmd(|| DrawCmd::GlassFill {
@@ -2540,31 +2730,75 @@ impl DrawList {
         if r.w <= 0.0 || r.h <= 0.0 {
             return;
         }
-        // A FRACTIONAL depth is two fans: the lower rank in full, the higher
+        // A FRACTIONAL depth is two layers: the lower rank in full, the higher
         // one at the fraction's alpha, and the blend between them IS the
         // interpolation — the pyramid has three rungs and the renderer binds
         // one target per run, so the mixing that would otherwise need a
         // two-sampler pipeline happens in the blender instead. Exact at full
         // effect opacity; at partial opacity the base leaks in slightly more
         // than a true three-way mix would allow, which is invisible next to
-        // the blur it buys. One fan when the depth lands on a rung.
+        // the blur it buys. One layer when the depth lands on a rung.
+        //
+        // ON THE VECTOR LANE THIS IS THE ONE PLACE A SECOND EDGE
+        // SURVIVES, and it is worth naming rather than discovering: two
+        // rungs are two runs and two records, so their outer boundaries
+        // blend twice, and the excess is the same `c·(1 − c)·a·b` R4
+        // names — with `b` the UPPER rung's alpha, which is the
+        // fraction itself. It vanishes at both ends (a depth on a rung
+        // is one record) and peaks in between, well under the tint's
+        // own alpha; closing it would need one fragment sampling two
+        // targets, which is a descriptor-layout change for every
+        // pipeline in the renderer. Measured, stated, left.
         let lo = depth.floor().clamp(1.0, 3.0);
         let frac = depth - lo;
-        self.glass_fan(r, c, segments, lo as u8, tint);
-        if frac > 0.01 && lo < 3.0 {
+        let two = frac > 0.01 && lo < 3.0;
+        self.glass_layer(r, c, segments, lo as u8, tint, !two);
+        if two {
             let mut t2 = tint;
             t2.a *= frac;
-            self.glass_fan(r, c, segments, lo as u8 + 1, t2);
+            self.glass_layer(r, c, segments, lo as u8 + 1, t2, true);
         }
     }
 
-    /// One fan of one rank — the body `glass_fill` mixes from.
+    /// One frosted layer of one rank, down whichever lane is armed —
+    /// the field's core-and-band on the vector lane, the tessellated
+    /// fan off it.
+    ///
+    /// `bed` says whether this layer is the one the wash will land on,
+    /// and only the TOP layer ever is: a wash lies over all the frost
+    /// there is, so an empty bed under the upper rung would be six
+    /// vertices and a run that can never be given a colour.
+    fn glass_layer(
+        &mut self,
+        r: Rect,
+        c: &[Corner; 4],
+        segments: u8,
+        rank: u8,
+        tint: Color,
+        bed: bool,
+    ) {
+        if self.vector {
+            self.shape_verts(&ShapeSpec {
+                rect: r,
+                corners: *c,
+                kind: ShapeKind::Box,
+                // An EMPTY bed, laid now because a weld recolours quads
+                // and never adds one: the wash arrives in a later call
+                // (`ring_fill`) and needs a quad already in place, cut
+                // to a geometry only this call knows.
+                fill: bed.then_some(Color::TRANSPARENT),
+                stroke: None,
+                glass: Some(Frost { rank, tint }),
+            });
+        } else {
+            self.glass_fan(r, c, segments, rank, tint);
+        }
+    }
+
+    /// One fan of one rank — the tessellated lane's frosted layer, and
+    /// the whole of it before K3b.
     fn glass_fan(&mut self, r: Rect, c: &[Corner; 4], segments: u8, rank: u8, tint: Color) {
-        let img = match rank {
-            1 => GLASS_RANK_1,
-            2 => GLASS_RANK_2,
-            _ => GLASS_RANK_3,
-        };
+        let img = glass_rank_handle(rank);
         let mut pts = std::mem::take(&mut self.scratch_a);
         ring_points(r, c, segments, &mut pts);
         let n = pts.len();
@@ -2845,9 +3079,12 @@ impl DrawList {
     ///   screen, not in a test.
     ///
     /// The cost of leaving it is R6, knowingly: panels antialias before
-    /// their glows do. `fs_shape_glass` waits behind the same door and
-    /// on one more question — the record has no rank field, so a glass
-    /// silhouette would need one or a per-run binding.
+    /// their glows do. Glass went through that door in K3b and the
+    /// question it was held on — where a glass silhouette would keep
+    /// its rank — was answered by the second horn: a per-run binding,
+    /// [`SHAPE_GLASS_1`]`..3`. A glow cannot follow, because its
+    /// obstacle is the BLEND, not the binding: an additive pipeline is
+    /// a pipeline object the tests in that repository cannot exercise.
     pub fn glow_ring(
         &mut self,
         r: Rect,
@@ -3998,6 +4235,7 @@ mod tests {
             kind: ShapeKind::Box,
             fill: Some(ink()),
             stroke: None,
+            glass: None,
         };
         let mut dl = DrawList::new();
         dl.shape(&spec);
@@ -4061,6 +4299,7 @@ mod tests {
             kind: ShapeKind::Box,
             fill: Some(ink()),
             stroke: None,
+            glass: None,
         });
         assert_eq!(dl.shapes()[0].corner, [4.0, 4.0, 3.0, 0.0]);
     }
@@ -4438,6 +4677,7 @@ mod tests {
                 kind: ShapeKind::Box,
                 fill: Some(wash()),
                 stroke: Some((t, ink())),
+                glass: None,
             });
             let mut pair = DrawList::new();
             pair.set_vector(true);
@@ -4449,6 +4689,218 @@ mod tests {
             }
             assert_eq!(once.verts.len(), pair.verts.len());
         }
+    }
+
+    // -----------------------------------------------------------------
+    // K3b — glass on the band (f3 §3.3).
+
+    fn frost() -> Color {
+        Color::rgba8(30, 60, 90, 160)
+    }
+
+    /// How `window::frame` and `elev::Level::draw` spell a frosted
+    /// surface, and the only spelling either of them has: the frost,
+    /// the wash over it, the border over both. Three calls, and after
+    /// K3b one record with one edge.
+    fn frosted(depth: f32, vector: bool, wash_a: bool, border: bool) -> DrawList {
+        let mut dl = DrawList::new();
+        dl.set_vector(vector);
+        let r = Rect::new(10.0, 20.0, 200.0, 100.0);
+        let c = [Corner::round(8.0); 4];
+        dl.glass_fill(r, &c, 6, depth, frost());
+        if wash_a {
+            dl.ring_fill(r, &c, 6, wash());
+        }
+        if border {
+            dl.ring(r, &c, 6, 2.0, ink());
+        }
+        dl
+    }
+
+    /// **The whole of K3b in one assertion.** A frosted surface is ONE
+    /// record — frost, wash and border — so its silhouette is
+    /// antialiased once; its perimeter rides a `SHAPE_GLASS_*` run so
+    /// the frost's own corners are analytic; and its interior still
+    /// rides `GLASS_RANK_*`, carrying the tint, because there is no
+    /// edge in there to be smooth about.
+    #[test]
+    fn a_frosted_surface_is_one_record_and_its_core_is_still_a_glass_run() {
+        let dl = frosted(2.0, true, true, true);
+        assert_eq!(dl.shape_len(), 1, "the wash or the border wrote its own record");
+        let rec = dl.shapes()[0];
+        assert_eq!(rec.flags & Shape::GLASS, Shape::GLASS, "the record is not glass");
+        assert_eq!(rec.flags & Shape::FILL, Shape::FILL);
+        assert_eq!(rec.flags & Shape::STROKE, Shape::STROKE);
+        assert_eq!(rec.tint, frost().to_array(), "the tint did not reach the record");
+        assert_eq!(rec.stroke_c, ink().to_array());
+        // Three runs, in the order the layers stack.
+        let lanes: Vec<Option<ImageId>> = dl.runs.iter().map(|r| r.image).collect();
+        assert_eq!(lanes, vec![Some(GLASS_RANK_2), None, Some(SHAPE_GLASS_2)]);
+        // The frost's core keeps the TINT; every quad above it carries
+        // the wash. A weld that recoloured the core would have washed
+        // the frost away — the whole reason the bed's paint mark is not
+        // its first vertex.
+        assert!(dl.verts[..6].iter().all(|v| v.color == frost().to_array()));
+        assert!(dl.verts[6..].iter().all(|v| v.color == wash().to_array()));
+        assert!(dl.verts[..12].iter().all(|v| v.shape == NO_SHAPE), "the cores");
+        assert!(dl.verts[12..].iter().all(|v| v.shape == 0), "the strips");
+        // Two cores over the one core rect, then the four strips.
+        assert_eq!(dl.verts.len(), FRAME + 6);
+        assert_eq!(dl.verts[0].pos, dl.verts[6].pos);
+        assert_eq!(dl.verts[2].pos, dl.verts[8].pos);
+    }
+
+    /// The rank rides the HANDLE, on both lanes and at every rung — the
+    /// renderer binds one blurred target per run, so a record could
+    /// only have said it twice.
+    #[test]
+    fn every_rung_reaches_its_own_lane() {
+        for (depth, tess, field) in [
+            (1.0, GLASS_RANK_1, SHAPE_GLASS_1),
+            (2.0, GLASS_RANK_2, SHAPE_GLASS_2),
+            (3.0, GLASS_RANK_3, SHAPE_GLASS_3),
+        ] {
+            let dl = frosted(depth, true, true, true);
+            assert!(dl.runs.iter().any(|r| r.image == Some(tess)), "{depth}: no core");
+            assert!(dl.runs.iter().any(|r| r.image == Some(field)), "{depth}: no band");
+            assert!(
+                dl.runs.iter().all(|r| r.image != Some(SHAPE)),
+                "{depth}: a frosted band on the plain shape lane reads no target"
+            );
+        }
+    }
+
+    /// Off the lane nothing moved: the fans, their handles and their
+    /// vertex count are the shipped picture, and no record is written
+    /// at all. The switch is still down in the master, and this is what
+    /// says the picture under it did not change.
+    #[test]
+    fn the_tessellated_frost_is_untouched_by_the_lane_it_did_not_take() {
+        let dl = frosted(2.0, false, true, true);
+        assert_eq!(dl.shape_len(), 0, "a record on the tessellated lane");
+        assert!(dl.runs.iter().all(|r| r.image != Some(SHAPE_GLASS_2)));
+        assert_eq!(dl.runs[0].image, Some(GLASS_RANK_2));
+        // The fan is three vertices per boundary point, as it always
+        // was — the count the ring generator produces for six segments
+        // over four round corners.
+        let mut pts = Vec::new();
+        ring_points(
+            Rect::new(10.0, 20.0, 200.0, 100.0),
+            &[Corner::round(8.0); 4],
+            6,
+            &mut pts,
+        );
+        assert_eq!(dl.runs[0].end as usize, pts.len() * 3);
+    }
+
+    /// A FRACTIONAL depth is two rungs, and the second one may not weld
+    /// onto the first: one run binds one blurred target, so a fragment
+    /// that read both would be a fragment that cannot exist. The wash
+    /// and the border join the UPPER layer, which is the one that lies
+    /// over the other.
+    #[test]
+    fn a_fractional_depth_is_two_frosts_and_the_wash_joins_the_upper() {
+        let dl = frosted(1.5, true, true, true);
+        assert_eq!(dl.shape_len(), 2, "the frosts merged or multiplied");
+        let (lo, hi) = (dl.shapes()[0], dl.shapes()[1]);
+        assert_eq!(lo.tint, frost().to_array());
+        assert_eq!(hi.tint[3], frost().a * 0.5, "the upper rung is not the fraction");
+        // The lower layer carries no wash and no border: they welded
+        // into the upper one, which is the one drawn last.
+        assert_eq!(lo.flags & Shape::STROKE, 0);
+        assert_eq!(hi.flags & Shape::STROKE, Shape::STROKE);
+        let lanes: Vec<Option<ImageId>> = dl.runs.iter().map(|r| r.image).collect();
+        assert_eq!(
+            lanes,
+            vec![
+                Some(GLASS_RANK_1),
+                Some(SHAPE_GLASS_1),
+                Some(GLASS_RANK_2),
+                None,
+                Some(SHAPE_GLASS_2),
+            ],
+            "the two rungs did not stack in order"
+        );
+    }
+
+    /// A frosted bed with no wash over it costs nothing: the quad is in
+    /// the layout, because a weld recolours quads and never adds one,
+    /// but it has no area until a wash gives it something to carry.
+    /// A theme writing `glass.wash = none` is a theme, not a mistake.
+    #[test]
+    fn an_unwashed_frost_lays_a_bed_with_no_area_in_it() {
+        let dry = frosted(2.0, true, false, true);
+        assert_eq!(dry.shape_len(), 1);
+        assert_eq!(dry.verts.len(), FRAME + 6, "the layout lost a quad");
+        let bed = &dry.verts[6..12];
+        assert!(bed.iter().all(|v| v.pos == bed[0].pos), "the bed has area");
+        assert!(bed.iter().all(|v| v.color[3] == 0.0));
+        // …and the frost's core is the one that keeps the interior.
+        assert_ne!(dry.verts[0].pos, dry.verts[2].pos);
+        // The wash opens it, at the band the record already has — onto
+        // the very rectangle the frost's core covers.
+        let wet = frosted(2.0, true, true, true);
+        for i in 0..6 {
+            assert_eq!(wet.verts[i].pos, wet.verts[6 + i].pos, "vertex {i}");
+        }
+    }
+
+    /// The border deepens the band, so BOTH cores give the same ground
+    /// back — the frost's and the wash's. A frost left at the old cut
+    /// would be drawn twice under the strips that grew over it, and a
+    /// tint that multiplies twice is a stain.
+    #[test]
+    fn a_border_welding_onto_a_frost_re_cuts_both_of_its_cores() {
+        let bare = frosted(2.0, true, true, false);
+        let cut = frosted(2.0, true, true, true);
+        for q in [0usize, 1] {
+            let (b, c) = (&bare.verts[q * 6..], &cut.verts[q * 6..]);
+            assert_eq!(c[0].pos, [b[0].pos[0] + 2.0, b[0].pos[1] + 2.0], "quad {q}");
+            assert_eq!(c[2].pos, [b[2].pos[0] - 2.0, b[2].pos[1] - 2.0], "quad {q}");
+        }
+        // The two cores stay on the same rectangle, which is what makes
+        // "the wash lies over the frost" true pixel by pixel.
+        assert_eq!(cut.verts[0].pos, cut.verts[6].pos);
+        assert_eq!(cut.verts[2].pos, cut.verts[8].pos);
+    }
+
+    /// A FROST never joins a bed — not another frost's, and not a
+    /// plain one's. The plain case is the one that could pass unnoticed:
+    /// a caller filling a rect and then frosting the same rect offers a
+    /// bed of exactly the right silhouette, and a frost that took it
+    /// would be composited in as an ordinary fill — no `GLASS` bit, no
+    /// tint, no blurred sample, and the frost simply gone from a
+    /// picture that still draws.
+    #[test]
+    fn a_frost_never_joins_a_bed_that_is_not_its_own() {
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        let r = Rect::new(10.0, 20.0, 200.0, 100.0);
+        let c = [Corner::round(8.0); 4];
+        dl.ring_fill(r, &c, 6, wash());
+        dl.glass_fill(r, &c, 6, 2.0, frost());
+        assert_eq!(dl.shape_len(), 2, "the frost welded into the plate under it");
+        assert_eq!(dl.shapes()[0].flags & Shape::GLASS, 0, "the plate turned to glass");
+        assert_eq!(dl.shapes()[1].flags & Shape::GLASS, Shape::GLASS);
+        assert_eq!(dl.shapes()[1].tint, frost().to_array());
+    }
+
+    /// The register holds INTENT, and the intent of a frosted surface
+    /// is the same three calls whichever lane draws them (level A).
+    #[test]
+    fn the_glass_switch_moves_the_vertices_and_not_the_register() {
+        let scene = |vector: bool| {
+            let mut dl = DrawList::recording();
+            dl.set_vector(vector);
+            let r = Rect::new(10.0, 20.0, 200.0, 100.0);
+            let c = [Corner::round(8.0); 4];
+            dl.glass_fill(r, &c, 6, 1.5, frost());
+            dl.ring_fill(r, &c, 6, wash());
+            dl
+        };
+        let (old, new) = (scene(false), scene(true));
+        assert_eq!(dump(&old), dump(&new));
+        assert_ne!(old.verts.len(), new.verts.len());
     }
 
     // -----------------------------------------------------------------
