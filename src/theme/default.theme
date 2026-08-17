@@ -952,9 +952,19 @@ inverse_mode = swap # enum: swap | tint
                     # DISCOVERED list would never contain a word the master
                     # itself does not write; swap exchanges fg and bg, tint
                     # washes the cell instead
-cursor.style = block
-                    # the caret's shape; images 1-3; one of block | beam |
-                    # underline
+cursor.style = block # enum: block | beam | underline
+                    # the caret's shape; images 1-3; the vocabulary is on
+                    # the key's own line for the reason term.inverse_mode
+                    # gives: a DISCOVERED list holds only the words some
+                    # theme has already written, so `beam` had no index at
+                    # all under the master and the theme editor's live
+                    # preview of it answered `block` (measured
+                    # 2026-08-17). `block` covers the cell and the glyph
+                    # is laid back over it; the other two stand beside the
+                    # glyph and are cut from terminal.cursor.bar_w and
+                    # terminal.cursor.underline_h / .underline_gap, one
+                    # section down with the rest of the grid's geometry.
+                    # `beam` and `bar_w` name the same shape
 cursor.mode = invert
                     # how the caret combines with the glyph under it; -;
                     # one of invert | tint. A tinted cursor over a glyph can
@@ -4867,15 +4877,17 @@ edge = right                        # which side of the content the bar sits on 
 # =========================================================================
 [terminal]
 pad = 1.5u                          # padding between the terminal's border and the cell grid · image 3 · len (u) · 8.1 px; today vh(0.74)
-cell_font = 2.9u                    # the cell font's size before the user's TermFontSize multiplier · image 3 · len (u) · 15.7 px; today vh(1.45)
+cell_font = 2.9u                    # the cell font's size before the user's TermFontSize multiplier · image 3 · len (u) · 15.7 px, the same number the ABI used to write as vh(1.45); term::Grid::measure multiplies TermFontSize over it, so the user scales this rather than replacing it
 # TODO(default): 5.25 spells this `terminal.min_px`; 3.2's px rule reads
 # "ends _min_px". `terminal.cell_font_min_px` would obey the rule literally
 # and be found by the same prefix search. Spec spelling kept — lead to pick.
+# Until it is picked the bake cannot pair the two by name, so term::Grid
+# applies this floor to cell_font by hand.
 min_px = 8px                        # absolute floor for cell_font · image 3 · device px · companion of terminal.cell_font (3.2)
-line_height = 1.00                  # a multiplier on the FONT's own metrics, never a synthetic 1.3 · image 3 · f · -
-cursor.underline_h = @stroke.thin   # thickness of an underline cursor · image 3 · str · today a flat 1.0
-cursor.underline_gap = 0.3u         # gap between the baseline and that underline · image 3 · len (u) · 1.6 px; today a flat 1.5
-cursor.bar_w = @stroke.thin         # width of a bar cursor · image 3 · str · @stroke.thin
+line_height = 1.00                  # a multiplier on the FONT's own metrics, never a synthetic 1.3 · image 3 · f · 1.00 is the face's own line box, which is what a grid that must agree with the PTY wants; more opens the rows and the air lands under the glyph
+cursor.underline_h = @stroke.thin   # thickness of an underline cursor · image 3 · str · read when term.cursor.style = underline; was a flat 1.0
+cursor.underline_gap = 0.3u         # gap between the cell's FLOOR and that underline · image 3 · len (u) · 1.6 px; measured from the floor and not from the baseline, so a caret and an SGR-4 underline sit on one line — this line used to say baseline and cell_underline_gap below never did
+cursor.bar_w = @stroke.thin         # width of a bar cursor — the shape term.cursor.style calls `beam`; the word and the key are two of its usual names, not two shapes · image 3 · str · @stroke.thin
 cell_underline_h = @stroke.thin     # thickness of an underlined CELL (SGR 4) — the cursor's underline is cursor.underline_h · image 3 · str · shell/lib.rs:316's flat 1.0; a theme that thickens its rules must thicken this one too
 cell_underline_gap = 0.3u           # gap between the cell's floor and that underline · image 3 · len (u) · 1.6 px; today a flat 1.5
 wheel_lines = 3                     # lines scrolled per wheel notch · image 3 · n · -

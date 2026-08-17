@@ -58,6 +58,15 @@ const CACHED: &[(&str, &str, &str, &[&str])] = &[
     // Fixed here: term.rs caches `tint` (`FLAG_INVERSE`), a word the
     // master does not write.
     ("term", "inverse_mode", "term.inverse_mode", &["swap", "tint"]),
+    // Fixed 2026-08-17 (audit Z17), and by the OTHER half of the hazard:
+    // the shell widget reads this one as a WORD rather than as a cached
+    // index, so a theme FILE writing `beam` always arrived — but a
+    // discovered list holds no index for a word no theme has written
+    // yet, and the theme editor's live preview parses against the
+    // schema it already has. Previewing `beam` therefore answered
+    // `block`, silently, which is the whole of what a shape control on
+    // the THEMES page would have done.
+    ("term", "cursor.style", "term.cursor.style", &["block", "beam", "underline"]),
     // Fixed here: menu.rs caches `grow` (`act_on`). This one was already
     // safe by accident — `grow` IS the master's own word, so a discovered
     // list put it at 0 on every build — but nothing at the call site said

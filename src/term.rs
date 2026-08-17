@@ -163,6 +163,92 @@ fn xterm_gen(idx: u8) -> Color {
     }
 }
 
+// ------------------------------------------------------ the cell's measure
+
+/// The widest grid this build will report, in either axis.
+///
+/// Not a look and not a theme's business: the cells cross the plugin ABI
+/// in one buffer, and a window whose font measured almost nothing must
+/// not be able to ask for a hundred thousand columns of it. A theme that
+/// wants a denser grid says so with `terminal.cell_font`.
+pub const GRID_MAX: f32 = 4096.0;
+
+/// One terminal cell, measured from the theme.
+///
+/// The emulator counts columns and rows, everything that draws counts
+/// pixels, and this is the single conversion between the two — so there
+/// is one place a theme can move it from. Three tokens decide it:
+///
+/// * `terminal.cell_font` — the size the cell's face is set at. It is
+///   the BASE, not the answer: the user's `TermFontSize=` multiplier
+///   rides on top of it, because a preference scales what the theme
+///   chose rather than standing in for it.
+/// * `terminal.min_px` — the floor under that product, so a theme that
+///   writes a tiny size (or a user who scales one down) still leaves a
+///   grid a person can read. §5.25 spells this key without the
+///   `cell_font` prefix that §3.2's `_min_px` law would need for the
+///   bake to pair the two automatically, so it is applied by hand here;
+///   the master's own TODO records the spelling and who has to pick.
+/// * `terminal.line_height` — a multiplier on the FONT's own line box,
+///   never a synthetic figure. At 1.0 the grid is exactly the metrics
+///   the face declares, which is what a grid that has to agree with the
+///   PTY wants; a theme that wants air between rows writes more, and the
+///   air lands below the glyph, where the cell's own underline already
+///   sits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grid {
+    /// The px the cell's glyphs are rasterised at.
+    pub px: f32,
+    /// One cell's width: the mono face's own advance at `px`.
+    pub cell_w: f32,
+    /// One cell's height: the face's line box times `terminal.line_height`.
+    pub cell_h: f32,
+    /// The baseline's drop from the top of the cell, at `px`.
+    pub ascent: f32,
+}
+
+impl Grid {
+    /// Measure the grid this theme asks for. `user_scale` is the user's
+    /// own `TermFontSize=` multiplier, which stands ABOVE the token.
+    pub fn measure(fonts: &mut crate::font::FontSystem, user_scale: f32) -> Grid {
+        static CELL_FONT: OnceLock<TokenId> = OnceLock::new();
+        static MIN_PX: OnceLock<TokenId> = OnceLock::new();
+        static LINE_HEIGHT: OnceLock<TokenId> = OnceLock::new();
+        let t = theme::resolved();
+        let px = (t.px(tok(&CELL_FONT, "terminal.cell_font")) * user_scale)
+            .max(t.px(tok(&MIN_PX, "terminal.min_px")));
+        let (ascent, line_h) = fonts.line_metrics(crate::font::FONT_MONO, px);
+        Grid {
+            px,
+            // The two floors are arithmetic, not a minimum size: `cols`
+            // and `rows` divide by these numbers, and a cell narrower
+            // than one pixel is a division a grid cannot survive.
+            cell_w: fonts.mono_advance(px).max(1.0),
+            cell_h: (line_h * t.px(tok(&LINE_HEIGHT, "terminal.line_height"))).max(1.0),
+            ascent,
+        }
+    }
+
+    /// How many whole columns fit across `w` pixels.
+    pub fn cols(&self, w: f32) -> u32 {
+        span(w, self.cell_w)
+    }
+
+    /// How many whole rows fit down `h` pixels.
+    pub fn rows(&self, h: f32) -> u32 {
+        span(h, self.cell_h)
+    }
+}
+
+/// A grid is at least two cells on an axis — one column is not a
+/// terminal, and zero is a size the emulator divides by — and never more
+/// than [`GRID_MAX`]. Written as `max` then `min` rather than `clamp`
+/// because a measurement that came out NaN must land on the floor, and
+/// `clamp` panics on it where `f32::max` answers the other operand.
+fn span(extent: f32, cell: f32) -> u32 {
+    (extent / cell).floor().max(2.0).min(GRID_MAX) as u32
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum CellColor {
     Default,

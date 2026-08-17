@@ -608,13 +608,6 @@ extern "C" fn h_panel_count() -> u32 {
 
 const CELL_BYTES: usize = std::mem::size_of::<CellC>();
 
-/// A grid no window this program can open will reach. It exists so that
-/// a nonsense rectangle cannot turn a division into a four-billion
-/// iteration loop; `f32::max` returns the non-NaN operand, so the
-/// `.max(2.0)` below already absorbs a NaN before the cast, which
-/// saturates.
-const GRID_MAX: f32 = 4096.0;
-
 /// A polyline longer than any icon or frame in the interface. Without a
 /// bound, `from_raw_parts` on a bad count is a multi-gigabyte read.
 const POLYLINE_MAX: u32 = 8192;
@@ -680,19 +673,22 @@ extern "C" fn h_term_view(
     }
     let Some(ctx) = (unsafe { ctx_of(cp) }) else { return 0 };
 
-    let px = (ctx.vh(1.45) * ctx.term_font_scale).max(8.0);
-    let cell_w = ctx.fonts.mono_advance(px).max(1.0);
-    let (ascent, line_h) = ctx.fonts.line_metrics(crate::font::FONT_MONO, px);
-    let cell_h = line_h.max(1.0);
+    // The cell's size is the theme's — `terminal.cell_font` floored by
+    // `terminal.min_px`, in a line box `terminal.line_height` sets. It
+    // used to be `vh(1.45)` with an `8.0` floor written right here, which
+    // is the same arithmetic with the numbers kept out of the theme's
+    // reach. The user's own multiplier still stands above the token:
+    // `TermFontSize=` scales what the theme chose (§Z03, §Z18).
+    let g = crate::term::Grid::measure(ctx.fonts, ctx.term_font_scale);
     let t = crate::theme::resolved();
 
     let mut v = TermViewC::empty();
-    v.cell_w = cell_w;
-    v.cell_h = cell_h;
-    v.px = px;
-    v.ascent = ascent;
-    v.cols = (r.area.w / cell_w).floor().max(2.0).min(GRID_MAX) as u32;
-    v.rows = (r.area.h / cell_h).floor().max(2.0).min(GRID_MAX) as u32;
+    v.cell_w = g.cell_w;
+    v.cell_h = g.cell_h;
+    v.px = g.px;
+    v.ascent = g.ascent;
+    v.cols = g.cols(r.area.w);
+    v.rows = g.rows(r.area.h);
     v.cursor_bg = color_out(t.color(crate::theme::ids::term_cursor()));
     v.cursor_fg = color_out(t.color(crate::theme::ids::term_bg()));
     v.cursor_ch = b' ' as u32;
