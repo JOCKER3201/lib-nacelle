@@ -1481,4 +1481,165 @@ mod tests {
         // have to earn — so this one stays one quad.
         assert_eq!(emit(1, ShapeKind::Box, Rect::new(0.0, 0.0, 44.0, 30.0)), 6, "too small");
     }
+
+    /// **K3c, measurement 2: what the split buys, silhouette by
+    /// silhouette — and where it stops buying anything.**
+    ///
+    /// `the_field_stops_paying_for_the_interior` above proves the cut
+    /// happens and bounds it loosely; this one states the exact fraction
+    /// on the four shapes the interface is actually made of, because the
+    /// bound and the fraction lead to opposite conclusions and only the
+    /// fraction can be held up against the instruction counts in
+    /// `nacelle-renderer/src/spirvstat.rs`.
+    ///
+    /// **The finding, and it is not the one §7b expected.** The saving
+    /// is a property of the PERIMETER-TO-AREA ratio, so it collapses on
+    /// small controls — and small controls are most of a screen. A
+    /// 315x175 panel keeps 19 % of its pixels on the field; a 120x34
+    /// button keeps 71 % and a 132x9 list row keeps 74 %, because the
+    /// band is `corner + stroke + AA_PAD + CORE_PAD` deep whatever the
+    /// control — 10.5 px on the panel, 3 px on the bare row — and a
+    /// nine-pixel row has one and a half pixels of interior to give
+    /// back. The window frame is the other extreme and the only
+    /// unambiguous win: with no bed under it the interior is not
+    /// rasterised AT ALL.
+    ///
+    /// Every case is also checked pixel for pixel against the whole
+    /// quad it replaces, on three destinations. The cases here are
+    /// SMALLER than the ones above on purpose: a short control is where
+    /// `core_half` has least room and where an off-by-one in the band
+    /// would first show.
+    #[test]
+    fn the_split_buys_less_the_smaller_the_control_is() {
+        /// name, rect, corner radius (0 = square), has a bed, border,
+        /// the padded area, the area still on the field.
+        type Case<'a> = (&'a str, Rect, f32, bool, Option<f32>, f32, f32);
+        let cases: [Case; 4] = [
+            // §1.1's reference panel.
+            ("a panel", Rect::new(0.0, 0.0, 315.0, 175.0), 6.5, true, Some(1.0), 56_109.0, 10_833.0),
+            // §7b risk 1: a border over a whole window, no bed.
+            ("a window frame", Rect::new(0.0, 0.0, 1200.0, 800.0), 6.0, false, Some(1.0), 964_004.0, 43_604.0),
+            // The case that decides K3d, and the one nobody measured.
+            ("a button", Rect::new(0.0, 0.0, 120.0, 34.0), 6.5, true, Some(1.0), 4_392.0, 3_105.0),
+            // A list row: square, no border, and there are hundreds.
+            ("a list row", Rect::new(0.0, 0.0, 132.0, 9.0), 0.0, true, None, 1_474.0, 1_096.0),
+        ];
+        let area = |q: &[crate::draw::Vertex]| {
+            ((q[2].pos[0] - q[0].pos[0]) * (q[2].pos[1] - q[0].pos[1])).abs()
+        };
+        for (name, r, k, fill, stroke, padded, want_field) in cases {
+            let c = if k == 0.0 { [Corner::SQUARE; 4] } else { [Corner::round(k); 4] };
+            let split = surface(r, &c, fill, stroke, 1);
+            let whole = surface(r, &c, fill, stroke, 2);
+            let mut field = 0.0f32;
+            let mut plain = 0.0f32;
+            for q in split.verts.chunks_exact(6) {
+                *if q[0].shape == NO_SHAPE { &mut plain } else { &mut field } += area(q);
+            }
+            assert_eq!(
+                (r.w + 2.0) * (r.h + 2.0),
+                padded,
+                "{name}: the padded quad is not the area this case was measured at"
+            );
+            assert!(
+                (field - want_field).abs() <= 0.5,
+                "{name}: the field pays for {field} px, measured {want_field}"
+            );
+            if fill {
+                assert!(
+                    (field + plain - padded).abs() <= 0.5,
+                    "{name}: the frame and the core do not partition the quad"
+                );
+            } else {
+                // The one case where the two do not add up, and the
+                // reason it is the biggest win on the list: with no bed
+                // the interior is not a transparent fragment, it is not
+                // a fragment.
+                assert_eq!(plain, 0.0, "{name}: a bed appeared under a bare border");
+            }
+            // The picture is the same picture, or the fraction above is
+            // a saving on the wrong image.
+            for py in (r.y as i32 - 2)..(r.y + r.h) as i32 + 2 {
+                for px in (r.x as i32 - 2)..(r.x + r.w) as i32 + 2 {
+                    let p = [px as f32 + 0.5, py as f32 + 0.5];
+                    for dst in [[0.0; 3], [1.0, 0.5, 0.25], [1.0; 3]] {
+                        assert_eq!(
+                            blend(&split, p, dst),
+                            blend(&whole, p, dst),
+                            "{name}: pixel {p:?} over {dst:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// **K3c, measurement 3, the toolkit's half: what the split does to
+    /// the RUN count.**
+    ///
+    /// §7b priced the cut at "two runs more per shape, MEASURED"; this
+    /// is that measurement carried to a screenful, where it stops being
+    /// a per-shape overhead and becomes the dominant fact about the
+    /// lane. A run is a pipeline bind and a draw call, and the cut
+    /// breaks the merge a row of plain shapes used to get for free.
+    ///
+    /// The scene is twelve panels of sixteen list rows each — 204
+    /// silhouettes, the shape of a real desktop board. The tessellated
+    /// lane draws it in ONE run. The vector lane with the split draws it
+    /// in 408: two per shape, forever, because the core samples the
+    /// atlas and the strips read the shape buffer, so no two adjacent
+    /// shapes can merge. The same lane with the split suppressed draws
+    /// it in one again — which is what identifies the runs as the CUT's
+    /// price and not the lane's.
+    ///
+    /// §7b's own remedy 3 (merging shape runs host-side) is the answer
+    /// and is not written. Until it is, this number is the strongest
+    /// argument against K3d.
+    #[test]
+    fn the_cut_turns_one_run_into_two_per_shape() {
+        let board = |vector: bool, warp: u8| {
+            let mut dl = DrawList::new();
+            dl.set_vector(vector);
+            dl.set_warp(warp);
+            let c = [Corner::round(6.5); 4];
+            for i in 0..12 {
+                let r = Rect::new(10.0 + 150.0 * i as f32, 40.0, 140.0, 175.0);
+                dl.ring_fill(r, &c, 16, bed());
+                dl.ring(r, &c, 16, 1.0, edge());
+                for j in 0..16 {
+                    let row = Rect::new(r.x + 4.0, r.y + 6.0 + 10.0 * j as f32, 132.0, 9.0);
+                    dl.ring_fill(row, &[Corner::SQUARE; 4], 4, bed());
+                }
+            }
+            dl
+        };
+
+        let old = board(false, 1);
+        assert_eq!(old.shape_len(), 0, "the tessellated lane writes no records");
+        assert_eq!(old.verts.len(), 8_496);
+        assert_eq!(old.runs.len(), 1, "one texture, one scissor, one draw call");
+
+        let cut = board(true, 1);
+        assert_eq!(cut.shape_len(), 204);
+        assert_eq!(cut.verts.len(), 6_120, "the vector lane spends 1.39x fewer vertices");
+        assert_eq!(
+            cut.runs.len(),
+            408,
+            "the cut costs two runs a shape and there is no host-side merge yet"
+        );
+
+        // The control: the same lane, the same records, the split held
+        // back by the ride brake. One run again — so the 408 above is
+        // the price of the CUT, not of the field.
+        let uncut = board(true, 2);
+        assert_eq!(uncut.shape_len(), 204, "the same silhouettes");
+        assert_eq!(uncut.runs.len(), 1);
+        // What the lane costs in vertices when the cut is not taken at
+        // all: 204 shapes, one quad each. The ride above quadruples
+        // that by its own grid, so the number is stated where the grid
+        // is one — it is the figure the vertex half of the trade is
+        // argued from.
+        assert_eq!(board(true, 2).verts.len(), 4_896, "the ride's 2x2 grid");
+    }
+
 }

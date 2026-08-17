@@ -2474,18 +2474,22 @@ impl DrawList {
     /// quad instead of tessellating. The application sets this from the
     /// theme's `render.vector`; the list itself reads no tokens.
     ///
-    /// **Nothing but tests calls this yet, and that is not an
-    /// oversight.** A reader has to be someone who owns a list and
-    /// knows the frame boundary, and in this library nobody does: every
-    /// production `DrawList` belongs to the host, which builds one per
-    /// screen, clears it per frame and hands `shapes()` to the
+    /// **The reader is the host, and it exists** — since f3 K3a it is
+    /// `nacelle-desktop/src/vector.rs`, which arms every screen's list
+    /// at the frame boundary and re-arms it whenever the answer moves.
+    /// It could not be here: a reader has to be someone who owns a list
+    /// and knows the frame boundary, and in this library nobody does.
+    /// Every production `DrawList` belongs to the host, which builds
+    /// one per screen, clears it per frame and hands `shapes()` to the
     /// renderer. Reading the token in `clear()` would put the answer in
     /// the right file and the wrong place — it would make a MODE into
-    /// frame state and re-read the theme sixty times a second for a
-    /// value that changes when a theme is loaded. The host's three
-    /// anchors and the condition are written down in
-    /// `.gap-program/f3-vector-svg.md` §6 K3; they are not touched here
-    /// because `nacelle-desktop` is another crew's tree today.
+    /// frame state on behalf of an object that reads no tokens at all
+    /// by design.
+    ///
+    /// `clear()` does not touch the flag, and that is load-bearing
+    /// rather than incidental: it is what lets the host set the mode
+    /// once per theme instead of once per frame
+    /// (`the_record_carries_the_flags_and_clear_resets_the_frame`).
     pub fn set_vector(&mut self, on: bool) {
         self.vector = on;
         self.weld = None;
