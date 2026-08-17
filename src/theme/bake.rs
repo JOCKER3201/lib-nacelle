@@ -80,6 +80,27 @@ impl StateStyle {
     };
 }
 
+// ---- the two ladders' walls (§m3), STATED ONCE ---------------------------
+//
+// `surface.lift` / `surface.chroma` move the whole surface ladder and
+// `text.lift` / `text.chroma` the whole text ladder, and this module is
+// where the four are applied and held. Three other places need the SAME
+// four numbers: the edit model writes to them (`edit::clamp_surface_lift`
+// and friends, so a saved file resolves to what the editor showed), and an
+// editor's sliders END at them (`nacelle-desktop`'s theme page — a track
+// that ran further would have ends that do nothing). Repeating them there
+// put the same wall in three files and two repositories; naming them here,
+// where the clamp is, leaves one.
+
+/// How far `surface.lift` may move the surface ladder's OKLab L, either way.
+pub const SURFACE_LIFT_WALL: f32 = 0.09;
+/// The same for `text.lift` over the text ladder.
+pub const TEXT_LIFT_WALL: f32 = 0.10;
+/// The ceiling on `surface.chroma`; 1.0 is the ladder as derived.
+pub const SURFACE_CHROMA_CEILING: f32 = 4.0;
+/// The ceiling on `text.chroma`; 1.0 is the ladder as derived.
+pub const TEXT_CHROMA_CEILING: f32 = 3.0;
+
 /// The theme a frame is drawn from. Pure data, cheap to clone, safe to hand out
 /// by reference for the life of an epoch.
 #[derive(Clone)]
@@ -516,14 +537,14 @@ pub fn bake(
     ladder(
         &mut colors,
         "surface.",
-        scalar_of("surface.lift", 0.0).clamp(-0.09, 0.09),
-        scalar_of("surface.chroma", 1.0).clamp(0.0, 4.0),
+        scalar_of("surface.lift", 0.0).clamp(-SURFACE_LIFT_WALL, SURFACE_LIFT_WALL),
+        scalar_of("surface.chroma", 1.0).clamp(0.0, SURFACE_CHROMA_CEILING),
     );
     ladder(
         &mut colors,
         "text.",
-        scalar_of("text.lift", 0.0).clamp(-0.10, 0.10),
-        scalar_of("text.chroma", 1.0).clamp(0.0, 3.0),
+        scalar_of("text.lift", 0.0).clamp(-TEXT_LIFT_WALL, TEXT_LIFT_WALL),
+        scalar_of("text.chroma", 1.0).clamp(0.0, TEXT_CHROMA_CEILING),
     );
 
     // The class x state matrix, from the raw values the resolver produced

@@ -854,16 +854,17 @@ fn tone_shift(c: Oklch, tone: Tone) -> Oklch {
     }
 }
 
-/// The bake's own wall (`bake.rs:519`), not a new opinion: writing a wilder
-/// number saves a file that resolves to the clamp anyway and reopens with a
+/// The bake's own wall ([`super::bake::SURFACE_LIFT_WALL`]), not a new
+/// opinion and not a second copy of the number: writing a wilder value
+/// saves a file that resolves to the clamp anyway and reopens with a
 /// slider past its own end.
 fn clamp_surface_lift(v: f32) -> f32 {
-    v.clamp(-0.09, 0.09)
+    v.clamp(-super::bake::SURFACE_LIFT_WALL, super::bake::SURFACE_LIFT_WALL)
 }
 
-/// The bake's own wall for the text ladder (`bake.rs:525`).
+/// The bake's own wall for the text ladder ([`super::bake::TEXT_LIFT_WALL`]).
 fn clamp_text_lift(v: f32) -> f32 {
-    v.clamp(-0.10, 0.10)
+    v.clamp(-super::bake::TEXT_LIFT_WALL, super::bake::TEXT_LIFT_WALL)
 }
 
 /// BASIC's three sliders, as edits to the theme's authors.
@@ -930,12 +931,17 @@ pub struct ToneStep {
     pub light: f32,
 }
 
-/// What [`tone_step`] assumes when nobody has said. Eight bits: the floor
-/// every swapchain supports, and the same default the desktop's config
-/// carries (`nacelle-desktop/src/config.rs`, `color_prefs().depth`). A step
-/// COARSER than the pipeline is honest — every notch changes the picture; a
-/// step finer is a slider that does nothing for several notches and reads
-/// as broken, so the unknown case takes the coarse side.
+/// The depth to assume when nobody has said. Eight bits: the floor every
+/// swapchain supports.
+///
+/// WHERE THIS IS APPLIED, and why not here. "Nobody has said" is a fact
+/// about the CONFIGURATION, not about the pipeline, and the configuration
+/// is the host program's — so this is the number the host's own default
+/// takes (`nacelle-desktop/src/config/model.rs`, `ColorConf::DEPTH`) and
+/// [`tone_step`] is handed a depth that has already been decided. It was
+/// an `Option` here once, with the fallback in this file; nothing ever
+/// passed `None`, and the number stood written out in the config besides.
+/// One wall, on the side of the seam that knows whether anybody has said.
 pub const DEFAULT_DEPTH_BITS: u32 = 8;
 
 /// The slider's notch, from the swapchain's bit depth.
@@ -947,8 +953,9 @@ pub const DEFAULT_DEPTH_BITS: u32 = 8;
 /// it in the theme would let a theme file lie about the hardware, and would
 /// break the rule that a theme carries appearance and nothing else; reading
 /// it from here is worse still, since libnacelle has no config and the value
-/// can change while the editor is open. So it arrives as an argument, `None`
-/// meaning nobody said.
+/// can change while the editor is open. So it arrives as an argument, already
+/// decided — [`DEFAULT_DEPTH_BITS`] is what the CONFIG answers when nobody
+/// has said, and this function is never the one guessing.
 ///
 /// THE ARITHMETIC. One code of the output channel is `q = 1/(2^bits - 1)`,
 /// and a notch is the smallest move that can change one code:
@@ -965,10 +972,10 @@ pub const DEFAULT_DEPTH_BITS: u32 = 8;
 /// however far it goes. The guard is `C.max(q)`: below one code the seed is
 /// achromatic at this depth, and the two derived notches settle at 1.0 and
 /// one radian (57.3 deg) rather than running away. No invented constant.
-pub fn tone_step(depth_bits: Option<u32>, seed_chroma: f32) -> ToneStep {
+pub fn tone_step(depth_bits: u32, seed_chroma: f32) -> ToneStep {
     // 16 is the widest the DEPTH chips offer and the widest a float step is
     // worth stating; 1 keeps the shift below from eating the whole word.
-    let bits = depth_bits.unwrap_or(DEFAULT_DEPTH_BITS).clamp(1, 16);
+    let bits = depth_bits.clamp(1, 16);
     let q = 1.0 / ((1u32 << bits) - 1) as f32;
     let c = seed_chroma.max(q);
     ToneStep { hue_deg: (q / c).to_degrees(), sat: q / c, light: q }
@@ -1665,6 +1672,18 @@ mod tests {
         let down = tone_edits(Scope::Theme, &seeds(), Tone { light: -0.5, ..Tone::NEUTRAL });
         assert_eq!(value_of(&down, "surface.lift").unwrap(), "-0.0900");
         assert_eq!(value_of(&down, "text.lift").unwrap(), "-0.1000");
+        // And the two walls are the BAKE'S, taken and not copied: the
+        // literals above are what those constants read today, and if one
+        // moves this test says so instead of the file quietly resolving to
+        // a number the editor never showed.
+        assert_eq!(
+            value_of(&far, "surface.lift").unwrap(),
+            format!("{:.4}", crate::theme::bake::SURFACE_LIFT_WALL)
+        );
+        assert_eq!(
+            value_of(&far, "text.lift").unwrap(),
+            format!("{:.4}", crate::theme::bake::TEXT_LIFT_WALL)
+        );
     }
 
     /// The weld is conditional, and the condition is the promise: only a HUE
@@ -1728,13 +1747,13 @@ mod tests {
 
     /// The notch is the smallest move that can change one output code, so a
     /// deeper swapchain gets a finer one and nothing else about the sliders
-    /// changes. Unknown depth takes the coarse side on purpose.
+    /// changes.
     #[test]
     fn the_notch_narrows_with_the_swapchains_depth() {
         let chroma = 0.13;
-        let eight = tone_step(Some(8), chroma);
-        let ten = tone_step(Some(10), chroma);
-        let sixteen = tone_step(Some(16), chroma);
+        let eight = tone_step(8, chroma);
+        let ten = tone_step(10, chroma);
+        let sixteen = tone_step(16, chroma);
         assert!((eight.light - 1.0 / 255.0).abs() < 1e-6);
         assert!((ten.light - 1.0 / 1023.0).abs() < 1e-6);
         assert!(sixteen.light < ten.light && ten.light < eight.light);
@@ -1744,12 +1763,18 @@ mod tests {
         // percent of chroma, one 255th of L. Numbers a hand can feel.
         assert!((eight.hue_deg - 1.728).abs() < 0.01, "{}", eight.hue_deg);
         assert!((eight.sat - 0.0302).abs() < 1e-3, "{}", eight.sat);
-        // Nobody said: 8 bits, the floor every swapchain supports.
-        assert_eq!(tone_step(None, chroma), tone_step(Some(DEFAULT_DEPTH_BITS), chroma));
+        // The depth nobody set is the floor every swapchain supports, and
+        // it is the CONFIG that answers with it — so the two are the same
+        // question here: the default IS eight bits.
+        assert_eq!(tone_step(DEFAULT_DEPTH_BITS, chroma), eight);
+        // A depth past the widest chip, or below one bit, is held rather
+        // than allowed to eat the shift that makes `q`.
+        assert_eq!(tone_step(64, chroma), tone_step(16, chroma));
+        assert_eq!(tone_step(0, chroma), tone_step(1, chroma));
         // A grey seed cannot be turned however far the slider goes, so the
         // guard settles the two derived notches at one code's worth rather
         // than letting them run away: one radian and a full multiplier.
-        let grey = tone_step(Some(8), 0.0);
+        let grey = tone_step(8, 0.0);
         assert!((grey.sat - 1.0).abs() < 1e-5, "{}", grey.sat);
         assert!((grey.hue_deg - 57.2958).abs() < 0.01, "{}", grey.hue_deg);
         // And a snapped move lands on the notch, so the file never carries
