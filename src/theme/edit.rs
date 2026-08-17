@@ -213,19 +213,18 @@ pub fn glass_edits(
         Glass::Blur => vec![
             Edit::new("elev.panel.glass.rank", rank),
             Edit::new("elev.panel.glass.tint", oklch_literal(Oklch { alpha: op, ..tint })),
-            // A fully transparent colour, NOT the word `none`. The master
-            // may declare the key with `none`, but the same word arriving
-            // through an overlay bakes to OPAQUE BLACK and paints itself
-            // over the glass — measured 2026-08-16, three screenshots: the
-            // set with `none` renders black panels, the same set without
-            // the line renders glass. The resolver's overlay handling of
-            // the sentinel is a real bug, recorded in the plan; until it
-            // is fixed, the editor writes what it means: no wash, as a
-            // colour with nothing in it.
-            Edit::new(
-                "elev.panel.glass.wash",
-                oklch_literal(Oklch { l: 0.0, c: 0.0, h: 0.0, alpha: 0.0 }),
-            ),
+            // The word, not a colour with nothing in it. BLUR is the tint
+            // alone, and the master's own way of saying so at this key is
+            // `none` — the same word it ships on all nine `[elev.*]` rungs.
+            //
+            // This used to write `oklch(0, 0, 0 / 0)` because `none` came
+            // back OPAQUE BLACK and painted the panels out. The cause was
+            // in `bake.rs`, not in the overlay (the master's own `none`
+            // measured the same black), and it is fixed: a sentinel now
+            // empties the colour slot it was leaving seeded. Held down by
+            // `tests/sentinel_none_colour.rs`, which asserts the word and
+            // the transparent literal are the same answer.
+            Edit::new("elev.panel.glass.wash", "none"),
         ],
         Glass::Frosted => vec![
             Edit::new("elev.panel.glass.rank", rank),
