@@ -2114,8 +2114,8 @@ decor.enabled    = false
     /// WHERE THE NUMBER COMES FROM, and it is not a taste. It is set
     /// between two of the master's own rungs, measured: `@surface.panel`
     /// (the window body — the darkest bed this master ever stands a
-    /// control on) reads 1.25, and `@surface.base` (the desktop field,
-    /// one of the two rungs the columns used to point at) reads 1.11.
+    /// control on) reads 1.26, and `@surface.base` (the desktop field,
+    /// one of the two rungs the columns used to point at) reads 1.12.
     /// Anything a whole column of interface is painted with belongs on the
     /// body's side of that line. It is deliberately NOT a floor for every
     /// bed in the file: `@surface.sunken` is a progress trough and a field
@@ -2131,8 +2131,8 @@ decor.enabled    = false
     /// navigation columns were pointed at `@surface.void` and
     /// `@surface.base`, and by the only ruler this test carried — OKLab L,
     /// two even steps of about 0.06 — they were three shades. Encoded to the
-    /// swapchain they are the codes 4, 17 and 29 of 255: two black stripes
-    /// beside a coloured page. So a step gate alone is not the claim. The
+    /// swapchain their brightest channel reads 6, 19 and 32 of 255: two black
+    /// stripes beside a coloured page. So a step gate alone is not the claim. The
     /// claim is that no band is BLACK, and [`off_black`] is the ruler for
     /// that half of it.
     ///
