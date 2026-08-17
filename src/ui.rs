@@ -1222,11 +1222,16 @@ fn gauge_rows(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
 /// index memoised across two keys names a different word in each. A word
 /// the pair does not name is a defect in the theme and is said out loud
 /// once, not silently taken for `left`.
+///
+/// TWO arms and not three: `center` is a word the master does not declare
+/// at either key, and `tests/enum_vocabulary_declared.rs` is the reason a
+/// theme writing it would not get it anyway. An arm for a word no theme
+/// can legally spell is dead code held open for a look nobody asked for —
+/// when a column wants centring, the master's line grows the word first.
 fn rhythm_align(cell: &'static OnceLock<TokenId>, name: &'static str) -> Align {
     with_theme_word(tok(cell, name), |w| match w {
         "left" => Align::Left,
         "right" => Align::Right,
-        "center" => Align::Center,
         other => {
             warn_once(name, &format!("{name} = {other} names no alignment — drawing it left"));
             Align::Left

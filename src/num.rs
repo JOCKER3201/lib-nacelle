@@ -38,8 +38,17 @@ fn tok(cell: &'static OnceLock<TokenId>, name: &'static str) -> TokenId {
 /// theme and never per number, which is what the epoch key buys; the
 /// `Rc<str>` is the same bargain [`crate::ui`] strikes for
 /// `num.tabular_set`, since a reading is composed on a draw path.
+///
+/// [`theme::content_epoch`] and NOT [`theme::epoch`], for the reason that
+/// counter was added: `epoch` answers "which BAKE is published", and a
+/// desktop whose two monitors are unequal heights publishes two of them in
+/// turn, so its value alternates every frame forever. A one-slot cache
+/// keyed on it misses every time — which is how the font system came to
+/// re-parse every face sixty times a second. A text token is CONTENT: it
+/// does not move when the viewport does, so the content counter is both
+/// the correct key and the one that holds.
 fn text_token(slot: &'static std::thread::LocalKey<RefCell<Option<(u32, Rc<str>)>>>, name: &str) -> Rc<str> {
-    let epoch = theme::epoch();
+    let epoch = theme::content_epoch();
     slot.with(|s| {
         let mut s = s.borrow_mut();
         if let Some((e, v)) = s.as_ref() {
@@ -220,8 +229,13 @@ impl Reading {
     }
 
     /// Whether the joint between the two runs is closed up: a percent
-    /// sign under `num.unit.percent_attached`, and any unit at all when
-    /// the theme's gap is nothing.
+    /// sign under `num.unit.percent_attached`, and nothing else.
+    ///
+    /// A theme whose gap is nothing closes every joint too, but it does so
+    /// through the gap itself — `num.unit.gap` on the drawn path and
+    /// `num.unit.text_gap` on the string one — and those are two separate
+    /// keys measured in two different things. Reading either of them here
+    /// would put one of the two joints under the other's key.
     pub fn attached(&self) -> bool {
         self.unit.starts_with('%') && percent_attached()
     }

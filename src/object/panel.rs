@@ -247,10 +247,16 @@ pub fn draw(ctx: &mut Ctx, r: Rect, chrome: &Chrome, panel_idx: usize) -> Rect {
 /// the same surface it started with. The rung is now the WORD the token
 /// stands at.
 ///
-/// Memoised per (epoch, word): a `Level` is a dozen name lookups and this
-/// is a per-panel, per-frame path, but the answer has to move when the
-/// theme does — and a theme swap renumbers the open word set, which is
-/// why the epoch is half the key.
+/// Memoised per (content epoch, word): a `Level` is a dozen name lookups
+/// and this is a per-panel, per-frame path, but the answer has to move
+/// when the theme does — and a theme swap renumbers the open word set,
+/// which is why the epoch is half the key.
+///
+/// The CONTENT epoch, because a `Level` holds token ids and enum indices
+/// and no resolved value at all (see [`elev::Level`]'s own note), so
+/// nothing in it moves when the viewport does. Keyed on [`theme::epoch`]
+/// it missed on every frame of a desktop with two monitor heights, which
+/// is the exact shape of the bug [`theme::content_epoch`] was added for.
 fn rung() -> elev::Level {
     static ELEV: OnceLock<TokenId> = OnceLock::new();
     thread_local! {
@@ -258,7 +264,7 @@ fn rung() -> elev::Level {
     }
     let id = tok(&ELEV, "panel.elev");
     let word = theme::resolved().enum_of(id);
-    let epoch = theme::epoch();
+    let epoch = theme::content_epoch();
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
         if let Some((e, w, level)) = c.as_ref() {

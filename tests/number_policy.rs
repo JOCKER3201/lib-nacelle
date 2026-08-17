@@ -14,15 +14,22 @@
 //! master's own picture is measured first, so that a stage which changes
 //! nothing fails instead of passing quietly.
 //!
+//! Half of §5.17 is typography that changes no CHARACTER of the reading
+//! — the unit's size, spacing, baseline, ink and the gap before it — so
+//! half of this file asks the draw register how the run was SET and not
+//! merely what it says. A file that reads the strings alone cannot tell
+//! a unit set from `[num]` from a unit set from five numbers written into
+//! `ui.rs`, and its first cut could not.
+//!
 //! ONE test function, on purpose: the resolved theme is process-wide, so
 //! a test that switches it must not run beside a test that reads it — the
-//! same ruling `tests/gauge_role_bindings.rs` makes. The three chains
+//! same ruling `tests/gauge_role_bindings.rs` makes. The five chains
 //! below are functions of that one test and not tests of their own.
 
 use nacelle::draw::{DrawCmd, DrawList};
 use nacelle::font::FontSystem;
 use nacelle::pointer::Pointer;
-use nacelle::theme::{self, LoadRequest};
+use nacelle::theme::{self, Color, LoadRequest};
 use nacelle::ui::{self, GaugeKind, GaugeLabels, GaugeStyle, GaugeValueFmt};
 use nacelle::{Ctx, Rect};
 
@@ -53,11 +60,45 @@ fn apply(fixture: Option<&str>) {
 
 const HEAD: &str = "[meta]\nschema = 1\nname = \"Number policy fixture\"\nbase = \"default\"\n\n";
 
-/// Every string a gauge block draws, in the order the runs were laid
-/// down. A cell gauge draws its unit first and its number second — the
-/// run is laid out from its right edge, because the unit hangs off the
-/// number's end.
-fn runs(values: &[f32], fmt: GaugeValueFmt) -> Vec<String> {
+/// One drawn run and everything the register says about HOW it is set.
+///
+/// The strings alone are enough for the digits, and they are enough for
+/// nothing else: `unit.scale`, `unit.tracking`, `unit.baseline_shift`,
+/// `unit.color` and `unit.gap` are five keys that change no character of
+/// the reading. A test reading only `text` cannot tell a unit set from
+/// `[num]` from a unit set from five numbers written into `ui.rs`, which
+/// is exactly the hole the first cut of this file left open.
+#[derive(Clone, Debug)]
+struct Run {
+    text: String,
+    at: [f32; 2],
+    px: f32,
+    tracking: f32,
+    color: Color,
+}
+
+/// A length or scalar the loaded theme bakes `name` to.
+fn scalar(name: &str) -> f32 {
+    let owned = name.to_string();
+    fresh(move || {
+        theme::resolved().px(theme::id(&owned).unwrap_or_else(|| panic!("{owned} is not declared")))
+    })
+}
+
+/// The ink the loaded theme bakes `name` to.
+fn ink(name: &str) -> Color {
+    let owned = name.to_string();
+    fresh(move || {
+        theme::resolved()
+            .color(theme::id(&owned).unwrap_or_else(|| panic!("{owned} is not declared")))
+    })
+}
+
+/// Every run a gauge block draws, in the order they were laid down. A
+/// cell gauge draws its unit first and its number second — the run is
+/// laid out from its right edge, because the unit hangs off the number's
+/// end.
+fn drawn(values: &[f32], fmt: GaugeValueFmt) -> Vec<Run> {
     let values = values.to_vec();
     fresh(move || {
         let mut fonts = FontSystem::new();
@@ -88,11 +129,23 @@ fn runs(values: &[f32], fmt: GaugeValueFmt) -> Vec<String> {
         dl.cmds()
             .iter()
             .filter_map(|c| match c {
-                DrawCmd::Text { text, .. } => Some(text.clone()),
+                DrawCmd::Text { text, at, px, tracking, color, .. } => Some(Run {
+                    text: text.clone(),
+                    at: *at,
+                    px: *px,
+                    tracking: *tracking,
+                    color: *color,
+                }),
                 _ => None,
             })
             .collect()
     })
+}
+
+/// Every string a gauge block draws, for the claims that are about the
+/// characters alone.
+fn runs(values: &[f32], fmt: GaugeValueFmt) -> Vec<String> {
+    drawn(values, fmt).into_iter().map(|r| r.text).collect()
 }
 
 /// The reading of a single-gauge block: the number run, without its unit.
@@ -102,6 +155,24 @@ fn number(values: &[f32], fmt: GaugeValueFmt) -> String {
         .find(|s| !s.contains('%'))
         .cloned()
         .unwrap_or_else(|| panic!("no number run in {all:?}"))
+}
+
+/// The two runs of one percent gauge's reading — the number, then the
+/// unit that hangs off its end.
+fn pair(v: f32) -> (Run, Run) {
+    let all = drawn(&[v], GaugeValueFmt::Percent);
+    assert_eq!(all.len(), 2, "a percent reading is two runs: {all:?}");
+    let unit = all
+        .iter()
+        .find(|r| r.text == "%")
+        .unwrap_or_else(|| panic!("no unit run in {all:?}"))
+        .clone();
+    let num = all
+        .iter()
+        .find(|r| r.text != "%")
+        .unwrap_or_else(|| panic!("no number run in {all:?}"))
+        .clone();
+    (num, unit)
 }
 
 // ------------------------------------------------------- the decimal mark
@@ -118,6 +189,8 @@ fn the_theme_decides_how_a_reading_is_written_down() {
     the_decimal_mark_and_how_many_places();
     where_the_thousands_open_up();
     the_unit_is_a_run_and_not_an_appended_character();
+    the_unit_run_is_set_by_its_own_four_keys();
+    the_joint_between_the_two_runs();
 }
 
 fn the_decimal_mark_and_how_many_places() {
@@ -201,32 +274,156 @@ fn where_the_thousands_open_up() {
 fn the_unit_is_a_run_and_not_an_appended_character() {
     apply(None);
 
-    // The master's `unit.case = upper`, on a unit that has a lower-case
-    // form to move: the percent sign has none, so the claim is made
-    // through the byte formatter, whose units are letters.
+    // `unit.case` moves the LETTERS of a unit, and the percent sign has
+    // none, so the claim is made through the byte formatter, whose units
+    // are letters. The master ships `none`: a unit symbol is not a label,
+    // and the small `i` of GiB is what makes it the IEC binary prefix.
+    let shipped = fresh(|| nacelle::telemetry::fmt_bytes(2 * 1024 * 1024 * 1024));
+    assert_eq!(shipped, "2.00 GiB", "the master's unit.case = none still cased the unit");
+
+    apply(Some(&format!("{HEAD}[num]\nunit.case = upper\n")));
     let upper = fresh(|| nacelle::telemetry::fmt_bytes(2 * 1024 * 1024 * 1024));
     assert_eq!(upper, "2.00 GIB", "num.unit.case = upper did not reach the unit");
-
-    apply(Some(&format!("{HEAD}[num]\nunit.case = none\n")));
-    let none = fresh(|| nacelle::telemetry::fmt_bytes(2 * 1024 * 1024 * 1024));
-    assert_eq!(none, "2.00 GiB", "num.unit.case = none still upper-cased the unit");
+    assert_ne!(upper, shipped, "the two fixtures must differ or nothing is proved");
 
     // The joint between the two, where they are one string: a text token,
     // because a string carries no ems.
     apply(Some(&format!("{HEAD}[num]\nunit.text_gap = \"\"\n")));
     assert_eq!(
         fresh(|| nacelle::telemetry::fmt_bytes(2 * 1024 * 1024 * 1024)),
-        "2.00GIB",
+        "2.00GiB",
         "num.unit.text_gap did not close the joint"
     );
 
-    // `percent_attached` is the same joint on the drawn side: the gauge
-    // sets its unit as a second run, and the master closes the gap up
-    // before a percent sign.
     apply(None);
     let both = runs(&[12.0], GaugeValueFmt::Percent);
     assert_eq!(both.len(), 2, "a percent reading is a number run and a unit run: {both:?}");
     assert!(both.iter().any(|s| s == "%"), "the unit is its own run: {both:?}");
 
     apply(None);
+}
+
+/// The four keys that change no character of the reading: `unit.scale`,
+/// `unit.tracking`, `unit.baseline_shift`, `unit.color`.
+///
+/// Each is asked of the DRAWN run and against the token's own baked
+/// value, then moved in a fixture and asked again. Against the shipped
+/// master alone every one of them can be written into `ui.rs` as the
+/// number the master happens to ship and nothing notices — which is what
+/// the first cut of this file allowed. A stage that changes nothing is a
+/// stage that proves nothing, so each fixture also has to differ from the
+/// master's picture.
+fn the_unit_run_is_set_by_its_own_four_keys() {
+    // ---- the master's picture ----------------------------------------
+    apply(None);
+    let (n0, u0) = pair(12.0);
+
+    let scale0 = scalar("num.unit.scale");
+    assert_eq!(u0.px, n0.px * scale0, "the unit is not set at num.unit.scale of the number");
+    assert_eq!(
+        u0.tracking,
+        u0.px * scalar("num.unit.tracking"),
+        "num.unit.tracking is an em of the UNIT's own px, not of the number's"
+    );
+    assert_eq!(
+        scalar("num.unit.baseline_shift"),
+        0.0,
+        "the master says units sit on the baseline, NEVER superscript"
+    );
+    assert_eq!(u0.at[1], n0.at[1], "a shift of nothing must leave the two runs on one line");
+    assert_eq!(u0.color, ink("num.unit.color"), "the unit is not drawn in num.unit.color");
+    assert_ne!(
+        u0.color, n0.color,
+        "the master steps the unit's ink back from the number's; if the two bake to one \
+         colour this file cannot tell a unit reading its key from one that is not"
+    );
+
+    // ---- the size ------------------------------------------------------
+    apply(Some(&format!("{HEAD}[num]\nunit.scale = 0.45\n")));
+    let (n1, u1) = pair(12.0);
+    assert_eq!(n1.px, n0.px, "the number's own size must not move between fixtures");
+    assert_eq!(
+        u1.px,
+        n1.px * scalar("num.unit.scale"),
+        "num.unit.scale moved and the unit run did not follow it"
+    );
+    assert_ne!(u1.px, u0.px, "the fixture must move the size or nothing is proved");
+
+    // ---- the letter spacing --------------------------------------------
+    apply(Some(&format!("{HEAD}[num]\nunit.tracking = 0.5em\n")));
+    let (_, u2) = pair(12.0);
+    assert_eq!(
+        u2.tracking,
+        u2.px * scalar("num.unit.tracking"),
+        "num.unit.tracking moved and the unit run did not follow it"
+    );
+    assert_ne!(u2.tracking, u0.tracking, "the fixture must move the tracking");
+
+    // ---- the baseline ---------------------------------------------------
+    apply(Some(&format!("{HEAD}[num]\nunit.baseline_shift = 0.25em\n")));
+    let (n3, u3) = pair(12.0);
+    let shift = scalar("num.unit.baseline_shift");
+    assert!(shift > 0.0, "the fixture must ask for a visible shift");
+    // Not to the bit, and for the reason given at the joint below: the
+    // two y's are one line minus another and the difference carries their
+    // ulp. Half a thousandth of a pixel is well inside "the unit did not
+    // move at all", which is what the assertion is for.
+    let moved = u3.at[1] - n3.at[1];
+    assert!(
+        (moved - u3.px * shift).abs() < 0.001,
+        "num.unit.baseline_shift names {} px and the unit moved {moved}",
+        u3.px * shift
+    );
+
+    // ---- the ink --------------------------------------------------------
+    apply(Some(&format!("{HEAD}[num]\nunit.color = #FF00AA\n")));
+    let (_, u4) = pair(12.0);
+    assert_eq!(u4.color, ink("num.unit.color"), "num.unit.color moved and the unit did not");
+    assert_ne!(u4.color, u0.color, "the fixture must move the ink");
+
+    apply(None);
+}
+
+/// `num.unit.gap` and `num.unit.percent_attached` — the joint on the
+/// DRAWN side, where it is a distance and not a character.
+///
+/// The unit hangs off the number's end, so the unit's right edge stands
+/// still and the gap pushes the NUMBER left. Three fixtures, because the
+/// two keys can only be told apart by holding one still: a gap of nothing
+/// and an attached percent must close the joint to the same place, and a
+/// gap that is something must open it by exactly what it names.
+fn the_joint_between_the_two_runs() {
+    const WIDE: &str = "unit.gap = 0.5em\n";
+
+    apply(Some(&format!("{HEAD}[num]\nunit.gap = 0em\nunit.percent_attached = false\n")));
+    let (closed, u_closed) = pair(12.0);
+
+    apply(Some(&format!("{HEAD}[num]\n{WIDE}unit.percent_attached = true\n")));
+    let (attached, u_attached) = pair(12.0);
+
+    apply(Some(&format!("{HEAD}[num]\n{WIDE}unit.percent_attached = false\n")));
+    let (free, u_free) = pair(12.0);
+
+    assert_eq!(
+        [u_closed.at[0], u_attached.at[0]],
+        [u_free.at[0], u_free.at[0]],
+        "the unit run hangs off the reading's right edge and that edge does not move"
+    );
+    assert_eq!(
+        attached.at[0], closed.at[0],
+        "num.unit.percent_attached = true must close the joint as tightly as a gap of \
+         nothing does — the gap of 0.5em was not suppressed before the percent sign"
+    );
+    let gap = scalar("num.unit.gap");
+    assert!(gap > 0.0, "the fixture must ask for a visible gap");
+    // Inexact for one reason: the two x's are a large edge minus a small
+    // distance, so their difference is a subtraction of neighbours and
+    // carries their ulp. Every claim that CAN be made to the bit — which
+    // is every other one in this file — is.
+    let opened = closed.at[0] - free.at[0];
+    assert!(
+        (opened - free.px * gap).abs() < 0.001,
+        "num.unit.gap = 0.5em opened the joint by {opened} px and the key names {} px",
+        free.px * gap
+    );
 }

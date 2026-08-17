@@ -2513,14 +2513,14 @@ mod tests {
         let first = r[0].read_lock::<Array>().unwrap();
         assert_eq!(first[1].to_string(), "01:01:01");
         let meter = out[2].read_lock::<Map>().unwrap();
-        // `GIB` and not `GiB`: since 2026-08-17 the byte formatter writes
-        // its reading through `[num]`, and the shipped master sets
-        // `num.unit.case = upper` — "TB, GBPS, PS all read as instrument
-        // units", says the key. The letters of a unit are the theme's,
-        // like every other case in the program; a theme that wants the
-        // SI spelling writes `unit.case = none` and gets it everywhere at
-        // once, which is the whole point of the key having a reader.
-        assert_eq!(str_of(&meter, "value"), "2.00 GIB");
+        // Since 2026-08-17 the byte formatter writes its reading through
+        // `[num]`, so the spelling is now the theme's — and the master
+        // says `unit.case = none`, because a unit SYMBOL is not a label:
+        // the small `i` of GiB is what makes it the IEC binary prefix and
+        // the small `s` of MB/s is the second. A theme that wants shouty
+        // units writes `upper` and gets it everywhere at once, which is
+        // the whole point of the key having a reader.
+        assert_eq!(str_of(&meter, "value"), "2.00 GiB");
         assert!((f32_of(&meter, "fraction", 0.0) - 0.25).abs() < 0.001);
     }
 

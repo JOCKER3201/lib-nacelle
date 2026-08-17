@@ -1,12 +1,13 @@
 //! `[rhythm]`'s baseline grid and its two column alignments — the keys
 //! §5.25 declared and nothing read.
 //!
-//! Eight of the block's sixteen keys were dead at the 2026-08-17 audit.
-//! Three of them are the grid (`baseline`, `snap_baseline`,
-//! `snap_origin`), two are where a run sits in the column reserved for it
-//! (`label_align`, `value_align`), and the remaining three — `label_col`,
-//! `label_min`, `label_max`, `value_col` — belong to the settings window,
-//! where the column measurement lives; they are not this file's.
+//! Z24 counted eight of the block's sixteen keys dead. Five of the eight
+//! are this file's: three are the grid (`baseline`, `snap_baseline`,
+//! `snap_origin`) and two are where a run sits in the column reserved for
+//! it (`label_align`, `value_align`). The other three — `label_min`,
+//! `label_max`, `value_col` — are the settings window's, because that is
+//! where a settings row's columns are measured; `nacelle-desktop`'s
+//! `widgets/settings.rs` reads all three today.
 //!
 //! The grid ships OFF (see the master's TODO at `snap_baseline`), so the
 //! first claim below is that the switch really is a switch: under the

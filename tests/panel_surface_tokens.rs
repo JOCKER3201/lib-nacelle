@@ -80,6 +80,15 @@ fn bed(name: &str) -> Color {
     })
 }
 
+/// The length a token bakes to, under whatever theme is loaded.
+fn len(name: &str) -> f32 {
+    let owned = name.to_string();
+    fresh(move || {
+        let t = theme::resolved();
+        t.px(theme::id(&owned).unwrap_or_else(|| panic!("{owned} is not declared")))
+    })
+}
+
 /// The body quad of the panel: the first `RingFill` covering the whole
 /// widget box.
 fn body(cmds: &[DrawCmd]) -> Color {
@@ -161,15 +170,20 @@ fn the_frost_fills_the_rectangle_glass_rect_names() {
         "panel.glass.rect = content_box left the frost on the border box"
     );
 
-    // And the inset pulls whichever box it is off the ring.
+    // And the inset pulls whichever box it is off the ring — BY THE
+    // LENGTH THE TOKEN BAKES TO, which is the half of the claim a quad
+    // measured against itself cannot make. Reading the distance back out
+    // of `pulled[0]` and then asserting `pulled[0] == BOX.x + it` says
+    // only that the number equals itself: an inset applied twice over, or
+    // half over, passes that shape of test unchanged.
     apply(Some(&format!("{HEAD}{FROSTED}\n[panel]\nglass.inset = 2u\n")));
     let (cmds, _) = panel();
     let pulled = glass(&cmds).expect("a rung at rank 2 pours a frosted quad");
-    let inset = (pulled[0] - BOX.x).max(0.0);
-    assert!(inset > 0.0, "panel.glass.inset did not pull the frost inside the border");
+    let inset = len("panel.glass.inset");
+    assert!(inset > 0.0, "the fixture must ask for a visible inset");
     assert_eq!(
         pulled,
         [BOX.x + inset, BOX.y + inset, BOX.w - 2.0 * inset, BOX.h - 2.0 * inset],
-        "the inset is not applied on all four sides"
+        "panel.glass.inset = 2u bakes to {inset} px and the frost was not pulled in by it"
     );
 }
