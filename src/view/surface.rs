@@ -22,6 +22,12 @@
 //! hash where a static is a load: a view reads its tokens into a local
 //! `Look` struct ONCE per draw and never inside a row loop.
 
+// The boundary's corner vocabulary is a NUMBER, not a word: the theme's
+// enum indices intern in load order and mean nothing across a library
+// edge. `corner::code` states which number, `corner::of_code` reads it
+// back on the plugin's side, and both walk `corner::WORDS` — so a cut
+// cannot arrive on one side of the crossing alone.
+use crate::corner::code as corner_code;
 use crate::draw::{Corner, CornerStyle};
 use crate::theme::parse::State;
 use crate::theme::{self, Color, TokenId};
@@ -108,17 +114,6 @@ impl From<theme::bake::StateStyle> for StateInk {
             glow_alpha: s.glow_alpha,
             elevation: s.elevation,
         }
-    }
-}
-
-/// The boundary's corner vocabulary. The theme's enum indices intern in
-/// load order and mean nothing across a library edge, so the numbers
-/// travel instead.
-fn corner_code(style: CornerStyle) -> u32 {
-    match style {
-        CornerStyle::Round => crate::runtime::CORNER_ROUND,
-        CornerStyle::Chamfer => crate::runtime::CORNER_CHAMFER,
-        CornerStyle::Square => crate::runtime::CORNER_SQUARE,
     }
 }
 

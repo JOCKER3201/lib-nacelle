@@ -905,7 +905,7 @@ pub fn draw(
     static BORDER_WF: OnceLock<TokenId> = OnceLock::new();
     static CORNER: OnceLock<TokenId> = OnceLock::new();
     static CORNER_STYLE: OnceLock<TokenId> = OnceLock::new();
-    static CORNER_IDX: OnceLock<(Option<u16>, Option<u16>)> = OnceLock::new();
+    static CORNER_IDX: OnceLock<crate::corner::Cuts> = OnceLock::new();
     static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
     static PAD_X: OnceLock<TokenId> = OnceLock::new();
     static SCROLL_MARGIN: OnceLock<TokenId> = OnceLock::new();
@@ -933,7 +933,8 @@ pub fn draw(
     // `field.corner_style` follows the button's, which follows the
     // panel's: a theme that chamfers its controls must not be left with
     // the one control you type into still rounded.
-    let cut = super::window::corner_style(t, tok(&CORNER_STYLE, "field.corner_style"), &CORNER_IDX);
+    let cut =
+        crate::corner::style(t, tok(&CORNER_STYLE, "field.corner_style"), &CORNER_IDX);
     // The radius goes through `Corner::sized`, which is where §5.0's
     // `pill` stops being a negative number and becomes half this box —
     // a clamp at zero would spell it "square" and never say so.

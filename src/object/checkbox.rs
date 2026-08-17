@@ -2,7 +2,8 @@
 //! plus a label. The whole row is the click target.
 
 use super::focus_ring;
-use crate::draw::{Corner, CornerStyle};
+use crate::corner::Cuts;
+use crate::draw::Corner;
 use crate::focus::{Caps, FocusId};
 use crate::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
 use crate::{ui, Ctx, Rect};
@@ -17,12 +18,16 @@ fn col(c: theme::ThemeColor) -> Color {
     Color { r: c.r, g: c.g, b: c.b, a: c.a }
 }
 
-/// The box's four corners and their tessellation. `checkbox.corner`
-/// carries the radius alone; [corner]'s header rules the cut of a radius
-/// with no `*_corner_style` sibling to `round`, and the checkbox has
-/// none — so the shape is the theme's, not this file's. Zero is spelled
-/// Square because a zero-radius arc is a square corner drawn the cheap
-/// way.
+/// The box's four corners and their tessellation — BOTH halves of the
+/// pair from the theme: `checkbox.corner` is the radius and
+/// `checkbox.corner_style` is the cut.
+///
+/// The cut used to be `CornerStyle::Round`, written here and defended by
+/// [corner]'s old rule that a radius with no sibling is cut round. The
+/// checkbox has a sibling now, pointed at the button's, because the box
+/// IS the control: a rounded box beside a chamfered button is two corner
+/// languages in one row. Zero is still spelled Square whatever the theme
+/// says — a zero-radius arc is a square corner drawn the cheap way.
 ///
 /// The length goes through [`Corner::sized`], which is where §5.0's
 /// `pill` is translated: `pill` bakes to a NEGATIVE number, so a box that
@@ -31,7 +36,10 @@ fn col(c: theme::ThemeColor) -> Color {
 fn shape(t: &theme::ResolvedTheme, bx: Rect) -> ([Corner; 4], u8) {
     static CORNER: OnceLock<TokenId> = OnceLock::new();
     static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
-    let c = Corner::sized(CornerStyle::Round, t.px(tok(&CORNER, "checkbox.corner")), bx);
+    static CUT: OnceLock<TokenId> = OnceLock::new();
+    static CUT_IDX: OnceLock<Cuts> = OnceLock::new();
+    let cut = crate::corner::style(t, tok(&CUT, "checkbox.corner_style"), &CUT_IDX);
+    let c = Corner::sized(cut, t.px(tok(&CORNER, "checkbox.corner")), bx);
     let c = if c.size > 0.0 { c } else { Corner::SQUARE };
     ([c; 4], super::window::corner_segments(t, &SEGMENTS, c.size))
 }

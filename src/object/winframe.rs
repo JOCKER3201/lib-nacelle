@@ -35,8 +35,9 @@
 //!
 //! [`Action`]: crate::widget::Action
 
-use super::window::{corner_segments, corner_style, panel_edge_glow};
-use crate::draw::{Corner, CornerStyle};
+use super::window::{corner_segments, panel_edge_glow};
+use crate::corner::Cuts;
+use crate::draw::Corner;
 use crate::theme::parse::State;
 use crate::theme::{self, Color, TokenId};
 use crate::ui;
@@ -420,6 +421,8 @@ impl Frame {
         static ICON_BUTTON: OnceLock<Option<u16>> = OnceLock::new();
         static BUTTON_BORDER: OnceLock<TokenId> = OnceLock::new();
         static BUTTON_CORNER: OnceLock<TokenId> = OnceLock::new();
+        static BUTTON_CUT: OnceLock<TokenId> = OnceLock::new();
+        static BUTTON_CUT_IDX: OnceLock<Cuts> = OnceLock::new();
         static BUTTON_SEG: OnceLock<TokenId> = OnceLock::new();
         static WC_IDLE: OnceLock<TokenId> = OnceLock::new();
         static WC_HOVER: OnceLock<TokenId> = OnceLock::new();
@@ -430,7 +433,7 @@ impl Frame {
         static MENU_PITCH: OnceLock<TokenId> = OnceLock::new();
         static MINIMISE_Y: OnceLock<TokenId> = OnceLock::new();
         static MODE: OnceLock<TokenId> = OnceLock::new();
-        static MODE_IDX: OnceLock<(Option<u16>, Option<u16>)> = OnceLock::new();
+        static MODE_IDX: OnceLock<Cuts> = OnceLock::new();
         static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
         let t = theme::resolved();
         let c = content(outer, m);
@@ -492,7 +495,7 @@ impl Frame {
             col(t.color(tok(&BORDER_FOCUS, "border.focus"))),
             g,
         );
-        let style = corner_style(t, tok(&MODE, "winframe.corner_mode"), &MODE_IDX);
+        let style = crate::corner::style(t, tok(&MODE, "winframe.corner_mode"), &MODE_IDX);
         let corners = [Corner { style, size: m.cut }; 4];
         let seg = corner_segments(t, &SEGMENTS, m.cut);
         ctx.dl.ring(outer, &corners, seg, m.border, line);
@@ -539,13 +542,21 @@ impl Frame {
                 false,
             );
             let ring = col(st.edge);
-            // `winframe.button.corner` carries the LENGTH alone: the
-            // [corner] section's rule is that a radius with no
-            // `*_corner_style` sibling is cut round, and `Corner::sized`
-            // is what turns a `pill` sentinel into half the short side
-            // instead of into a rectangle.
+            // The pair: `winframe.button.corner` is the length and
+            // `winframe.button.corner_style` is the cut, which used to be
+            // `CornerStyle::Round` written right here. The master points
+            // that sibling at the BUTTON's and not at the frame's — a
+            // control standing on the chrome is still a control — so
+            // three plates in a chamfered theme are no longer the only
+            // round things on the title bar. `Corner::sized` is what
+            // turns a `pill` sentinel into half the short side instead of
+            // into a rectangle.
             let c = [Corner::sized(
-                CornerStyle::Round,
+                crate::corner::style(
+                    t,
+                    tok(&BUTTON_CUT, "winframe.button.corner_style"),
+                    &BUTTON_CUT_IDX,
+                ),
                 t.px(tok(&BUTTON_CORNER, "winframe.button.corner")),
                 r,
             ); 4];
@@ -720,7 +731,7 @@ impl Frame {
         static ITEM_INSET: OnceLock<TokenId> = OnceLock::new();
         static MENU_ITEM: OnceLock<Option<u16>> = OnceLock::new();
         static MODE: OnceLock<TokenId> = OnceLock::new();
-        static MODE_IDX: OnceLock<(Option<u16>, Option<u16>)> = OnceLock::new();
+        static MODE_IDX: OnceLock<Cuts> = OnceLock::new();
         static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
         let t = theme::resolved();
         let mr = menu_rect(outer, m);
@@ -731,7 +742,7 @@ impl Frame {
         // window's copy behind. The window menu and the context menu are
         // ONE object drawn twice; two reads of two keys is how they came
         // to differ.
-        let style = corner_style(t, tok(&MODE, "menu.corner_mode"), &MODE_IDX);
+        let style = crate::corner::style(t, tok(&MODE, "menu.corner_mode"), &MODE_IDX);
         // `Corner::sized`, because the context menu next to this one
         // reads `menu.corner` the same way: §5.0's `pill` is a word about
         // the box, and clamping it at zero is how one of two copies of

@@ -83,12 +83,12 @@ fn treatment() -> Option<Ring> {
         // scale, which no theme could move one of without moving both.
         .then(|| (t.px(tok(&DASH, "focus.ring.dash")), t.px(tok(&GAP, "focus.ring.gap"))));
     // The cut is a WORD, compared as one: an enum's indices intern in load
-    // order, so a remembered index means nothing after a theme swap.
-    let cut = match crate::ui::theme_word(tok(&CUT, "focus.ring.corner_style")).as_str() {
-        "round" => CornerStyle::Round,
-        "chamfer" => CornerStyle::Chamfer,
-        _ => CornerStyle::Square,
-    };
+    // order, so a remembered index means nothing after a theme swap. The
+    // comparison itself is `corner::cut`'s — this file used to hold its
+    // own copy of the same three arms, and the ring is exactly the
+    // overlay that must not disagree with the control it surrounds.
+    // Borrowed, not cloned: the word is read every frame here.
+    let cut = crate::ui::with_theme_word(tok(&CUT, "focus.ring.corner_style"), crate::corner::cut);
     Some(Ring {
         w,
         off,

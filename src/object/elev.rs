@@ -21,6 +21,7 @@
 //! `fill` is `none` and whose `edge.width` is `0` draws nothing, which
 //! is the raw look the governing principle asks for.
 
+use crate::corner::Cuts;
 use crate::draw::Corner;
 use crate::theme::{self, Color, TokenId};
 use crate::{Ctx, Rect};
@@ -52,9 +53,9 @@ pub(crate) struct Level {
     glass_rank: TokenId,
     glass_tint: TokenId,
     glass_wash: TokenId,
-    /// `corner`'s `(round, chamfer)` indices — see
-    /// [`super::window::vocabulary`].
-    words: (Option<u16>, Option<u16>),
+    /// Where each cut's word sits in `corner`'s vocabulary — see
+    /// [`crate::corner::Cuts`], which is the one reader of it.
+    words: Cuts,
     /// `edge.mode`'s index for the word `gradient`.
     mode_gradient: Option<u16>,
     /// `edge.axis`'s indices for `x, y, diag_down, diag_up`, in that
@@ -97,7 +98,7 @@ impl Level {
             glass_rank: id("glass.rank"),
             glass_tint: id("glass.tint"),
             glass_wash: id("glass.wash"),
-            words: super::window::vocabulary(corner),
+            words: Cuts::of(corner),
             mode_gradient: theme::enum_index(edge_mode, "gradient"),
             axis_words: [
                 theme::enum_index(edge_axis, AXES[0].0),
@@ -145,7 +146,7 @@ impl Level {
         self.radius = id(radius);
         self.edge_color = id(edge_color);
         self.edge_width = id(edge_width);
-        self.words = super::window::vocabulary(self.corner);
+        self.words = Cuts::of(self.corner);
         self
     }
 
@@ -159,7 +160,7 @@ impl Level {
     /// and `edge.axis` must be one of [`AXES`]' four words. A direction the
     /// vocabulary does not name is not a direction, so the ring stays flat
     /// rather than being drawn along a guess — the same degradation
-    /// `cut_of` applies to a corner word.
+    /// [`Cuts::read`] applies to a corner word.
     ///
     /// What is NOT read is `edge.gradient`, the NAMED multi-stop slot
     /// (`@grad.<name>`). Measured 2026-08-17: the engine bakes no stops at
@@ -194,7 +195,7 @@ impl Level {
     /// `pill` with the square it wrote to avoid.
     pub(crate) fn cut(&self, t: &theme::ResolvedTheme, r: Rect) -> ([Corner; 4], u8) {
         static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
-        let style = super::window::cut_of(t, self.corner, self.words);
+        let style = self.words.read(t, self.corner);
         let c = Corner::sized(style, t.px(self.radius), r);
         ([c; 4], super::window::corner_segments(t, &SEGMENTS, c.size))
     }
@@ -324,7 +325,7 @@ pub(crate) mod tests {
         static SEG: OnceLock<TokenId> = OnceLock::new();
         let id = |n: &str| theme::id(n).unwrap_or(TokenId::MISSING);
         let mode = id(corner_mode);
-        let style = super::super::window::cut_of(t, mode, super::super::window::vocabulary(mode));
+        let style = Cuts::of(mode).read(t, mode);
         let c = [Corner::sized(style, t.px(id(radius)), r); 4];
         let seg = super::super::window::corner_segments(t, &SEG, c[0].size);
         dl.ring_fill(r, &c, seg, col(t.bed(id(fill))));

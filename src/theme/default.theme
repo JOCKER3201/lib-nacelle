@@ -262,13 +262,44 @@ chart   = 0.45u
 #
 # A LENGTH IS NOT A SHAPE. Every `*_corner` / `*.corner` key below states the
 # radius alone; HOW that radius is cut is stated by a `*_corner_style` or
-# `*_corner_mode` key beside it. Where a preset declares no such sibling —
-# checkbox.corner, slider.track_corner, slider.knob_corner,
-# winframe.button.corner, badge.corner, scrollbar.corner, progress.corner —
-# the cut is `round`, and that is a rule of this file rather than a default
-# any drawing code may pick for itself: @corner.pill on a scrollbar thumb
-# means a capsule, not a bevelled slab. A preset that wants another cut gets
-# the sibling key, and the sibling is what a theme then edits.
+# `*_corner_mode` key beside it, and EVERY radius in this file now has one.
+# It did not: of the twenty-nine radii this file states, SIXTEEN stood
+# without a sibling on 2026-08-17 — thirteen had one — and this header
+# used to close that hole by ruling that a radius with no
+# sibling is cut `round`. A rule stated here and nowhere else is a rule the
+# drawing code has to remember, and it did not remember it — it wrote
+# `CornerStyle::Round` into Rust and cited this paragraph, so a theme
+# writing `mode = chamfer` got a chamfered panel beside a rounded slider,
+# a rounded checkbox and rounded window-frame buttons, on one screen. The
+# siblings are here now, and the sibling is what a theme edits.
+#
+# THE RULE IS NOT REPEALED YET, and striking it before its last reader was
+# gone would have been the worse half of the trade: the code that cited it
+# would not have changed, it would only have stopped being licensed. A
+# sibling changes a picture only where something READS it, and two of the
+# new ones are read by nobody here, because the radii they belong to are
+# drawn OUTSIDE this toolkit — `filetile.corner` by the file grid and the
+# launcher grid, `keyboard.key_corner` by the key field, three drawings in
+# the addons. Every one of them still spells the cut `round` in its source,
+# each citing the sentence above. So the rule survives for exactly those
+# two radii, by name and for nothing else, until `filetile.corner_style`
+# and `keyboard.key_corner_style` have a reader; the day each does, its
+# name leaves this paragraph. A debt is written where its creditor looks,
+# not deleted because the ledger reads better without it.
+#
+# `dialog.corner_mode` is a third sibling with no reader, and it is NOT on
+# that list: the warning sheet is drawn outside this toolkit too, but with
+# a chamfer nailed into Rust, which no wording here ever licensed. It is a
+# hardcode reported, not a debt owed.
+#
+# TWO keys below still look like a bare radius and are not. `badge.corner`
+# takes its cut from the style half of @shape.badge.corners — the one element
+# in this file that states its shape in two places, and it says so where it
+# stands. And `keyboard.sub_corner` is not a radius at all: it names WHICH
+# corner a sub-legend sits in. `tile.corner` was a third until `tile.shape`
+# was chained to @corner.mode below: that key is a whole SHAPE and not only
+# a cut — `hex` is in its vocabulary — so it can carry the corner language
+# and still be the place a theme leaves it.
 # =========================================================================
 [corner]
 none     = 0u
@@ -4250,6 +4281,7 @@ button.gap = 0.22x @titlebar.h      # gap between two panel controls · images 1
 button.order = [minimise, maximise, close]   # right-to-left order of a panel's own controls · images 1,7 · list of one word per slot: minimise | maximise | close | none · read exactly as @winframe.button.order: three slots, a subset is spelled by writing `none` into a slot rather than by handing back a shorter row, which the cascade rejects outright
 button.icon_stroke = @stroke.thin   # line weight of the glyph inside a panel control · images 1,7 · str · @stroke.thin
 button.corner = @corner.none        # corner radius of a panel control's hit plate · images 1,7 · len (u) · @corner.none = 0u
+button.corner_style = @button.corner_style  # which shape that plate's corners take · images 1,7 · enum: square | round | chamfer · follows the button: the plate is the control's whole hit target, and a hit target answers in the control language — the reason list.corner_style already gives for the row plate. The master's radius is 0u, so the cut is invisible until a theme states a radius
 
 # =========================================================================
 # topbar — NEW, and it was missing entirely. The full-width status bar of
@@ -4342,6 +4374,7 @@ button.pad = 0.30x @titlebar.h      # padding around a window control · images 
 button.gap = 0.22x @titlebar.h      # gap between window controls · images 7,8 · rat of @titlebar.h · 6.2 px
 button.order = [minimise, maximise, close]   # right-to-left order of the window controls · images 7,8 · list of one word per slot: minimise | maximise | close | none · THREE slots, fixed by this line: a theme rewrites a slot, it cannot lengthen or shorten the row, and a slot reading `none` draws nothing — that is how a control is dropped. A consumer compares the WORD of each slot, never an index: an array declares its slots one at a time, so each slot's vocabulary is its own literal and index 0 means a different word in every slot
 button.corner = @corner.none        # corner radius of a control's hit plate · images 7,8 · len (u) · @corner.none = 0u
+button.corner_style = @button.corner_style  # which shape that plate's corners take · images 7,8 · enum: square | round | chamfer · follows the BUTTON, not the frame: a control standing on the chrome is still a control, and the frame's own cut is @winframe.corner_mode above
 button.border = @stroke.hair        # ring around a control's hit plate · images 7,8 · str · @stroke.hair
 icon.stroke = @stroke.thin          # line weight of the glyph inside a control · images 7,8 · str · today a flat 1.5
 icon.inset = 0.27x @winframe.button.size   # inset of the glyph inside its plate · images 7,8 · rat of @winframe.button.size · unified from today's 0.26/0.28/0.26
@@ -4434,6 +4467,7 @@ emphasis_from_severity = false      # whether a destructive caption's button (th
 size = @size.lg                     # the square's side · image 1 (PREFERENCJE SYSTEMOWE) · len (u) · @size.lg = 6.5u = 35.1 px
 icon = 0.5x @iconbtn.size           # the glyph inside it · image 1 · rat of @iconbtn.size · 17.6 px
 corner = @corner.sm                 # the square's corner radius · image 1 · len (u) · @corner.sm = 0.8u = 4.3 px
+corner_style = @button.corner_style # which shape that radius is cut to · image 1 · enum: square | round | chamfer · follows the button, because that is what this is: a button whose label is a glyph
 border = @stroke.hair               # its ring · image 1 · str · @stroke.hair
 gap = @space.3                      # gap between two icon buttons in the row · image 1 · len (u) · @space.3 = 1.5u = 8.1 px
 stroke = @stroke.thin               # line weight of the glyph · image 1 · str · @stroke.thin
@@ -4443,7 +4477,7 @@ stroke = @stroke.thin               # line weight of the glyph · image 1 · str
 # =========================================================================
 [tile]
 size = @size.2xl                    # the tile's side · images 1,8 · len (u) · @size.2xl = 12u = 64.8 px
-shape = round                       # the plate the glyph sits on · images 1,8 · enum: round | hex | chamfer | square · -
+shape = @corner.mode                # the plate the glyph sits on, and the cut of @tile.corner · images 1,8 · enum: round | hex | chamfer | square · @corner.mode, so a launcher tile is cut in the same language as everything around it; the vocabulary stays WIDER than a cut because `hex` is a plate this file can ask for and no corner word can say, and a theme reaching for it writes the word here and leaves the language behind on purpose
 corner = @corner.md                 # radius when shape is round or chamfer · images 1,8 · len (u) · @corner.md = 1.2u = 6.5 px
 icon = 0.5x @tile.size              # the glyph inside the plate · images 1,8 · rat of @tile.size · 32.4 px
 border = @stroke.hair               # the resting ring · images 1,8 · str · @stroke.hair
@@ -4463,6 +4497,7 @@ scale_active = 1.15                 # how much larger the active tile draws · i
 size = 2.8u                         # the box itself · - · len (u) · 15.1 px; today 0.55x row_h
 border = @stroke.thin               # its ring · - · str · today a flat 1.5
 corner = @corner.none               # its corner radius · - · len (u) · @corner.none = 0u
+corner_style = @button.corner_style # which shape that radius is cut to · - · enum: square | round | chamfer · follows the button: the box IS the control, and a rounded box beside a chamfered button is two corner languages in one row. The master's radius is 0u, so the cut is invisible until a theme states a radius — which is exactly when it has to be stated
 tick_inset = 0.22x @checkbox.size   # inset of the mark inside the box · - · rat of @checkbox.size · 3.3 px
 tick_shape = square                 # what the checked mark is · - · enum: square | check | cross · -
 tick_stroke = @checkbox.border      # line weight of the check or the cross · - · str · @checkbox.border, which is the weight the mark borrowed while it had no key of its own; a theme wanting a thin tick inside a heavy ring can now say so
@@ -4481,10 +4516,12 @@ knob_color    = @accent.primary     # the handle itself · - · col · @accent.p
 row_h = @size.xl                    # the whole slider row, i.e. the hit target · - · len (u) · @size.xl = 8.4u = 45.4 px
 track_h = @stroke.bold              # the track's thickness · - · str · 4 px; today a flat 2.0
 track_corner = @corner.pill         # the track's end caps · - · len (u) | pill · @corner.pill = h/2
+track_corner_style = @button.corner_style   # which shape those caps are cut to · - · enum: square | round | chamfer · follows the button: @corner.pill is a CAPSULE only while the cut is round, and a chamfered interface asks for a bevelled groove instead
 fill_h = same_as_parent             # the filled part's thickness · - · sentinel | str · same_as_parent = @slider.track_h
 knob_w = 1u                         # the knob's width · - · len (u) · 5.4 px; today 0.28x track.h, which depended on the ROW height
 knob_h = 3u                         # the knob's height · - · len (u) · 16.2 px
 knob_corner = @corner.none          # the knob's corner radius · - · len (u) · @corner.none = 0u
+knob_corner_style = @slider.track_corner_style  # which shape the knob's corners take · - · enum: square | round | chamfer · follows the track it rides in: a knob cut one way inside a groove cut another is two controls, not one
 # TODO(default): 5.25 spells this `0`; a bare number on a stroke is a
 # diagnostic (3.2), so the sentinel that means "draw nothing" is used —
 # the same spelling list.rule already uses for the same idea.
@@ -4724,6 +4761,7 @@ line.smooth = 0                     # 0 is a polyline; n inserts n interpolated 
 bar.gap = 0.5u                      # gap between two bars · images 1,7,8 · len (u) · 2.7 px
 bar.min_w = 1u                      # minimum bar width · images 1,7,8 · len (u) · 5.4 px
 bar.corner = @corner.none           # a bar's corner radius · images 1,7,8 · len (u) · @corner.none = 0u
+bar.corner_style = @progress.corner_style   # which shape that radius is cut to · images 1,7,8 · enum: square | round | chamfer · follows the progress bar, which follows the button: a bar is a bar wherever it is drawn, and two bars on one screen must not disagree
 bar.baseline = @stroke.thin         # the zero line under the bars · images 1,7,8 · str | none · @stroke.thin
 bar.group_gap = 1.5u                # gap between two groups of bars · images 1,7,8 · len (u) · 8.1 px
 
@@ -4782,6 +4820,7 @@ label_gap = @space.2                # gap between tick and number · image 7 · 
 [avatar]
 size = 6u                           # the avatar square · images 1,7 · len (u) · 32.4 px
 corner = @corner.sm                 # its corner radius · images 1,7 · len (u) · @corner.sm = 0.8u = 4.3 px
+corner_style = @corner.mode         # which shape that radius is cut to · images 1,7 · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language: a portrait plate belongs to no control family, so it answers to the root
 border = @stroke.hair               # its ring · images 1,7 · str · @stroke.hair
 gap = @space.3                      # gap between avatar and name block · images 1,7 · len (u) · @space.3 = 1.5u = 8.1 px
 row_h = @list.row_h                 # a whole crew row · images 1,7 · len (u) · @list.row_h
@@ -4792,6 +4831,7 @@ sub_gap = @space.hair               # gap between name and sub-line · images 1,
 [feed]
 aspect = 0.5625                     # height / width of the video tile · images 1,3,7 (LIVE FEED) · frac · 16:9
 corner = @corner.md                 # the tile's corner radius · images 1,3,7 · len (u) · @corner.md = 1.2u = 6.5 px
+corner_style = @corner.mode         # which shape that radius is cut to · images 1,3,7 · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
 caption_h = 4u                      # the caption strip under the tile · images 1,3,7 · len (u) · 21.6 px
 caption_pad = @space.2              # padding inside that strip · images 1,3,7 · len (u) · @space.2 = 1u = 5.4 px
 
@@ -4805,6 +4845,7 @@ pad = @space.3                      # padding inside the dock · images 7,8,9 ·
 shape = rect                        # the dock's outline · image 7 is a stretched chevron · enum: rect | chevron · -
 chevron_skew = 3u                   # the shear when shape is chevron · image 7 · len (u) · 16.2 px
 corner = @corner.sm                 # the dock's corner radius · images 7,8,9 · len (u) · @corner.sm = 0.8u = 4.3 px
+corner_mode = @corner.mode          # how that radius is cut · images 7,8,9 · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language; dock.shape above is the OUTLINE (rect or chevron), which is a different decision about a different edge
 border = @stroke.hair               # the dock's ring · images 7,8,9 · str · @stroke.hair
 item_w = 12u                        # width of one dock item · image 9's large bordered buttons · len (u) · 64.8 px
 item_gap = @space.3                 # gap between two dock items · images 7,8,9 · len (u) · @space.3 = 1.5u = 8.1 px
@@ -4895,6 +4936,7 @@ mod_dot_color = @accent.primary     # the dot marking a latched modifier · - ·
 gap = 0.9u                          # gap between two keys · images 3,5 · len (u) · 4.9 px; today vh(0.46)
 pad = same_as_parent                # padding around the whole key field · images 3,5 · sentinel | len (u) · same_as_parent = @keyboard.gap
 key_corner = @corner.sm             # a key cap's corner radius · images 3,5 · len (u) · @corner.sm = 0.8u = 4.3 px
+key_corner_style = @button.corner_style # which shape a key cap's corners take · images 3,5 · enum: square | round | chamfer · follows the button: a key is a button with a legend on it, and a keyboard drawn in one language beside controls drawn in another is the split this section's root was written to end. NO READER YET — the key field is drawn in the addons and still spells `round`, under the clause [corner]'s header keeps open for exactly this key
 key_border = @stroke.hair           # a key cap's ring · images 3,5 · str · @stroke.hair
 key_h = @size.lg                    # a key cap's height · images 3,5 · len (u) · @size.lg = 6.5u = 35.1 px
 label_role = body                   # type role of the main key legend · images 3,5 · role · today font_px(1.05)
@@ -5036,6 +5078,7 @@ max_w_frac = 90%                    # maximum toast width · - · % of the viewp
 title_gap = 0.12x @toast.h          # gap above the toast title · - · rat of @toast.h · 10.4 px
 msg_gap = 0.45x @toast.h            # gap between title and message · - · rat of @toast.h · 38.9 px
 corner = @corner.lg                 # the toast's corner radius · - · len (u) · @corner.lg = 2.2u = 11.9 px
+corner_mode = @modal.corner_mode    # how that radius is cut · - · enum: square | round | chamfer · @modal.corner_mode; a toast is the modal's sheet without the scrim, and the two are never far enough apart to justify two answers
 dwell_ms = 8000ms                   # how long a toast stays up · - · ms, 500ms .. 30000ms · popup.rs:9's SHOW_SECS; the block sized and placed the toast but never said how long it lives
 title.role = label.section          # type role of the toast's title word · - · role · popup.rs:50's font_px(0.95)
 body.role = body                    # type role of the toast's message · - · role · popup.rs:49's font_px(1.1)
@@ -5046,6 +5089,7 @@ gap = @space.4                      # vertical gap between two stacked toasts; r
 inset_x = 4.4u                      # horizontal inset of the dialog's content · - · len (u) · 23.8 px
 inset_y = 8u                        # vertical inset of the dialog's content · - · len (u) · 43.2 px
 corner = 8u                         # the dialog's corner radius · - · len (u) · 43.2 px
+corner_mode = @modal.corner_mode    # how that radius is cut · - · enum: square | round | chamfer · @modal.corner_mode; the dialog is a small modal, and the radius is the only thing it states for itself. NO READER YET — the warning sheet is drawn outside this toolkit, with a chamfer written into Rust that no rule of this file ever licensed; see [corner]'s header, which names this key as a hardcode reported rather than a debt owed
 border = @stroke.regular            # the dialog's ring · - · str · @stroke.regular
 title.role = title.window           # type role of the dialog title · - · role · type.title.window
 body.role = body                    # type role of the dialog's message · - · role · type.body
@@ -5094,6 +5138,7 @@ rows = 3                            # rows of tiles per page when cell = 0u · i
 cols = auto                         # columns per row; auto fits as many as the width allows · image 8 · auto | n · sentinel auto (5.0)
 cell_min_px = 20px                  # absolute floor for one cell · image 8 · device px · a floor with no u-sibling by design
 corner = @corner.sm                 # a tile's corner radius · image 8 · len (u) · @corner.sm = 0.8u = 4.3 px
+corner_style = @button.corner_style # which shape that radius is cut to · image 8 · enum: square | round | chamfer · follows the button: a tile is the cell's whole hit target, and a hit target answers in the control language. NO READER YET — the file grid and the launcher grid are drawn in the addons and still spell `round`, under the clause [corner]'s header keeps open for exactly this key
 icon.inset_x = 22%                  # horizontal inset of the file glyph in its cell · image 8 · % of the cell's width · -
 icon.inset_y = 12%                  # vertical inset of the file glyph in its cell · image 8 · % of the cell's height · -
 icon.w = 56%                        # the glyph's width · image 8 · % of the cell's width · -

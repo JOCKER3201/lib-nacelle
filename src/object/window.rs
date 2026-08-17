@@ -7,7 +7,8 @@
 //! allowed to look raw, which is what keeps every design decision in the
 //! theme files.
 
-use crate::draw::{ring_segments, Corner, CornerStyle, DrawList};
+use crate::corner::Cuts;
+use crate::draw::{ring_segments, Corner, DrawList};
 use crate::font::FontSystem;
 use crate::theme::{self, Color, TokenId};
 use crate::{Ctx, Rect};
@@ -20,47 +21,6 @@ fn tok(cell: &'static OnceLock<TokenId>, name: &'static str) -> TokenId {
 /// A baked theme colour in the draw list's own colour type.
 fn col(c: theme::ThemeColor) -> Color {
     Color { r: c.r, g: c.g, b: c.b, a: c.a }
-}
-
-/// The [`CornerStyle`] a corner-mode enum token resolves to. Enum words
-/// intern in load order with the master's own word at index 0, so an index
-/// is only meaningful against the vocabulary (`theme::enum_index`), never
-/// as a bare number. A missing token — or a word the vocabulary does not
-/// name — degrades to Square, the raw look of an unstyled rect.
-pub(crate) fn corner_style(
-    t: &theme::ResolvedTheme,
-    mode: TokenId,
-    idx: &'static OnceLock<(Option<u16>, Option<u16>)>,
-) -> CornerStyle {
-    cut_of(t, mode, *idx.get_or_init(|| vocabulary(mode)))
-}
-
-/// The `(round, chamfer)` indices in one corner-mode token's vocabulary.
-///
-/// Taken apart from [`corner_style`] because a caller that reads a WHOLE
-/// dictionary at once — [`super::elev::Level`], which memoises every key
-/// of one `[elev.*]` level in a single struct — has nowhere to hang a
-/// `static` per token and no reason to: the vocabulary is the master's,
-/// so it is settled once with the ids beside it.
-pub(crate) fn vocabulary(mode: TokenId) -> (Option<u16>, Option<u16>) {
-    (theme::enum_index(mode, "round"), theme::enum_index(mode, "chamfer"))
-}
-
-/// [`corner_style`] with the vocabulary already in hand.
-pub(crate) fn cut_of(
-    t: &theme::ResolvedTheme,
-    mode: TokenId,
-    (round, chamfer): (Option<u16>, Option<u16>),
-) -> CornerStyle {
-    let cur = Some(t.enum_of(mode));
-    if cur == round {
-        CornerStyle::Round
-    } else if cur == chamfer {
-        CornerStyle::Chamfer
-    } else {
-        // "square", plus anything the vocabulary does not name.
-        CornerStyle::Square
-    }
 }
 
 /// The arc tessellation for a corner of size `size`: the theme's
@@ -168,13 +128,13 @@ pub fn frame(ctx: &mut Ctx, r: Rect) {
     static CUT: OnceLock<TokenId> = OnceLock::new();
     static WIDTH: OnceLock<TokenId> = OnceLock::new();
     static MODE: OnceLock<TokenId> = OnceLock::new();
-    static MODE_IDX: OnceLock<(Option<u16>, Option<u16>)> = OnceLock::new();
+    static MODE_IDX: OnceLock<Cuts> = OnceLock::new();
     static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
     ctx.mouse.cover(r);
     let t = theme::resolved();
     let fill = col(t.bed(tok(&FILL, "component.panel.fill")));
     let line = col(t.color(tok(&LINE, "component.panel.border")));
-    let style = corner_style(t, tok(&MODE, "panel.corner_mode"), &MODE_IDX);
+    let style = crate::corner::style(t, tok(&MODE, "panel.corner_mode"), &MODE_IDX);
     // Not every negative scalar is nothing: §5.0's `pill` is a WORD about
     // the box (`as round as this one can be`) and bakes negative too, so
     // a clamp at zero answers a master writing `pill` with the square it

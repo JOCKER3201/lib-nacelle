@@ -787,6 +787,14 @@ mod tests {
 
     /// The corner treatments back out of a record's flag word — what
     /// the fragment shader reads, read the same way.
+    ///
+    /// The catch-all is part of the mirror, not an oversight left over
+    /// from the four this crate collapsed into `corner.rs`. A cut here
+    /// is TWO BITS wide by contract with `fs_shape`, whose own decode
+    /// has three arms and a fallback; a reading that walked
+    /// `corner::WORDS` instead would be a truer statement about the
+    /// toolkit and a FALSE one about the shader, which is the only thing
+    /// this file is a specification of.
     fn record_corners(s: &Shape) -> [Corner; 4] {
         [0usize, 1, 2, 3].map(|i| Corner {
             style: match (s.flags >> (2 * i as u32)) & 3 {

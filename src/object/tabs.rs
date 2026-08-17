@@ -161,12 +161,10 @@ impl Look {
             corner: sf.px("tab.corner"),
             // The frames' shape, reached the same way every control
             // reaches it — the master points tab.corner_style at the
-            // button's, which points at the panel's.
-            corner_style: match sf.word("tab.corner_style").as_str() {
-                "round" => crate::draw::CornerStyle::Round,
-                "chamfer" => crate::draw::CornerStyle::Chamfer,
-                _ => crate::draw::CornerStyle::Square,
-            },
+            // button's, which points at the panel's — and decoded the
+            // same way too: this file used to carry its own `match` over
+            // the three words, which is three quarters of a rule.
+            corner_style: paint::corner_style(sf, "tab.corner_style"),
             pad: sf.px("tab.pad").max(0.0),
             gap: sf.px("tab.gap").max(0.0),
             min_w: sf.px("tab.min_w").max(0.0),

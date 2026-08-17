@@ -181,7 +181,7 @@ pub fn bound_role(sf: &mut impl Surface, binding: &str, shrink: f32) -> RoleLook
 
 // -------------------------------------------------------------- corners
 
-/// The cut a shape word asks for, in the three [`Surface`] can draw.
+/// The cut a shape word asks for, read off a [`Surface`].
 ///
 /// Compared as a WORD, not as an enum index, for two reasons that both
 /// bite here: the ABI can only ship words, and a preset's style slot
@@ -189,16 +189,13 @@ pub fn bound_role(sf: &mut impl Surface, binding: &str, shrink: f32) -> RoleLook
 /// word table grows out of the values actually loaded — an index
 /// memoised before a variant is read would freeze at the wrong answer.
 ///
-/// `chevron` and `hexagon` are in the presets' vocabulary and in no
-/// surface's: they degrade to the square a surface with no ring
-/// primitive degrades to, for the same reason — it is the shape that can
-/// be drawn honestly, and one a theme can already ask for.
+/// The word itself is turned into a cut by [`crate::corner::cut`], which
+/// is the library's ONE reading of that vocabulary; this function is the
+/// surface-shaped door to it and holds no `match` of its own. `chevron`
+/// and `hexagon` are in the presets' vocabulary and in no surface's, and
+/// degrade to Square there for the reason stated at that door.
 pub fn corner_style(sf: &mut impl Surface, name: &str) -> CornerStyle {
-    match sf.word(name).as_str() {
-        "round" => CornerStyle::Round,
-        "chamfer" => CornerStyle::Chamfer,
-        _ => CornerStyle::Square,
-    }
+    crate::corner::cut(&sf.word(name))
 }
 
 /// The radius a `*.corner` token states, for the rect that wears it.

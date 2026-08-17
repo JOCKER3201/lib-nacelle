@@ -55,6 +55,7 @@ pub mod assets;
 pub mod base;
 pub mod channel;
 pub mod clipboard;
+pub mod corner;
 pub mod deco;
 pub mod draw;
 pub mod layout;

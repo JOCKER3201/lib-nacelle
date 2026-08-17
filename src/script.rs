@@ -939,8 +939,10 @@ pub struct ViewState {
     /// which one the pointer is over.
     mouse: (f32, f32),
     /// What a press landed on, remembered until the drag that follows
-    /// it. The GRAB itself waits for the first `Move` (see
-    /// [`ScriptWidget::drag`]).
+    /// it, WITH the point it landed on: the thumb is grabbed where the
+    /// hand took it and not where the hand is by the first `Move` (see
+    /// [`ScriptWidget::drag`], which decides there whether the pointer
+    /// is asked for at all).
     press: Option<(Hit, f32, f32)>,
 }
 
@@ -1279,10 +1281,22 @@ impl Widget for ScriptWidget {
         Action::None
     }
 
-    /// A pointer drag. `Begin` only REMEMBERS what is under the press:
-    /// the grab itself waits for the first `Move`, because a host that
-    /// declines the capture never sends one — and a grab taken on a
-    /// press that is never released would freeze the view it took.
+    /// A pointer drag. `Begin` REMEMBERS what is under the press, and
+    /// asks for the pointer only when the press landed on something this
+    /// widget drives itself.
+    ///
+    /// That distinction is the whole gesture. A host sends `Move` only
+    /// to a widget that answered [`Action::Capture`], so declining every
+    /// press — which this did, unconditionally, on the reasoning that
+    /// "the grab waits for the first `Move`" — meant the `Move` never
+    /// came and the thumb branch below was unreachable code. A script's
+    /// scrollbar could be seen, hovered and paged, and not dragged.
+    ///
+    /// So the thumb, and ONLY the thumb, takes the pointer. Everything
+    /// else still answers `None` and falls through to the ordinary click
+    /// delivery, which is where sorting a column and selecting a row
+    /// happen — a captured press ends in no click at all, so capturing
+    /// wider than the grab would cost every one of them.
     fn drag(&mut self, p: DragPhase, x: f32, y: f32, _r: Rect, _host: &Host) -> Action {
         match p {
             DragPhase::Begin => {
@@ -1293,11 +1307,14 @@ impl Widget for ScriptWidget {
                         t.press_head(col);
                     }
                 }
-                // Declined: the press falls through to the ordinary
-                // click delivery, which is where sorting and selection
-                // happen. The grabs below only ever run under a host
-                // that grants the capture anyway.
-                Action::None
+                match self.views.press {
+                    // Mine, and I want nothing: the host holds the
+                    // pointer for me, the board does not turn under the
+                    // hand, and the release is a release rather than a
+                    // click on whatever row the thumb was over.
+                    Some((Hit::Thumb { .. }, _, _)) => Action::Capture,
+                    _ => Action::None,
+                }
             }
             DragPhase::Move => {
                 let Some((hit, px, py)) = self.views.press.clone() else {

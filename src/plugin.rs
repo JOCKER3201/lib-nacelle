@@ -27,7 +27,7 @@ use crate::runtime::{
 };
 use crate::font::{FontSystem, FONT_COUNT};
 use crate::term::{Cell, SelKind, FLAG_UNDERLINE, FLAG_WIDE_LEAD, FLAG_WIDE_SPACER};
-use crate::draw::{ring_segments, Corner, CornerStyle};
+use crate::draw::{ring_segments, Corner};
 use crate::theme::Color;
 use crate::widget::{DragPhase, SelectOp, Sizing};
 use crate::{Action, Ctx, Host, Rect, Widget};
@@ -352,13 +352,11 @@ extern "C" fn h_pop_clip(p: *mut c_void) {
 
 /// The corner vocabulary of the boundary, turned into the toolkit's own.
 /// Anything the plugin invents degrades to Square — the same rule the
-/// theme's enum words follow when a vocabulary does not name a word.
+/// theme's enum words follow when a vocabulary does not name a word, and
+/// the same table: [`crate::corner::of_code`] walks `corner::WORDS`, so a
+/// cut added there is understood at this door without a second edit.
 fn corners_in(style: u32, radius: f32, r: RectC) -> ([Corner; 4], u8) {
-    let style = match style {
-        crate::runtime::CORNER_ROUND => CornerStyle::Round,
-        crate::runtime::CORNER_CHAMFER => CornerStyle::Chamfer,
-        _ => CornerStyle::Square,
-    };
+    let style = crate::corner::of_code(style);
     // Half the short side is the geometric ceiling: past it the arcs of
     // two corners would cross and the outline would fold on itself.
     //

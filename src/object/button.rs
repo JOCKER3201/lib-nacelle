@@ -73,11 +73,11 @@ pub fn quad(r: &Rect) -> [[f32; 2]; 4] {
 /// the shape is one decision, made once, in the theme.
 pub fn corners(t: &theme::ResolvedTheme) -> ([Corner; 4], u8) {
     static MODE: OnceLock<TokenId> = OnceLock::new();
-    static IDX: OnceLock<(Option<u16>, Option<u16>)> = OnceLock::new();
+    static IDX: OnceLock<crate::corner::Cuts> = OnceLock::new();
     static RADIUS: OnceLock<TokenId> = OnceLock::new();
     static SEGMENTS: OnceLock<TokenId> = OnceLock::new();
     let cut = t.px(tok(&RADIUS, "button.corner")).max(0.0);
-    let style = super::window::corner_style(t, tok(&MODE, "button.corner_style"), &IDX);
+    let style = crate::corner::style(t, tok(&MODE, "button.corner_style"), &IDX);
     (
         [Corner { style, size: cut }; 4],
         super::window::corner_segments(t, &SEGMENTS, cut),
