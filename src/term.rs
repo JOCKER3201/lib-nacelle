@@ -171,7 +171,25 @@ fn xterm_gen(idx: u8) -> Color {
 /// in one buffer, and a window whose font measured almost nothing must
 /// not be able to ask for a hundred thousand columns of it. A theme that
 /// wants a denser grid says so with `terminal.cell_font`.
-pub const GRID_MAX: f32 = 4096.0;
+const GRID_MAX: f32 = 4096.0;
+
+/// The most cells this build will report at once, across both axes.
+///
+/// [`GRID_MAX`] bounds each axis on its own, which was enough while the
+/// cell's size was arithmetic in the ABI with a floor written beside it.
+/// It is not enough now that the size is the THEME's: a theme is a
+/// user's file, `terminal.min_px` is that file asking ITSELF for a
+/// readable cell, and a file that asks for none leaves a cell of one
+/// device pixel — 3840 by 2160 of them on a 4K screen, eight million
+/// cells that every widget downstream allocates and walks once a frame.
+/// So the pair is bounded too, and this is the engine's own floor under
+/// the cell rather than the theme's.
+///
+/// A million cells is past any screen a person owns, so it can only bite
+/// on a grid nobody could read: measured against the master's own
+/// `terminal.min_px` of 8px, whose cell is 4.8 by 10.56 px, a 4K screen
+/// asks for 163 000 cells and an 8K screen for 654 000.
+const GRID_CELLS_MAX: f32 = (1u32 << 20) as f32;
 
 /// One terminal cell, measured from the theme.
 ///
@@ -183,18 +201,25 @@ pub const GRID_MAX: f32 = 4096.0;
 ///   the BASE, not the answer: the user's `TermFontSize=` multiplier
 ///   rides on top of it, because a preference scales what the theme
 ///   chose rather than standing in for it.
-/// * `terminal.min_px` — the floor under that product, so a theme that
-///   writes a tiny size (or a user who scales one down) still leaves a
-///   grid a person can read. §5.25 spells this key without the
-///   `cell_font` prefix that §3.2's `_min_px` law would need for the
-///   bake to pair the two automatically, so it is applied by hand here;
-///   the master's own TODO records the spelling and who has to pick.
+/// * `terminal.min_px` — the floor the THEME puts under that product, so
+///   that a theme which writes a tiny size (or a user who scales one
+///   down) still leaves a grid a person can read. It is a request the
+///   theme makes of itself and nothing more: a file may write `0px`, and
+///   the promise this type can keep about that one is not readability
+///   but `GRID_CELLS_MAX` below — the engine refusing to report a grid
+///   no screen could show. §5.25 spells this key without the `cell_font`
+///   prefix that §3.2's `_min_px` law would need for the bake to pair
+///   the two automatically, so it is applied by hand here; the master's
+///   own TODO records the spelling and who has to pick.
 /// * `terminal.line_height` — a multiplier on the FONT's own line box,
 ///   never a synthetic figure. At 1.0 the grid is exactly the metrics
 ///   the face declares, which is what a grid that has to agree with the
 ///   PTY wants; a theme that wants air between rows writes more, and the
-///   air lands below the glyph, where the cell's own underline already
-///   sits.
+///   air is shared above and below, so the glyph keeps the middle of its
+///   row and everything hung off the glyph — its underline, the caret's
+///   — travels with it. The share is done where the cells are drawn,
+///   which is the widget: this type reports the row's full height, and
+///   the widget divides it by the same token to find the line box back.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Grid {
     /// The px the cell's glyphs are rasterised at.
@@ -203,7 +228,9 @@ pub struct Grid {
     pub cell_w: f32,
     /// One cell's height: the face's line box times `terminal.line_height`.
     pub cell_h: f32,
-    /// The baseline's drop from the top of the cell, at `px`.
+    /// The baseline's drop from the top of the FACE's line box, at `px`.
+    /// Where that box sits inside a cell taller than itself is the
+    /// widget's arithmetic, not this number's.
     pub ascent: f32,
 }
 
@@ -220,33 +247,50 @@ impl Grid {
         let (ascent, line_h) = fonts.line_metrics(crate::font::FONT_MONO, px);
         Grid {
             px,
-            // The two floors are arithmetic, not a minimum size: `cols`
-            // and `rows` divide by these numbers, and a cell narrower
-            // than one pixel is a division a grid cannot survive.
+            // The two floors are arithmetic, not a minimum size: `span`
+            // divides by these numbers, and a cell narrower than one
+            // pixel is a division a grid cannot survive.
             cell_w: fonts.mono_advance(px).max(1.0),
             cell_h: (line_h * t.px(tok(&LINE_HEIGHT, "terminal.line_height"))).max(1.0),
             ascent,
         }
     }
 
-    /// How many whole columns fit across `w` pixels.
-    pub fn cols(&self, w: f32) -> u32 {
-        span(w, self.cell_w)
+    /// The grid that fits a rectangle: whole columns across `w`, whole
+    /// rows down `h`.
+    ///
+    /// Both axes are answered together because the bound that matters is
+    /// on the pair. A rectangle that would take more than
+    /// `GRID_CELLS_MAX` cells is answered with a grid of the same
+    /// shape, scaled down until it fits — a grid that no longer covers
+    /// the window, which is the honest answer to a cell size that could
+    /// not have covered it legibly either.
+    pub fn span(&self, w: f32, h: f32) -> (u32, u32) {
+        let cols = axis(w, self.cell_w);
+        let rows = axis(h, self.cell_h);
+        // f32 all the way: 4096 * 4096 overflows nothing here, and the
+        // scale has to be a ratio anyway.
+        let cells = cols as f32 * rows as f32;
+        if cells <= GRID_CELLS_MAX {
+            return (cols, rows);
+        }
+        let s = (GRID_CELLS_MAX / cells).sqrt();
+        (whole(cols as f32 * s), whole(rows as f32 * s))
     }
+}
 
-    /// How many whole rows fit down `h` pixels.
-    pub fn rows(&self, h: f32) -> u32 {
-        span(h, self.cell_h)
-    }
+/// How many whole cells of `cell` pixels fit across `extent`.
+fn axis(extent: f32, cell: f32) -> u32 {
+    whole((extent / cell).floor())
 }
 
 /// A grid is at least two cells on an axis — one column is not a
 /// terminal, and zero is a size the emulator divides by — and never more
-/// than [`GRID_MAX`]. Written as `max` then `min` rather than `clamp`
+/// than `GRID_MAX`. Written as `max` then `min` rather than `clamp`
 /// because a measurement that came out NaN must land on the floor, and
 /// `clamp` panics on it where `f32::max` answers the other operand.
-fn span(extent: f32, cell: f32) -> u32 {
-    (extent / cell).floor().max(2.0).min(GRID_MAX) as u32
+fn whole(n: f32) -> u32 {
+    n.floor().max(2.0).min(GRID_MAX) as u32
 }
 
 #[derive(Clone, Copy, PartialEq)]

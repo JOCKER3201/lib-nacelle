@@ -687,8 +687,9 @@ extern "C" fn h_term_view(
     v.cell_h = g.cell_h;
     v.px = g.px;
     v.ascent = g.ascent;
-    v.cols = g.cols(r.area.w);
-    v.rows = g.rows(r.area.h);
+    // One call for both axes: the grid's bound is on the pair, because
+    // the pair is what gets allocated as one buffer below.
+    (v.cols, v.rows) = g.span(r.area.w, r.area.h);
     v.cursor_bg = color_out(t.color(crate::theme::ids::term_cursor()));
     v.cursor_fg = color_out(t.color(crate::theme::ids::term_bg()));
     v.cursor_ch = b' ' as u32;

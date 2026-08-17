@@ -60,13 +60,19 @@ const CACHED: &[(&str, &str, &str, &[&str])] = &[
     ("term", "inverse_mode", "term.inverse_mode", &["swap", "tint"]),
     // Fixed 2026-08-17 (audit Z17), and by the OTHER half of the hazard:
     // the shell widget reads this one as a WORD rather than as a cached
-    // index, so a theme FILE writing `beam` always arrived — but a
+    // index, so a theme FILE writing `bar` always arrived — but a
     // discovered list holds no index for a word no theme has written
     // yet, and the theme editor's live preview parses against the
-    // schema it already has. Previewing `beam` therefore answered
+    // schema it already has. Previewing `bar` therefore answered
     // `block`, silently, which is the whole of what a shape control on
     // the THEMES page would have done.
-    ("term", "cursor.style", "term.cursor.style", &["block", "beam", "underline"]),
+    //
+    // The words are `field.caret_style`'s words, below: one shape, one
+    // name, across the whole master. The vertical caret was written
+    // `beam` here for one afternoon, which would have left this file
+    // declaring two names for the shape `terminal.cursor.bar_w` gives
+    // its width to.
+    ("term", "cursor.style", "term.cursor.style", &["block", "bar", "underline"]),
     // Fixed here: menu.rs caches `grow` (`act_on`). This one was already
     // safe by accident — `grow` IS the master's own word, so a discovered
     // list put it at 0 on every build — but nothing at the call site said
