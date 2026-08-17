@@ -784,6 +784,29 @@ impl Tone {
             light: snap(self.light, step.light),
         }
     }
+
+    /// ONE AUTHOR, MOVED — the same arithmetic [`tone_edits`] carries its
+    /// ten by, offered to a caller holding an eleventh.
+    ///
+    /// WHO HOLDS AN ELEVENTH, AND WHY THE MODEL DOES NOT. [`tone_edits`]
+    /// writes ten tokens and no more, and every one of them is an AUTHOR
+    /// the master derives a family from. A host page may nonetheless have
+    /// pinned a bed to an absolute colour of its own — nacelle-desktop's
+    /// BACKGROUND section writes `component.panel.fill` for SOLID and the
+    /// glass tint/wash otherwise — and such a bed is no longer downstream
+    /// of any author. It is the same case `tone_edits` answers for
+    /// `surface.hue` by re-pointing it at `@hue.accent`, except that a
+    /// literal cannot be re-pointed: it has to be carried. Left behind, it
+    /// is the ONE surface in the window that does not turn with the HUE
+    /// slider, which is exactly the promise that slider makes.
+    ///
+    /// The host carries it with THIS, not with three lines of its own, for
+    /// the reason the shift is written once here: hue wraps, chroma cannot
+    /// go negative and L is held in 0..1 — none of the three a gamut clamp,
+    /// all three what the numbers MEAN.
+    pub fn shift(self, c: Oklch) -> Oklch {
+        tone_shift(c, self)
+    }
 }
 
 fn snap(value: f32, step: f32) -> f32 {
