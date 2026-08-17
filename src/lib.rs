@@ -62,6 +62,7 @@ pub use layout::flex;
 pub mod focus;
 pub mod font;
 pub mod motion;
+pub mod num;
 pub mod object;
 pub mod plugin;
 pub mod pointer;

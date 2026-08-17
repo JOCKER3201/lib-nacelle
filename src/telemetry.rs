@@ -45,32 +45,44 @@ pub struct Snapshot {
     pub kernel: String,
 }
 
-/// Byte formatting like eDEX (GiB/MiB/KiB).
+/// Byte formatting like eDEX (GiB/MiB/KiB), written down under the
+/// theme's number policy.
+///
+/// The MAGNITUDE ladder is arithmetic and stays here: which power of 1024
+/// a count falls in is a fact about the count. Everything else was a look
+/// decided in this file — `{:.2}` and `{:.1}` and `{:.0}` chose the
+/// precision, the `.` chose the decimal mark, the literal space chose the
+/// joint, and none of the three could be moved by a theme. §5.17 offers
+/// two precisions and this maps the ladder onto them the way the ladder
+/// itself was reaching for: the large units carry a fraction
+/// (`num.decimals`), the small ones are already whole at their own scale
+/// (`num.decimals_compact`).
 pub fn fmt_bytes(b: u64) -> String {
     const G: f64 = 1024.0 * 1024.0 * 1024.0;
     const M: f64 = 1024.0 * 1024.0;
     const K: f64 = 1024.0;
     let b = b as f64;
     if b >= G {
-        format!("{:.2} GiB", b / G)
+        crate::num::Reading::new(b / G, "GiB").text()
     } else if b >= M {
-        format!("{:.1} MiB", b / M)
+        crate::num::Reading::new(b / M, "MiB").text()
     } else if b >= K {
-        format!("{:.0} KiB", b / K)
+        crate::num::Reading::compact(b / K, "KiB").text()
     } else {
-        format!("{b:.0} B")
+        crate::num::Reading::compact(b, "B").text()
     }
 }
 
+/// A throughput, under the same policy and the same split.
 pub fn fmt_rate(b: f64) -> String {
     const M: f64 = 1024.0 * 1024.0;
     const K: f64 = 1024.0;
     if b >= M {
-        format!("{:.2} MB/s", b / M)
+        crate::num::Reading::new(b / M, "MB/s").text()
     } else if b >= K {
-        format!("{:.1} kB/s", b / K)
+        crate::num::Reading::new(b / K, "kB/s").text()
     } else {
-        format!("{b:.0} B/s")
+        crate::num::Reading::compact(b, "B/s").text()
     }
 }
 

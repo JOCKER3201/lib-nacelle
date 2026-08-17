@@ -40,6 +40,7 @@ fn col(c: theme::ThemeColor) -> Color {
 /// statics everywhere else. What is NOT cached is any resolved VALUE:
 /// the colour, the radius and the corner word are read from the live
 /// [`theme::ResolvedTheme`] on every draw, so a theme swap moves them.
+#[derive(Clone, Copy)]
 pub(crate) struct Level {
     fill: TokenId,
     corner: TokenId,
@@ -206,7 +207,24 @@ impl Level {
     /// box — would otherwise settle the same cut a second time and be
     /// free to settle it differently.
     pub(crate) fn draw(&self, ctx: &mut Ctx, r: Rect) -> ([Corner; 4], u8) {
-        self.draw_in(ctx.dl, theme::resolved(), r, ctx.t)
+        self.draw_in(ctx.dl, theme::resolved(), r, r, ctx.t)
+    }
+
+    /// [`Level::draw`] with the GLASS quad laid on a rectangle of its
+    /// own, which is what `panel.glass.rect` and `panel.glass.inset` ask
+    /// for: a frosted panel whose blur stops at the content box, so the
+    /// title band stands on the bed and only the body is glass.
+    ///
+    /// The ring, the bloom and the cut are still the rung's and still
+    /// belong to `r` — a surface has one outline whatever is poured
+    /// inside it.
+    pub(crate) fn draw_glassed(
+        &self,
+        ctx: &mut Ctx,
+        r: Rect,
+        glass: Rect,
+    ) -> ([Corner; 4], u8) {
+        self.draw_in(ctx.dl, theme::resolved(), r, glass, ctx.t)
     }
 
     /// [`Level::draw`] with the theme and the clock in hand and no frame
@@ -230,6 +248,7 @@ impl Level {
         dl: &mut crate::draw::DrawList,
         t: &theme::ResolvedTheme,
         r: Rect,
+        glass: Rect,
         now: f64,
     ) -> ([Corner; 4], u8) {
         let (c, seg) = self.cut(t, r);
@@ -243,10 +262,14 @@ impl Level {
         // glass on a panel got a flat fill and no word about it.
         let rank = t.px(self.glass_rank).clamp(0.0, 3.0);
         if rank > 0.0 {
-            dl.glass_fill(r, &c, seg, rank, col(t.color(self.glass_tint)));
+            // The glass box carries its OWN cut: a quad pulled inside the
+            // border wearing the border's radius is a rounded rectangle
+            // drawn at the wrong size, and the gap shows at every corner.
+            let (gc, gseg) = self.cut(t, glass);
+            dl.glass_fill(glass, &gc, gseg, rank, col(t.color(self.glass_tint)));
             let wash = col(t.color(self.glass_wash));
             if wash.a > 0.0 {
-                dl.ring_fill(r, &c, seg, wash);
+                dl.ring_fill(glass, &gc, gseg, wash);
             }
         } else {
             let fill = col(t.bed(self.fill));
@@ -393,7 +416,7 @@ pub(crate) mod tests {
     fn ring_under(mode: &str, color2: &str, axis: &str) -> DrawCmd {
         let t = theme::bake_over_master(&overlay(mode, color2, axis));
         let mut dl = DrawList::recording();
-        popover().draw_in(&mut dl, &t, box_(), AT_REST);
+        popover().draw_in(&mut dl, &t, box_(), box_(), AT_REST);
         ring_cmd(&dl)
     }
 
@@ -423,7 +446,7 @@ pub(crate) mod tests {
     fn a_gradient_edge_is_drawn_as_one() {
         let t = theme::bake_over_master(&overlay("gradient", "#FF00FF / 1.0", "diag_down"));
         let mut dl = DrawList::recording();
-        popover().draw_in(&mut dl, &t, box_(), AT_REST);
+        popover().draw_in(&mut dl, &t, box_(), box_(), AT_REST);
         match ring_cmd(&dl) {
             DrawCmd::RingGrad { near, far, dir, stroke, .. } => {
                 // The near end is `edge.color`, untouched: the sugar pair
@@ -487,13 +510,13 @@ pub(crate) mod tests {
         let t = theme::resolved();
         let flat = {
             let mut dl = DrawList::new();
-            popover().draw_in(&mut dl, t, box_(), AT_REST);
+            popover().draw_in(&mut dl, t, box_(), box_(), AT_REST);
             dl.verts.len()
         };
         let grad = {
             let g = theme::bake_over_master(&overlay("gradient", "#FF00FF / 1.0", "x"));
             let mut dl = DrawList::new();
-            popover().draw_in(&mut dl, &g, box_(), AT_REST);
+            popover().draw_in(&mut dl, &g, box_(), box_(), AT_REST);
             dl.verts.len()
         };
         assert_eq!(flat, grad);
@@ -514,7 +537,7 @@ pub(crate) mod tests {
             overlay("gradient", "#FF00FF / 1.0", "x")
         ));
         let mut dl = DrawList::new();
-        popover().draw_in(&mut dl, &t, box_(), AT_REST);
+        popover().draw_in(&mut dl, &t, box_(), box_(), AT_REST);
         let r = box_();
         let left = dl
             .verts

@@ -82,8 +82,14 @@ fn gauges(kind: GaugeKind) -> Vec<String> {
     })
 }
 
-/// The px of every text command in a block, in the order they were drawn.
-fn text_sizes(kind: GaugeKind) -> Vec<f32> {
+/// The px and the string of every text command in a block, in the order
+/// they were drawn.
+///
+/// The string is here because a reading is TWO runs since 2026-08-17: the
+/// number, and the unit that follows it in `num.unit.*`'s own size. A
+/// test that counted runs and stepped through them by twos was reading
+/// the unit of one row as the label of the next.
+fn text_runs(kind: GaugeKind) -> Vec<(f32, String)> {
     fresh(move || {
         let mut fonts = FontSystem::new();
         let mut dl = DrawList::recording();
@@ -113,11 +119,26 @@ fn text_sizes(kind: GaugeKind) -> Vec<f32> {
         dl.cmds()
             .iter()
             .filter_map(|c| match c {
-                nacelle::draw::DrawCmd::Text { px, .. } => Some(*px),
+                nacelle::draw::DrawCmd::Text { px, text, .. } => Some((*px, text.clone())),
                 _ => None,
             })
             .collect()
     })
+}
+
+/// The three kinds of run a gauge block puts on screen, told apart by
+/// what they SAY rather than by where they fall in the list: the keys are
+/// `C0`..`C3`, the unit is the percent sign, and everything else is a
+/// reading.
+fn split(runs: &[(f32, String)]) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let of = |f: &dyn Fn(&str) -> bool| -> Vec<f32> {
+        runs.iter().filter(|(_, t)| f(t)).map(|(px, _)| *px).collect()
+    };
+    (
+        of(&|t: &str| t.starts_with('C')),
+        of(&|t: &str| t.contains('%')),
+        of(&|t: &str| !t.starts_with('C') && !t.contains('%')),
+    )
 }
 
 /// The px a role resolves to under whatever theme is loaded.
@@ -221,10 +242,14 @@ fn a_gauge_reads_the_two_roles_the_theme_binds_it_to() {
     // The defect this file exists for, stated as the number it was: the
     // key half and the reading half must NOT be one size, and the reading
     // is the one the rest of the master calls `value`.
-    let rows = text_sizes(GaugeKind::Row);
-    assert_eq!(rows.len(), VALUES.len() * 2, "a row is a label and a reading");
-    let labels: Vec<f32> = rows.iter().step_by(2).copied().collect();
-    let readings: Vec<f32> = rows.iter().skip(1).step_by(2).copied().collect();
+    let rows = text_runs(GaugeKind::Row);
+    let (labels, units, readings) = split(&rows);
+    assert_eq!(
+        rows.len(),
+        VALUES.len() * 3,
+        "a row is a label, a reading and the reading's unit"
+    );
+    assert_eq!(units.len(), VALUES.len(), "every reading carries its unit run");
     assert!(
         labels.iter().all(|p| (*p - caption).abs() < 0.01),
         "a gauge's key half is not `gauge.label_role`'s size: {labels:?} vs {caption}"
@@ -240,11 +265,21 @@ fn a_gauge_reads_the_two_roles_the_theme_binds_it_to() {
     );
 
     // The cell form draws the reading and no key, and in the same role.
-    let cells = text_sizes(GaugeKind::Cell);
+    let (keys, cell_units, cells) = split(&text_runs(GaugeKind::Cell));
+    assert!(keys.is_empty(), "the cell form draws no key half");
     assert_eq!(cells.len(), VALUES.len(), "the cell form draws one reading per gauge");
+    assert_eq!(cell_units.len(), VALUES.len(), "and one unit run with it");
     assert!(
         cells.iter().all(|p| (*p - value).abs() < 0.01),
         "the cell form's reading is not `gauge.value_role`'s size: {cells:?} vs {value}"
+    );
+    // The unit is set from the READING's px through `num.unit.scale`, so
+    // moving `gauge.value_role` has to move it too — which is what makes
+    // the unit a run of the reading and not a run of its own.
+    assert!(
+        cell_units.iter().all(|p| *p < value && *p > 0.0),
+        "the unit run does not follow `num.unit.scale` off the reading: \
+         {cell_units:?} vs {value}"
     );
 
     // ---- moving one binding moves that half and only that half --------
@@ -255,8 +290,7 @@ fn a_gauge_reads_the_two_roles_the_theme_binds_it_to() {
         "gauge.label_role moved and the key half did not: the role is still \
          spelled out at the call site"
     );
-    let moved = text_sizes(GaugeKind::Row);
-    let readings_now: Vec<f32> = moved.iter().skip(1).step_by(2).copied().collect();
+    let (_, _, readings_now) = split(&text_runs(GaugeKind::Row));
     assert_eq!(
         readings_now, readings,
         "moving the KEY's binding moved the READING too — the two halves are \

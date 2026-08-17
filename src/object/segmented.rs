@@ -158,7 +158,7 @@ pub fn control<S: Surface>(
         // The tab strip's rule, for the same reason (F2 §8.1): a choice
         // whose word did not fit is a choice the user cannot read.
         paint::explain_trim(sf, super::tooltip::key(labels[i]), *cell, &text, labels[i]);
-        let ty = paint::center_line_y(sf, cell.y, cell.h, look.label.px, look.label.leading);
+        let ty = paint::center_line_y_in(sf, look.label.face, cell.y, cell.h, look.label.px, look.label.leading);
         paint::cell_text(
             sf,
             cell.x,

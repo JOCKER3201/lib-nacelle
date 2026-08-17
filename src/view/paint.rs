@@ -395,14 +395,96 @@ pub fn wrap_tab(
     out
 }
 
-/// Top of a single line centred in a box of `box_h`. The line occupies
-/// its role's leading; in optical mode the cap-height bias nudges it.
+/// Top of a single line centred in a box of `box_h`, WITHOUT the baseline
+/// grid — the caller does not name a face, so no ascent is known and no
+/// baseline can be put on a grid line.
+///
+/// Kept for the callers outside this library: this signature is the one
+/// every plugin in `nacelle-addons` draws its rows with, and the grid
+/// cannot be worth a break in it. Everything inside the toolkit that
+/// holds a `RoleLook` — which is everything that reads a role at all —
+/// calls [`center_line_y_in`].
 pub fn center_line_y(sf: &mut impl Surface, y: f32, box_h: f32, px: f32, leading: f32) -> f32 {
     let mut ty = y + (box_h - px * leading) / 2.0;
     if sf.enum_is("rhythm.center_mode", "optical") {
         ty += px * sf.px("rhythm.cap_center_bias");
     }
     ty
+}
+
+/// [`center_line_y`] with the run's FACE named, so the line's baseline can
+/// be laid on the theme's grid.
+pub fn center_line_y_in(
+    sf: &mut impl Surface,
+    face: u8,
+    y: f32,
+    box_h: f32,
+    px: f32,
+    leading: f32,
+) -> f32 {
+    let ty = center_line_y(sf, y, box_h, px, leading);
+    let ascent = sf.ascent(face, px);
+    snap_baseline(sf, ty, ascent)
+}
+
+/// `rhythm.baseline`, `rhythm.snap_baseline` and `rhythm.snap_origin` —
+/// the vertical grid a line's BASELINE is laid on, and where that grid is
+/// measured from.
+///
+/// Three keys the master has declared since §5.25 was written and none of
+/// them had a reader: a theme could ask for a 1u grid, say where it was
+/// measured from, and turn it off for the family whose cards float over a
+/// live background — and every line in the program still landed wherever
+/// the centring arithmetic left it. `snap_baseline = false` is exactly
+/// the picture drawn before this function existed, which is what makes
+/// the key an honest off switch and not a new default in disguise.
+///
+/// The BASELINE and not the line's top, which is the whole reason
+/// [`Surface::ascent`] exists: a row carrying a small label beside a large
+/// reading has two line tops and one baseline, and a grid that pulled the
+/// tops together would align the two runs by their ascenders — further
+/// from what the eye reads as one row than the centring it replaced.
+///
+/// Answers the TOP, because a top is what every text call takes.
+pub fn snap_baseline(sf: &mut impl Surface, ty: f32, ascent: f32) -> f32 {
+    if !sf.flag("rhythm.snap_baseline") {
+        return ty;
+    }
+    let step = sf.px("rhythm.baseline");
+    // A grid of no width has no lines to land on, and dividing by it is
+    // what must not happen. Not a look decision: a step has to be
+    // positive to be a step.
+    if step <= 0.0 {
+        return ty;
+    }
+    let origin = if sf.enum_is("rhythm.snap_origin", "screen_top") { 0.0 } else { grid_origin() };
+    let baseline = ty + ascent;
+    origin + ((baseline - origin) / step).round() * step - ascent
+}
+
+thread_local! {
+    /// Where `rhythm.snap_origin = panel_content_top` measures the grid
+    /// from — published by whoever opened the content box, read by
+    /// [`snap_to_grid`].
+    static GRID_ORIGIN: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+}
+
+/// The origin the panel-relative grid currently stands at.
+pub fn grid_origin() -> f32 {
+    GRID_ORIGIN.with(|o| o.get())
+}
+
+/// Declares where a panel's content begins, for the grid.
+///
+/// A thread-local and not a field on `Ctx` for one reason: `Ctx` is the
+/// host's struct, constructed by the application and by every test that
+/// draws, and a grid origin is not something any of them knows or should
+/// have to state. The panel object knows it — it is the one place that
+/// settles a content box — so it publishes it there and this file reads
+/// it. Drawing is sequential, so "the panel most recently opened" is the
+/// panel whose content is being drawn.
+pub fn set_grid_origin(y: f32) {
+    GRID_ORIGIN.with(|o| o.set(y));
 }
 
 /// One aligned run inside a cell of width `w` starting at `x`.
@@ -560,7 +642,7 @@ pub fn badge(
     if bw > 0.0 && !solid {
         sf.ring(pill, cut, radius, bw, edge);
     }
-    let ty = center_line_y(sf, y, h, role.px, role.leading);
+    let ty = center_line_y_in(sf, role.face, y, h, role.px, role.leading);
     sf.text_tab(
         role.face, role.px, x + w / 2.0, ty, text, ink, role.track, Align::Center,
         role.tabular,

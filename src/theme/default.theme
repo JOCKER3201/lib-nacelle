@@ -2594,6 +2594,7 @@ decimals                  = 2                 # decimal places a value carries �
 decimals_compact          = 0                 # decimal places where room is tight: temperatures, gauge readouts · 1 · n, 0 .. 6 · cpu.rhai:6's round(temp, 0)
 unit.scale                = 0.72              # the unit suffix's px as a fraction of the value's px · 1, 7 · f, 0.4 .. 1.0 · x the value's resolved px
 unit.gap                  = 0.18em            # space between the number and its unit · 1, 7 · em, 0em .. 1em · no derivation
+unit.text_gap             = " "               # what stands between value and unit where the two are ONE STRING · 1, 7 · text · unit.gap is a DISTANCE and a string carries none; a script's cell, a table value and a tooltip are characters only, so the same joint needs a character here. Set it empty to close the gap up everywhere at once
 unit.tracking             = 0.060em           # letter spacing inside the unit suffix · 1, 7 · em · no derivation
 unit.case                 = upper             # case transform applied to the unit suffix · 1, 7 · enum: none | upper | lower | smallcaps · TB, GBPS, PS all read as instrument units
 unit.color                = @text.muted       # the unit suffix's colour · 1, 7 · colour · a step back from @text.primary so the number reads first
@@ -5126,7 +5127,19 @@ debounce_ms = 200ms                 # how long after the last keystroke the sear
 [rhythm]
 label_col_frac = 0.34               # label-column share of a settings row until auto measurement lands · 1 · frac · was content.w * 0.34 in settings.rs
 baseline = 1u                       # the vertical grid text baselines snap to · images 1-10 · len (u) · 5.4 px
-snap_baseline = true                # whether that snapping happens at all · images 1-6 · bool · false for family B, where cards float over a live background and the grid has nothing to lock to
+snap_baseline = false               # whether that snapping happens at all · images 1-6 · bool · false for family B, where cards float over a live background and the grid has nothing to lock to
+# TODO(rhythm): shipped OFF as of 2026-08-17, and the value is the only
+#   thing here that is provisional — the grid itself now has a reader
+#   (view/paint.rs snap_baseline, which lays a line's BASELINE on it and
+#   measures it from snap_origin). It is off because A GRID ONLY HOLDS
+#   WHEN EVERY ROW PITCH IS A MULTIPLE OF IT, and this file's are not:
+#   `row` is 4.8u and `row_compact` 3.6u against a `baseline` of 1u, and
+#   `list.row_h`, `menu.row_h` and the rest never asked. Switched on as
+#   the file stands, consecutive rows land 5u and then 4u apart — the
+#   text jitters inside boxes of one height instead of marching down them.
+#   Both keys already SAY "snapped at bake"; nothing snaps them. Deciding
+#   the pitch is a decision about the whole toolkit's rhythm, so it waits
+#   for the owner, and this switch honours it the moment the numbers line up.
 snap_origin = panel_content_top     # what the grid is measured from · images 1-10 · enum: panel_content_top | screen_top · -
 row = 4.8u                          # the standard row height, snapped at bake · images 1,7 · len (u) · 27.0 px; today px*1.9
 row_compact = 3.6u                  # the dense row height, snapped at bake · image 9 · len (u) · 19.4 px

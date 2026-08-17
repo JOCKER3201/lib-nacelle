@@ -380,7 +380,7 @@ pub fn strip<S: Surface>(
         // stopped doing its one job; an untrimmed one says nothing,
         // because it is already saying everything.
         paint::explain_trim(sf, super::tooltip::key(labels[i]), *cell, &text, labels[i]);
-        let ty = paint::center_line_y(sf, cell.y, cell.h, look.label.px, look.label.leading);
+        let ty = paint::center_line_y_in(sf, look.label.face, cell.y, cell.h, look.label.px, look.label.leading);
         paint::cell_text(
             sf,
             cell.x,

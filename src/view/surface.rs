@@ -218,6 +218,24 @@ pub trait Surface {
     );
     fn measure(&mut self, face: u8, px: f32, s: &str, track: f32) -> f32;
 
+    /// How far below a line's TOP its baseline sits, for `face` at `px`.
+    ///
+    /// The y every text call takes is a line top; the baseline is that
+    /// plus this. Only the surface can answer it, for the same reason
+    /// only the surface can measure a run — the face is the font layer's
+    /// and this side of the library owns tokens.
+    ///
+    /// **Zero by default**, which is the honest answer for a surface with
+    /// no channel for line metrics (the plugin ABI has none outside the
+    /// terminal view). Its one reader — the baseline grid of
+    /// [`center_line_y_in`] — then measures the grid on the line's top
+    /// instead, and says so, rather than approximating an ascent out of
+    /// the px and calling the result a baseline.
+    fn ascent(&mut self, face: u8, px: f32) -> f32 {
+        let _ = (face, px);
+        0.0
+    }
+
     /// [`Surface::text`] under a role's figure box (§5.16 `tabular`,
     /// §5.17): every figure is stepped by the widest of them and centred
     /// in that step, so the run keeps its width when its digits change.
@@ -530,6 +548,10 @@ impl Surface for CtxSurface<'_, '_> {
 
     fn measure(&mut self, face: u8, px: f32, s: &str, track: f32) -> f32 {
         self.ctx.fonts.measure(face, px, s, track)
+    }
+
+    fn ascent(&mut self, face: u8, px: f32) -> f32 {
+        self.ctx.fonts.line_metrics(face, px).0
     }
 
     fn text_tab(
