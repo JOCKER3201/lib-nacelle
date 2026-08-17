@@ -990,18 +990,55 @@ ansi = [ #000000, #CD3131 ]
         let mut fx = fixture();
         let t = bake_at(&mut fx, 1080.0);
         // The flat arrays cost ~23 bytes per token; the class x state matrix
-        // is a FIXED cost (25 classes x 7 states x 48 B ~ 8.4 KB in the real
-        // master), so the budget separates the two — a tiny fixture would
-        // otherwise blame the matrix on its handful of tokens.
+        // is a FIXED cost — one row per class of the 5.27 matrix, seven
+        // states, one `StateStyle` a cell, ~14 KB in the real master — so
+        // the budget separates the two, since a tiny fixture would otherwise
+        // blame the matrix on its handful of tokens. (Both factors are asked
+        // for below rather than written down. This comment said 48 B a cell
+        // while a `StateStyle` is four colours and four scalars — 80 B — and
+        // said 25 classes while the master declares 26: two numbers copied
+        // out of a program that has moved since.)
         let matrix = t.class_count() as usize * 7 * std::mem::size_of::<StateStyle>();
         let flat = t.size_of() - matrix - std::mem::size_of::<ResolvedTheme>();
         let per_token = flat as f32 / t.len().max(1) as f32;
         assert!(per_token < 26.0, "{per_token} bytes per token");
-        let real_matrix = 25.0 * 7.0 * std::mem::size_of::<StateStyle>() as f32;
+        // Counted off the embedded master rather than copied from it. This
+        // stood at a hand-written 25 and the day `class.table.head` made 26
+        // nothing failed: a guard that describes a program which no longer
+        // exists is not a guard. The count is every declaration inside a
+        // `[class]` block, which is exactly what `resolve` collects.
+        let real_classes = master_classes();
+        assert!(
+            real_classes > 0,
+            "the embedded master declares no class at all — the reader below is \
+             looking for the wrong thing"
+        );
+        let real_matrix =
+            real_classes as f32 * 7.0 * std::mem::size_of::<StateStyle>() as f32;
         assert!(
             2190.0 * per_token + real_matrix < 64.0 * 1024.0,
             "over the 64 KB const assertion"
         );
+    }
+
+    /// How many classes the embedded master declares, read off the master.
+    ///
+    /// `resolve` builds the class list from every token whose name starts
+    /// `class.`, so the count is every declaration standing inside a
+    /// `[class]` block — the block may be reopened, which is why this
+    /// follows the section headers instead of stopping at the first one.
+    fn master_classes() -> usize {
+        let mut inside = false;
+        let mut n = 0;
+        for line in crate::theme::DEFAULT_THEME.lines() {
+            let l = line.trim();
+            if l.starts_with('[') {
+                inside = l.starts_with("[class]");
+            } else if inside && l.contains('=') && !l.starts_with('#') {
+                n += 1;
+            }
+        }
+        n
     }
 
     /// A master holding nothing but the four keys `u` is made of.
