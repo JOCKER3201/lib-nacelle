@@ -5,10 +5,17 @@
 //! line for line alike, and a change to one without the other is wrong
 //! by definition.
 //!
-//! The scope through K3 is `kind = Box` alone. `p` is the fragment's
-//! position in local pixels relative to the shape's centre — exactly
-//! what a shape vertex carries in its `uv` slot — and `b` the half
-//! sizes; screen convention throughout, y grows downward.
+//! The scope is `kind = Box` alone, through K4 as through K3. `p` is
+//! the fragment's position in local pixels relative to the shape's
+//! centre — exactly what a shape vertex carries in its `uv` slot — and
+//! `b` the half sizes; screen convention throughout, y grows downward.
+//!
+//! K4 adds the ORIENTED frame ([`Frame`]) and not one field: a diagonal
+//! stroke is the same box read along its own axes, and a joint disc is
+//! the same box with round corners as big as itself. Both are here
+//! because both had to be PROVED before they could be drawn, and the
+//! proof is the same kind as K3's — rasterise, measure, state the
+//! number.
 //!
 //! K3 also makes this file the place where the two lanes are COMPARED.
 //! The tessellated generator ([`crate::draw::ring_points`]) and the
@@ -158,6 +165,156 @@ pub fn compose(fill: [f32; 4], stroke_c: [f32; 4], cov: f32, a_band: f32) -> [f3
         (s_a * stroke_c[2] + k * fill[2]) * inv,
         alpha,
     ]
+}
+
+// ---- The oriented lane (f3 §3.1, §K4) --------------------------------
+
+/// The local frame a silhouette is read in when its axes are not the
+/// screen's — a chart stroke, a tick, a chevron, the arms of a cross.
+///
+/// **The whole of the oriented lane is one observation.** `fs_shape`
+/// takes the fragment's local position out of `uv`, and `uv` is
+/// interpolated linearly across the quad. Put the four vertices at
+/// `centre + lx·ux + ly·uy` and give each the `[lx, ly]` it was built
+/// from, and every fragment reads exactly its own local coordinate —
+/// for ANY invertible pair of axes. The rasteriser inverts the map, per
+/// vertex, for free; the shader needs no rotation, no matrix, and not
+/// one new instruction. K4 adds nothing to the GPU at all.
+///
+/// **The antialiasing follows from the same fact.** Coverage is
+/// `0.5 − d/w` with `w = |∇d|` in SCREEN space (§2.3), and near a
+/// straight edge `d` is linear, so `d/|∇d|` is the true signed distance
+/// in device pixels whatever the frame did to the field's units. A
+/// rotation leaves `|∇d| = 1`; a shear would make it something else and
+/// the quotient would absorb it. This is the property §2.3 bought when
+/// it insisted the width come from the field's own derivatives rather
+/// than from a constant — and the oriented lane is where the purchase
+/// pays.
+///
+/// Everything this file's callers build is ORTHONORMAL: `ux` and `uy`
+/// are perpendicular unit vectors, so one local unit is one screen
+/// pixel and the padding a quad needs is stated in pixels either way.
+/// The arithmetic below never assumes it; the emitter does, and says so.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    /// The silhouette's centre, screen px.
+    pub centre: [f32; 2],
+    /// Local +x, in screen px per local unit.
+    pub ux: [f32; 2],
+    /// Local +y, likewise.
+    pub uy: [f32; 2],
+}
+
+impl Frame {
+    /// The screen's own axes at `centre` — a disc, a dot, and every
+    /// shape K3 already draws.
+    pub const fn upright(centre: [f32; 2]) -> Frame {
+        Frame { centre, ux: [1.0, 0.0], uy: [0.0, 1.0] }
+    }
+
+    /// The frame of the straight segment `a → b`: local x runs ALONG
+    /// the path and local y across it, so the silhouette is the box
+    /// `[±len/2, ±t/2]` — the very quad [`crate::draw::DrawList::line`]
+    /// has always drawn, now with a field on it. `None` where the two
+    /// ends coincide and there is no direction to speak of.
+    ///
+    /// The normal is `(-dy, dx)`: y grows downward here, so this is the
+    /// same handedness the rest of the toolkit draws in, and the same
+    /// one `line_verts` picked.
+    pub fn along(a: [f32; 2], b: [f32; 2]) -> Option<(Frame, f32)> {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        if !(len > 0.0) {
+            return None;
+        }
+        let (ux, uy) = (dx / len, dy / len);
+        Some((
+            Frame {
+                centre: [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5],
+                ux: [ux, uy],
+                uy: [-uy, ux],
+            },
+            len,
+        ))
+    }
+
+    /// The screen point of a local one — what the VERTEX stage is spared
+    /// because the CPU does it once per corner.
+    pub fn to_screen(&self, l: [f32; 2]) -> [f32; 2] {
+        [
+            self.centre[0] + l[0] * self.ux[0] + l[1] * self.uy[0],
+            self.centre[1] + l[0] * self.ux[1] + l[1] * self.uy[1],
+        ]
+    }
+
+    /// The local point of a screen one — the map the RASTERISER performs
+    /// on the GPU by interpolating `uv`, written out here because the
+    /// reference has no rasteriser. Degenerate axes give back the
+    /// centre's own local coordinate rather than an infinity; nothing
+    /// emits them.
+    pub fn to_local(&self, p: [f32; 2]) -> [f32; 2] {
+        let det = self.ux[0] * self.uy[1] - self.ux[1] * self.uy[0];
+        if det.abs() <= 1e-12 {
+            return [0.0, 0.0];
+        }
+        let (qx, qy) = (p[0] - self.centre[0], p[1] - self.centre[1]);
+        [
+            (qx * self.uy[1] - qy * self.uy[0]) / det,
+            (qy * self.ux[0] - qx * self.ux[1]) / det,
+        ]
+    }
+}
+
+/// The AA width `fs_shape` computes, in the reference's own terms:
+/// `length(vec2(dpdx(d), dpdy(d)))` where the field is read as a
+/// function of the SCREEN point.
+///
+/// The hardware takes finite differences across the 2×2 quad rather
+/// than derivatives. For the affine fields of this lane the two agree
+/// exactly — `d` is linear in a neighbourhood of every edge — so a
+/// central difference over one pixel is the honest stand-in, and it is
+/// the one place the reference has to model the GPU rather than the
+/// mathematics.
+pub fn screen_width(d: impl Fn([f32; 2]) -> f32, p: [f32; 2]) -> f32 {
+    let gx = d([p[0] + 0.5, p[1]]) - d([p[0] - 0.5, p[1]]);
+    let gy = d([p[0], p[1] + 0.5]) - d([p[0], p[1] - 0.5]);
+    (gx * gx + gy * gy).sqrt().max(1e-6)
+}
+
+/// The disc of radius `r` — and the point is that this function is NOT
+/// a new field. `d_round(p, [r, r], r)` is `|p| − r` identically (the
+/// test below proves it term by term), so a joint disc, a dot in a
+/// matrix (§3.4) and `glow.node_dot` are all Box records with round
+/// corners as big as their own half size. Nothing new reaches the
+/// shader; `ShapeKind::Ring` stays reserved for the ARC, which is the
+/// one thing the Box family cannot spell.
+pub fn d_disc(p: [f32; 2], r: f32) -> f32 {
+    (p[0] * p[0] + p[1] * p[1]).sqrt() - r
+}
+
+/// The width a band of the oriented lane is drawn at, and the factor
+/// its colour is dimmed by — §2.8's energy rule, in the one domain
+/// where it applies.
+///
+/// K3's snap already lifts every sub-pixel band on the AXIS-ALIGNED
+/// lane: `round().max(1.0)` runs before the record is written, so no
+/// hairline reaches the field there. A diagonal has no grid to round
+/// to, and the single coverage ramp `fs_shape` computes for a fill is a
+/// HALF-PLANE's — exact for an edge, and half again too generous for a
+/// slab thinner than the filter. A 0.5 px stroke read that way paints
+/// 0.75 of the pixel it runs through: fifty per cent heavier than the
+/// line asked for, and heavier still as it thins.
+///
+/// So the rule of §2.8, stated once: a band under a pixel is drawn ONE
+/// pixel wide and dimmed by what it lost. Its integral across the
+/// section is `t` either way — it dims instead of fattening — and above
+/// a pixel nothing happens at all.
+pub fn thin_band(t: f32) -> (f32, f32) {
+    if t < 1.0 {
+        (1.0, t.max(0.0))
+    } else {
+        (t, 1.0)
+    }
 }
 
 #[cfg(test)]
@@ -862,6 +1019,428 @@ mod tests {
             field * 20.0 <= padded,
             "the frame still pays for {field} px of {padded}"
         );
+    }
+
+    // ---- The oriented lane, measured (f3 §3.1, §K4) ------------------
+    //
+    // Everything below grades the DIAGONAL against the same referee K3
+    // used for the rect: the silhouette's own supersampled area. The
+    // tessellated lane is not the standard — it is the control, and the
+    // staircase it draws is stated as a number rather than looked at.
+
+    /// The identity the joint disc and the dot matrix stand on, checked
+    /// where it could fail: the corner arc's own quadrant, the axes,
+    /// the centre and well outside. `d_round` with `k` equal to both
+    /// half sizes has no straight edge left to be the box's — every
+    /// point is in the corner's quadrant — and reduces, term for term,
+    /// to `|p| − r`.
+    #[test]
+    fn a_disc_is_the_box_family_s_own_round_corner() {
+        for r in [0.5f32, 1.0, 3.0, 12.5] {
+            for i in 0..37 {
+                let a = i as f32 / 37.0 * std::f32::consts::TAU;
+                let (s, c) = a.sin_cos();
+                for m in [0.0f32, 0.3, 1.0, 1.7, 4.0] {
+                    let p = [c * r * m, s * r * m];
+                    let round = d_round(p, [r, r], r);
+                    assert!(
+                        (round - d_disc(p, r)).abs() <= 1e-4,
+                        "r {r} at {p:?}: box family {round}, circle {}",
+                        d_disc(p, r)
+                    );
+                }
+            }
+        }
+    }
+
+    /// The frame is a rigid motion, and that is what makes the shader's
+    /// arithmetic survive it untouched: the map is its own inverse's
+    /// inverse, it preserves distance, and the field's SCREEN gradient
+    /// stays exactly one — so `w` is the pixel it always was and the
+    /// coverage ramp has the width §2.3 sized it to.
+    #[test]
+    fn an_oriented_frame_moves_the_shape_and_not_the_field() {
+        let half = [30.0f32, 2.0];
+        for i in 0..24 {
+            let a = i as f32 / 24.0 * std::f32::consts::TAU;
+            let (s, c) = a.sin_cos();
+            let (f, len) = Frame::along([100.0, 60.0], [100.0 + c * 80.0, 60.0 + s * 80.0]).unwrap();
+            assert!((len - 80.0).abs() <= 1e-3);
+            // Round trip, and distance preserved: an isometry.
+            for l in [[0.0, 0.0], [half[0], half[1]], [-7.5, 3.25]] {
+                let back = f.to_local(f.to_screen(l));
+                assert!((back[0] - l[0]).abs() <= 1e-3 && (back[1] - l[1]).abs() <= 1e-3);
+            }
+            let (p, q) = (f.to_screen([-9.0, 1.0]), f.to_screen([4.0, -3.0]));
+            let d = ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt();
+            assert!((d - (13.0f32 * 13.0 + 4.0 * 4.0).sqrt()).abs() <= 1e-3, "{d}");
+            // …and the width the shader would take from its own
+            // derivatives is one, everywhere the coverage ramp reads
+            // it: on the long edge, on the end cap, a pixel outside
+            // each, and inside on the way to them. (Not at the CENTRE:
+            // the box distance has a crease along the axis of a thin
+            // shape, where a central difference cancels and the
+            // gradient does not exist. It is also `cov = 1` there, four
+            // ramp widths from anything.)
+            let field = |p: [f32; 2]| d_box(f.to_local(p), half);
+            for l in [
+                [0.0, half[1]],
+                [half[0], 0.0],
+                [0.0, half[1] + 1.0],
+                [half[0] + 1.0, 0.0],
+                [0.0, half[1] * 0.5],
+            ] {
+                let w = screen_width(field, f.to_screen(l));
+                assert!((w - 1.0).abs() <= 1e-3, "angle {i} at {l:?}: w {w}");
+            }
+        }
+    }
+
+    /// What one oriented record puts on the pixel centred on `p`, and
+    /// what the quad the toolkit draws today puts there — the two lanes
+    /// of a segment, side by side, plus the truth both are graded
+    /// against.
+    ///
+    /// The quad is the silhouette's own four corners, so `inside` and
+    /// `pixel_area` from K3's harness serve unchanged; only the field
+    /// has to learn the frame.
+    struct Seg {
+        /// Σ coverage, the area each lane paints, and the true one.
+        sdf: f64,
+        tess: f64,
+        area: f64,
+        /// The worst single pixel each lane puts wrong…
+        e_sdf: f32,
+        e_tess: f32,
+        /// …and the worst the field puts wrong along the SIDES, clear
+        /// of the two end caps, where a right angle folds two edges
+        /// into one pixel and one ramp cannot describe them.
+        e_side: f32,
+        /// The worst disagreement more than a pixel from the boundary.
+        gap_far: f32,
+    }
+
+    fn segment_lanes(a: [f32; 2], b: [f32; 2], t: f32) -> Seg {
+        let (f, len) = Frame::along(a, b).unwrap();
+        let half = [len * 0.5, t * 0.5];
+        let poly: Vec<[f32; 2]> = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]]
+            .iter()
+            .map(|s| f.to_screen([s[0] * half[0], s[1] * half[1]]))
+            .collect();
+        let field = |p: [f32; 2]| d_box(f.to_local(p), half);
+        let mut m = Seg {
+            sdf: 0.0,
+            tess: 0.0,
+            area: 0.0,
+            e_sdf: 0.0,
+            e_tess: 0.0,
+            e_side: 0.0,
+            gap_far: 0.0,
+        };
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for p in &poly {
+            x0 = x0.min(p[0] - 3.0);
+            y0 = y0.min(p[1] - 3.0);
+            x1 = x1.max(p[0] + 3.0);
+            y1 = y1.max(p[1] + 3.0);
+        }
+        for py in y0.floor() as i32..y1.ceil() as i32 {
+            for px in x0.floor() as i32..x1.ceil() as i32 {
+                let p = [px as f32 + 0.5, py as f32 + 0.5];
+                let d = field(p);
+                let sdf = coverage(d, screen_width(field, p));
+                let tess = f32::from(inside(&poly, p));
+                let area = pixel_area(&poly, p, None);
+                m.sdf += sdf as f64;
+                m.tess += tess as f64;
+                m.area += area as f64;
+                m.e_sdf = m.e_sdf.max((sdf - area).abs());
+                m.e_tess = m.e_tess.max((tess - area).abs());
+                if f.to_local(p)[0].abs() <= half[0] - 2.0 {
+                    m.e_side = m.e_side.max((sdf - area).abs());
+                }
+                if d.abs() > 1.0 {
+                    m.gap_far = m.gap_far.max((sdf - tess).abs());
+                }
+            }
+        }
+        m
+    }
+
+    /// **The proof the diagonal lane rests on.** At two dozen angles, a
+    /// stroke four pixels wide: along its sides the field reads the
+    /// silhouette's own area to within a tenth of a pixel, where the
+    /// hard raster is off by half — that half-pixel IS the staircase —
+    /// and the two agree exactly wherever they are more than a pixel
+    /// from the boundary. The areas enclosed agree to under two square
+    /// pixels over a 98 px perimeter.
+    ///
+    /// **What the field does NOT get right, named rather than hidden:**
+    /// the pixel a right-angle CORNER falls in. Two edges meet inside
+    /// it, one signed distance cannot say where both are, and the ramp
+    /// can be a quarter of a pixel out — 0.19 at the worst angle of
+    /// these two dozen. It is the same residue K3 measured on the
+    /// square corner of a rect, it is bounded by the corner's own
+    /// quarter, and it costs two pixels at the end of a stroke against
+    /// a staircase down the whole of it.
+    ///
+    /// The angles are deliberately not multiples of anything: 24 turns
+    /// of the circle put edges at every relation to the pixel grid,
+    /// except the two the raster flatters — the axis-aligned ones,
+    /// which the emitter refuses to send here at all (§2.7).
+    #[test]
+    fn the_oriented_segment_reads_the_area_where_the_raster_reads_a_bit() {
+        let mut worst_side = 0.0f32;
+        let mut worst_corner = 0.0f32;
+        let mut worst_raster = 0.0f32;
+        for i in 0..24 {
+            let a = (i as f32 + 0.37) / 24.0 * std::f32::consts::TAU;
+            let (s, c) = a.sin_cos();
+            let from = [60.3, 40.7];
+            let to = [from[0] + c * 45.0, from[1] + s * 45.0];
+            let m = segment_lanes(from, to, 4.0);
+            assert!(m.e_side <= 0.10, "angle {i}: the field's worst side pixel {}", m.e_side);
+            assert!(m.e_sdf <= 0.26, "angle {i}: the field's worst corner {}", m.e_sdf);
+            assert!(m.e_tess >= 0.4, "angle {i}: the raster's worst pixel {}", m.e_tess);
+            assert_eq!(m.gap_far, 0.0, "angle {i}: the lanes differ off the boundary");
+            assert!(
+                (m.sdf - m.area).abs() <= 2.0,
+                "angle {i}: field {} area {}",
+                m.sdf,
+                m.area
+            );
+            worst_side = worst_side.max(m.e_side);
+            worst_corner = worst_corner.max(m.e_sdf);
+            worst_raster = worst_raster.max(m.e_tess);
+        }
+        assert!(worst_raster > 4.0 * worst_side, "{worst_raster} vs {worst_side}");
+        assert!(worst_corner > worst_side, "the corner is the residue, and it is real");
+    }
+
+    /// §2.8 on the lane that needs it. A single coverage ramp is a
+    /// HALF-PLANE's: run it on a slab thinner than the filter and the
+    /// slab reads far heavier than it is — 0.75 of a pixel for a 0.5 px
+    /// stroke, and 0.65 for a 0.3 px one, which is more than twice its
+    /// mass. [`thin_band`] draws it a pixel wide and dims it by what it
+    /// lost, and the mass comes back exactly at every width and every
+    /// offset from the grid.
+    #[test]
+    fn a_sub_pixel_stroke_dims_instead_of_fattening() {
+        // The mass of one cross-section: Σ over the pixel column the
+        // slab runs through, for a slab whose centre line sits at `c`.
+        // Pixel centres are at k + ½, so c = ½ is a slab through the
+        // middle of a pixel and c = 1 one straddling two.
+        let mass = |t: f32, c: f32, floored: bool| {
+            let (w, dim) = if floored { thin_band(t) } else { (t, 1.0) };
+            let half = w * 0.5;
+            (-6i32..6)
+                .map(|k| coverage((k as f32 + 0.5 - c).abs() - half, 1.0) * dim)
+                .sum::<f32>()
+        };
+        for t in [0.2f32, 0.3, 0.5, 0.8, 1.0, 2.5] {
+            for c in [0.5f32, 0.75, 1.0, 1.25] {
+                let got = mass(t, c, true);
+                assert!((got - t).abs() <= 1e-3, "{t} px at {c}: mass {got}");
+            }
+        }
+        // What it would have painted without the rule, at the two
+        // widths the sentence above names.
+        assert!((mass(0.5, 0.5, false) - 0.75).abs() <= 1e-6);
+        assert!((mass(0.3, 0.5, false) - 0.65).abs() <= 1e-6);
+        // …and above a pixel the rule is not there at all.
+        assert_eq!(thin_band(1.0), (1.0, 1.0));
+        assert_eq!(thin_band(2.5), (2.5, 1.0));
+    }
+
+    /// The joint, measured — §3.1's ruling put to the referee.
+    ///
+    /// The truth of a stroked polyline is the set of points within
+    /// `t/2` of the path: a round join, which is what a disc at the
+    /// corner builds. Two butt-capped segments alone leave the outer
+    /// wedge EMPTY, and antialiasing does not hide it — it draws it
+    /// accurately. The disc fills it.
+    ///
+    /// What the disc costs is stated here too, because §3.1's claim
+    /// that "nothing overlaps" is not true of this decomposition and
+    /// the honest thing is to say by how much: the disc lies over the
+    /// half of itself that is inside each segment, so a TRANSLUCENT
+    /// stroke blends twice there. The overlap is confined to the disc —
+    /// never more than `π(t/2)²` — and for an opaque stroke it is
+    /// invisible, since `a = 1` composites the same either way. Both
+    /// numbers below are measured, not argued.
+    #[test]
+    fn a_joint_disc_closes_the_notch_the_two_segments_leave() {
+        let pts = [[20.0f32, 70.0], [60.0, 20.0], [100.0, 62.0]];
+        let t = 7.0f32;
+        // What the lane draws: two oriented boxes, and the disc at the
+        // corner between them.
+        let boxes: Vec<(Frame, [f32; 2])> = pts
+            .windows(2)
+            .map(|w| {
+                let (f, len) = Frame::along(w[0], w[1]).unwrap();
+                (f, [len * 0.5, t * 0.5])
+            })
+            .collect();
+        let disc = (Frame::upright(pts[1]), [t * 0.5, t * 0.5]);
+        // The truth, supersampled 16×16: the SILHOUETTE, as a set —
+        // the two rectangles, and the disc when the joint is drawn.
+        let sample = |p: [f32; 2], hit: &dyn Fn([f32; 2]) -> bool| {
+            const N: usize = 16;
+            let mut n = 0u32;
+            for j in 0..N {
+                for i in 0..N {
+                    let q = [
+                        p[0] - 0.5 + (i as f32 + 0.5) / N as f32,
+                        p[1] - 0.5 + (j as f32 + 0.5) / N as f32,
+                    ];
+                    if hit(q) {
+                        n += 1;
+                    }
+                }
+            }
+            n as f32 / (N * N) as f32
+        };
+        let in_arms = |q: [f32; 2]| {
+            boxes.iter().any(|(f, half)| {
+                let l = f.to_local(q);
+                l[0].abs() <= half[0] && l[1].abs() <= half[1]
+            })
+        };
+        let in_disc = |q: [f32; 2]| {
+            ((q[0] - pts[1][0]).powi(2) + (q[1] - pts[1][1]).powi(2)).sqrt() <= t * 0.5
+        };
+        let truth = |p: [f32; 2]| sample(p, &|q| in_arms(q) || in_disc(q));
+        // THE DISC IS THE RIGHT SHAPE, not merely a shape: near the
+        // corner, the union above is exactly the set of points within
+        // t/2 of the path — the round join a stroked path is defined to
+        // have. Checked where it is checkable, which is everywhere the
+        // butt-capped ENDS are out of reach.
+        let to_seg = |p: [f32; 2], a: [f32; 2], b: [f32; 2]| {
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            let l2 = dx * dx + dy * dy;
+            let u = (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2).clamp(0.0, 1.0);
+            ((a[0] + dx * u - p[0]).powi(2) + (a[1] + dy * u - p[1]).powi(2)).sqrt()
+        };
+        let round_join = |p: [f32; 2]| {
+            sample(p, &|q| {
+                to_seg(q, pts[0], pts[1]).min(to_seg(q, pts[1], pts[2])) <= t * 0.5
+            })
+        };
+        for py in 8..36 {
+            for px in 44..78 {
+                let p = [px as f32 + 0.5, py as f32 + 0.5];
+                assert_eq!(truth(p), round_join(p), "the joint is not a round join at {p:?}");
+            }
+        }
+        let cov = |f: &Frame, half: [f32; 2], round: bool, p: [f32; 2]| {
+            let c = if round {
+                [Corner::round(half[1]); 4]
+            } else {
+                [Corner::SQUARE; 4]
+            };
+            let field = |q: [f32; 2]| d_shape(f.to_local(q), half, &c);
+            coverage(field(p), screen_width(field, p))
+        };
+        // Straight alpha, in emission order, over an empty destination
+        // — the alpha the blender ends up with is all this compares.
+        let alpha = |p: [f32; 2], joint: bool, a: f32| {
+            let mut acc = 0.0f32;
+            for (f, half) in &boxes {
+                acc += cov(f, *half, false, p) * a * (1.0 - acc);
+            }
+            if joint {
+                acc += cov(&disc.0, disc.1, true, p) * a * (1.0 - acc);
+            }
+            acc
+        };
+        let bare_truth = |p: [f32; 2]| sample(p, &in_arms);
+        let (mut bare, mut with, mut over) = (0.0f64, 0.0f64, 0.0f64);
+        let (mut worst_bare, mut worst_with, mut worst_end) = (0.0f32, 0.0f32, 0.0f32);
+        for py in 10..80 {
+            for px in 10..110 {
+                let p = [px as f32 + 0.5, py as f32 + 0.5];
+                let want = truth(p);
+                let miss = (alpha(p, true, 1.0) - want).abs();
+                // The two BUTT ENDS carry the right-angle corner the
+                // segment test already measured and named; the joint is
+                // what this test is about, so the two are counted apart.
+                let end = [pts[0], pts[2]]
+                    .iter()
+                    .any(|e| ((p[0] - e[0]).powi(2) + (p[1] - e[1]).powi(2)).sqrt() <= t);
+                if end {
+                    worst_end = worst_end.max(miss);
+                } else {
+                    worst_with = worst_with.max(miss);
+                }
+                worst_bare = worst_bare.max(want - alpha(p, false, 1.0));
+                bare += (alpha(p, false, 1.0) - want).abs() as f64;
+                with += miss as f64;
+                // The double blend, on a half-translucent stroke —
+                // measured as what the DISC adds, because the two arms
+                // already overlap each other in the wedge at every
+                // joint and have since the toolkit was written. Each
+                // side is the ink laid past what one blend of its own
+                // silhouette would have laid.
+                let half_a = 0.5f32;
+                let now = (alpha(p, true, half_a) - want * half_a).max(0.0);
+                let before = (alpha(p, false, half_a) - bare_truth(p) * half_a).max(0.0);
+                over += (now - before) as f64;
+            }
+        }
+        // The notch: without the disc a WHOLE PIXEL goes missing at the
+        // outer corner, and the shortfall over the joint adds up to 18
+        // square pixels of a stroke seven wide.
+        assert!(worst_bare >= 0.9, "the notch was only {worst_bare} deep");
+        assert!(bare >= 15.0, "the notch cost only {bare} px");
+        // With it, the picture is the round join, and what is left is
+        // the residue of drawing a union as a sequence of blends: where
+        // the disc's own ramp crosses an arm's, two partial coverages
+        // are composited as if they were independent, and they are not.
+        // A quarter of a pixel at the worst of them, half the total
+        // error of the bare pair, and both numbers measured here.
+        assert!(worst_with <= 0.25, "worst joint pixel {worst_with}");
+        assert!(worst_end <= 0.25, "worst end-cap pixel {worst_end}");
+        assert!(with * 1.9 <= bare, "with {with} bare {bare}");
+        // And the price, named: on a HALF-TRANSLUCENT stroke the disc
+        // lays about six square pixels of extra ink — a sixth of its
+        // own area, all of it inside the silhouette, none outside it.
+        // On an opaque stroke it costs nothing at all, because `a = 1`
+        // composites the same either way. The arms' own overlap in the
+        // wedge is not counted: it is older than this lane and the disc
+        // does not add to it.
+        assert!(over <= 7.0, "the double blend cost {over} px");
+        assert!(over >= 1.0, "the overlap vanished; the measurement is wrong");
+        // **The alternative, measured rather than asserted.** Shorten
+        // each arm by t/2 so nothing overlaps and the disc is tangent
+        // to both caps — and the crescent between a flat cap and the
+        // circle it touches at ONE POINT is left empty, at every angle,
+        // turn or no turn. A hole is worse than a hot spot.
+        let clipped: Vec<(Frame, [f32; 2])> = [(pts[0], pts[1]), (pts[1], pts[2])]
+            .iter()
+            .enumerate()
+            .map(|(i, (a, b))| {
+                let (f, len) = Frame::along(*a, *b).unwrap();
+                let cut = t * 0.5;
+                let mid = if i == 0 { -cut * 0.5 } else { cut * 0.5 };
+                (
+                    Frame { centre: f.to_screen([mid, 0.0]), ..f },
+                    [(len - cut) * 0.5, t * 0.5],
+                )
+            })
+            .collect();
+        let mut worst_gap = 0.0f32;
+        for py in 10..80 {
+            for px in 10..110 {
+                let p = [px as f32 + 0.5, py as f32 + 0.5];
+                let mut acc = 0.0f32;
+                for (f, half) in clipped.iter().chain(std::iter::once(&disc)) {
+                    let round = std::ptr::eq(f, &disc.0);
+                    acc += cov(f, *half, round, p) * (1.0 - acc);
+                }
+                worst_gap = worst_gap.max(truth(p) - acc);
+            }
+        }
+        assert!(worst_gap >= 0.3, "the clipped arms left only {worst_gap}");
     }
 
     /// The three brakes on the split, each for its own reason (§7b):

@@ -11,6 +11,7 @@
 
 use crate::base::Rect;
 use crate::font::{Figures, FontSystem, Glyph};
+use crate::sdf::{thin_band, Frame};
 use crate::theme::Color;
 use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -1362,6 +1363,18 @@ impl DrawList {
         self.push_quad(p, [[u, v]; 4], color);
     }
 
+    /// An axis-aligned rectangle, hard-edged — and it stays that way on
+    /// every lane (f3 §3.3, and §2.7 before it).
+    ///
+    /// This is the TERMINAL's own primitive: the shell plugin draws
+    /// every cell background, the cursor and the selection through
+    /// `HostApi::rect`, and none of them may ever reach the field.
+    /// Three reasons, none of them about cost alone. Cell backgrounds
+    /// touch side by side, so an antialiased edge is a SEAM — two
+    /// neighbours at half coverage draw a lattice across the whole
+    /// screen. Cells sit on integer coordinates by construction, so
+    /// there is nothing to smooth. And an 80×24 grid is 1 920 records a
+    /// frame, 115 000 a second, for a picture that was already exact.
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
         self.cmd(|| DrawCmd::Rect { r: [x, y, w, h], color });
         self.rect_verts(x, y, w, h, color);
@@ -1397,7 +1410,10 @@ impl DrawList {
     /// builds every chart stroke out of `line_verts`, so a cap on the
     /// segment would double-draw at each joint, which is exactly what
     /// `ring`'s watertight band exists to avoid and what additive runs
-    /// show as a bright pip.
+    /// show as a bright pip. The corner of a PATH is a separate disc,
+    /// laid once by [`DrawList::joints`] where the path actually turns
+    /// (f3 §3.1) — never by the segment, which cannot know whether
+    /// anything follows it.
     pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, t: f32, color: Color) {
         self.cmd(|| DrawCmd::Line {
             from: [x0, y0],
@@ -1409,6 +1425,28 @@ impl DrawList {
     }
 
     fn line_verts(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, t: f32, color: Color) {
+        // f3 §K4 — THE DIAGONAL GOES TO THE FIELD, THE AXIS DOES NOT.
+        //
+        // An axis-aligned segment is a rectangle on the screen's own
+        // grid, and §2.7 has already ruled on those: a rule, an
+        // underline, a table guide and a grid line are the interface's
+        // own edges, the raster puts them exactly where they belong,
+        // and a coverage ramp could only smear them across two half-lit
+        // pixels. They stay quads, at four vertices and no record, bit
+        // for bit what they are today. That is most of this method's
+        // callers by count (`ui.rs`, `list.rs`, `tabs.rs`, `panel.rs`,
+        // the editor's grid) and all of its cheap ones.
+        //
+        // A DIAGONAL is the case the raster cannot hold: it has no
+        // representation on the grid at all, and what it draws is the
+        // staircase MSAA was covering for. Those go to the field — the
+        // tick and the cross of every checkbox, the menu's chevron, the
+        // sort arrow and the disclosure triangle of every list, the
+        // dashes of a focus ring on a slanted control, every icon and
+        // every chart a plugin draws through the ABI's `polyline`.
+        if self.vector && x0 != x1 && y0 != y1 && self.segment_verts([x0, y0], [x1, y1], t, color) {
+            return;
+        }
         let dx = x1 - x0;
         let dy = y1 - y0;
         let len = (dx * dx + dy * dy).sqrt().max(0.0001);
@@ -1442,6 +1480,63 @@ impl DrawList {
             let a = pts[pts.len() - 1];
             let b = pts[0];
             self.line_verts(a[0], a[1], b[0], b[1], t, color);
+        }
+        if self.vector {
+            self.joints(pts, t, color, closed);
+        }
+    }
+
+    /// The joints of a stroked path on the vector lane (f3 §3.1): one
+    /// disc of radius `t/2` at every corner where the field draws BOTH
+    /// sides of the turn.
+    ///
+    /// Two butt-capped segments meeting at an angle leave the outer
+    /// wedge empty. The hard raster left it empty too — it is the notch
+    /// on every triangle and every tick the toolkit draws — and
+    /// antialiasing does not hide it, it draws it accurately. The disc
+    /// closes it, and the union becomes the round join a stroked path
+    /// is supposed to have. Measured against the true stroke — the set
+    /// of points within `t/2` of the path — the bare pair is a whole
+    /// pixel short at the corner and the disc lands within a tenth
+    /// (`sdf::tests::a_joint_disc_closes_the_notch_the_two_segments_leave`).
+    ///
+    /// **Both sides, and the reason.** Where one arm is axis-aligned
+    /// its edge is hard and exactly on the grid; a disc would lay a
+    /// soft half-pixel halo along it and move a picture §2.7 promised
+    /// not to move. Those joints stay exactly as they are today. So do
+    /// straight ones — a disc on a path that does not turn is ink for
+    /// nothing.
+    ///
+    /// The disc DOES lie over the two segments it joins, and §3.1's
+    /// claim that nothing overlaps is not true of this decomposition.
+    /// For an opaque stroke that is invisible; for a translucent one it
+    /// is a bounded double blend — six square pixels of extra ink on a
+    /// seven-pixel stroke at half alpha, a sixth of the disc's own
+    /// area, all of it inside the silhouette. The alternative —
+    /// shortening each arm by `t/2` so nothing overlaps — leaves the
+    /// crescent between a flat cap and the circle tangent to it EMPTY,
+    /// at every angle, turn or no turn. The same test measures that
+    /// too: a hole is worse than a hot spot.
+    fn joints(&mut self, pts: &[[f32; 2]], t: f32, color: Color, closed: bool) {
+        let n = pts.len();
+        let diagonal = |a: [f32; 2], b: [f32; 2]| a[0] != b[0] && a[1] != b[1];
+        let mut corner = |a: [f32; 2], v: [f32; 2], b: [f32; 2]| {
+            if !diagonal(a, v) || !diagonal(v, b) {
+                return;
+            }
+            let (e0, e1) = ([v[0] - a[0], v[1] - a[1]], [b[0] - v[0], b[1] - v[1]]);
+            // A path that runs straight through has nothing to join.
+            if e0[0] * e1[1] - e0[1] * e1[0] == 0.0 {
+                return;
+            }
+            self.joint_verts(v, t, color);
+        };
+        for w in pts.windows(3) {
+            corner(w[0], w[1], w[2]);
+        }
+        if closed && n >= 3 {
+            corner(pts[n - 2], pts[n - 1], pts[0]);
+            corner(pts[n - 1], pts[0], pts[1]);
         }
     }
 
@@ -1986,6 +2081,148 @@ impl DrawList {
             fill: colour,
             frame: split.map(|(band, _)| band),
         });
+    }
+
+    /// One FILLED shape of the vector family read in an oriented frame
+    /// (f3 §K4) — the entry the whole diagonal lane is built out of.
+    ///
+    /// The record is the Box family's, untouched: the shader takes the
+    /// fragment's local position out of `uv` and knows nothing about
+    /// any frame. What makes this a diagonal is where the four vertices
+    /// are put and what they carry — position through the frame, uv the
+    /// local corner they were built from — and the rasteriser inverts
+    /// the map for free. **The renderer needed no change for K4 at
+    /// all**; see [`crate::sdf::Frame`] for why, and for why the
+    /// antialiasing survives the rotation.
+    ///
+    /// Three of `shape_verts`' mechanisms are deliberately absent:
+    ///
+    /// * **No snap** (§2.7). There is no pixel grid to snap a diagonal
+    ///   to; rounding its ends would move the path the caller drew.
+    /// * **No split** (§7b). The frame of five rectangles is
+    ///   axis-aligned, and a stroke has no interior to save — its core
+    ///   is a pixel wide and [`CORE_MIN`] would refuse it anyway.
+    /// * **No weld** (§2.10). The offer compares centre, half sizes and
+    ///   corners, which the two arms of a CROSS share exactly
+    ///   (`checkbox.rs:70-71` draws that very pair) — and they are not
+    ///   the same silhouette. An oriented record neither joins one nor
+    ///   offers itself, and it closes any offer standing, which is what
+    ///   drawing anything at all does.
+    ///
+    /// The frame must be ORTHONORMAL: the padding below is stated in
+    /// local units and spent as screen pixels, which is the same number
+    /// only when a local unit is a pixel and the axes are square to
+    /// each other. Everything [`Frame`] builds is; a sheared frame
+    /// would have to divide the pad by the sine of its own angle.
+    fn oriented_fill(&mut self, f: Frame, half: [f32; 2], corners: [Corner; 4], colour: Color) {
+        debug_assert!(
+            (f.ux[0] * f.ux[0] + f.ux[1] * f.ux[1] - 1.0).abs() < 1e-3
+                && (f.ux[0] * f.uy[0] + f.ux[1] * f.uy[1]).abs() < 1e-3,
+            "an oriented frame must be orthonormal"
+        );
+        if !(half[0] > 0.0) || !(half[1] > 0.0) {
+            return;
+        }
+        // The same ceiling `ring_verts` and `shape_verts` keep: a
+        // corner deeper than the short half side would meet itself.
+        let cap = half[0].min(half[1]);
+        let mut flags = ((ShapeKind::Box as u32) << Shape::KIND_SHIFT) | Shape::FILL;
+        let mut corner = [0.0f32; 4];
+        for (i, c) in corners.iter().enumerate() {
+            flags |= (c.style as u32) << (2 * i as u32);
+            corner[i] = c.size.clamp(0.0, cap);
+        }
+        let idx = self.shapes.len() as u32;
+        self.shapes.push(Shape {
+            half,
+            stroke: 0.0,
+            feather: 0.0,
+            corner,
+            stroke_c: [0.0; 4],
+            flags,
+            arc_half: 0.0,
+            arc_dir: 0.0,
+            _pad: 0.0,
+        });
+        let ext = [half[0] + AA_PAD, half[1] + AA_PAD];
+        let l = [
+            [-ext[0], -ext[1]],
+            [ext[0], -ext[1]],
+            [ext[0], ext[1]],
+            [-ext[0], ext[1]],
+        ];
+        let col = colour.to_array();
+        self.run_for(Some(SHAPE));
+        let v = |i: usize| Vertex {
+            pos: f.to_screen(l[i]),
+            uv: l[i],
+            color: col,
+            shape: idx,
+        };
+        self.verts
+            .extend_from_slice(&[v(0), v(1), v(2), v(0), v(2), v(3)]);
+        self.seal();
+        self.weld = None;
+    }
+
+    /// The vector lane's straight segment (f3 §3.1): the oriented box
+    /// [`DrawList::line`] has always drawn, given the field that makes
+    /// its two long edges analytic instead of quantised.
+    ///
+    /// Ends stay CUT SQUARE across the path — `line`'s own contract,
+    /// and the reason a polyline can be built out of these at all. The
+    /// cap that a stroke needs at a corner is a separate disc, laid by
+    /// [`DrawList::polyline`], because a cap on the segment would be
+    /// drawn twice at every joint.
+    ///
+    /// `false` where there is no segment to speak of, so the caller can
+    /// fall back to the geometry it would have drawn.
+    fn segment_verts(&mut self, a: [f32; 2], b: [f32; 2], t: f32, color: Color) -> bool {
+        if !(t > 0.0) {
+            return false;
+        }
+        let Some((f, len)) = Frame::along(a, b) else {
+            return false;
+        };
+        // §2.8's energy rule, in the one domain where it fires: the
+        // snapped lane has already rounded every sub-pixel band away,
+        // and a diagonal has no grid to round to. See [`thin_band`].
+        let (w, dim) = thin_band(t);
+        self.oriented_fill(
+            f,
+            [len * 0.5, w * 0.5],
+            [Corner::SQUARE; 4],
+            color.fade(dim),
+        );
+        true
+    }
+
+    /// The disc that closes one joint of a polyline (f3 §3.1): radius
+    /// `t/2` at the corner, tangent to both segments' long edges, so
+    /// the union is the round join a stroked path is supposed to have.
+    ///
+    /// It is a Box record with round corners as big as its own half
+    /// size — `d_round(p, [r, r], r)` IS `|p| − r`, proved in
+    /// [`crate::sdf`] — so a joint costs one record and one quad and
+    /// the shader learns nothing. It does NOT go through `shape_verts`,
+    /// which would snap it to the pixel grid: a corner sits where the
+    /// path put it, and moving it half a pixel would bend the line.
+    ///
+    /// It takes the same [`thin_band`] treatment as the arms it joins,
+    /// and for the arms' reason rather than its own: a disc's mass goes
+    /// as the square of its radius, not as its width, so this dims the
+    /// joint slightly further than its area alone would ask. Matching
+    /// the strokes it belongs to is what a joint is for, and both
+    /// numbers are under a pixel wherever the rule fires at all.
+    fn joint_verts(&mut self, at: [f32; 2], t: f32, color: Color) {
+        let (w, dim) = thin_band(t);
+        let r = w * 0.5;
+        self.oriented_fill(
+            Frame::upright(at),
+            [r, r],
+            [Corner::round(r); 4],
+            color.fade(dim),
+        );
     }
 
     /// Re-cuts a welded bed's frame at a deeper band (f3 §7b): the core
@@ -3939,6 +4176,203 @@ mod tests {
             }
             assert_eq!(once.verts.len(), pair.verts.len());
         }
+    }
+
+    // -----------------------------------------------------------------
+    // K4 — the diagonal lane (f3 §3.1).
+
+    /// The half of §2.7 that K4 must not break: an axis-aligned segment
+    /// is drawn by the same four vertices on both lanes, in the same
+    /// run, with no record at all. Rules, underlines, table guides, tab
+    /// underlines and the editor's grid all come through here, and the
+    /// vector switch must be invisible to every one of them.
+    #[test]
+    fn an_axis_aligned_rule_is_the_same_quad_on_both_lanes() {
+        let draw = |vector: bool| {
+            let mut dl = DrawList::recording();
+            dl.set_vector(vector);
+            dl.line(10.0, 20.5, 90.0, 20.5, 2.0, ink());
+            dl.line(10.25, 4.0, 10.25, 40.0, 1.0, wash());
+            // A closed path on the grid: four axis-aligned arms and
+            // four right-angle joints, and not one disc among them.
+            dl.polyline(
+                &[[0.0, 0.0], [30.0, 0.0], [30.0, 20.0], [0.0, 20.0]],
+                1.0,
+                ink(),
+                true,
+            );
+            dl
+        };
+        let (old, new) = (draw(false), draw(true));
+        assert_eq!(dump(&old), dump(&new), "the register moved");
+        assert_eq!(new.shape_len(), 0, "an axis-aligned segment took the field");
+        assert_eq!(old.verts.len(), new.verts.len());
+        for (a, b) in old.verts.iter().zip(&new.verts) {
+            assert_eq!((a.pos, a.uv, a.color, a.shape), (b.pos, b.uv, b.color, b.shape));
+        }
+        assert!(new.runs.iter().all(|r| r.image != Some(SHAPE)));
+    }
+
+    /// One diagonal, one record, one quad — and the uv contract that
+    /// makes the shader's job free: every vertex carries the LOCAL
+    /// coordinate of the corner it sits on, so `to_screen(uv)` returns
+    /// the position it was built from and the rasteriser hands each
+    /// fragment its own local point without a matrix.
+    #[test]
+    fn a_diagonal_is_one_record_read_along_its_own_axes() {
+        let (a, b) = ([12.0f32, 30.0], [60.0, 66.0]);
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.line(a[0], a[1], b[0], b[1], 3.0, ink());
+        assert_eq!(dl.shape_len(), 1);
+        assert_eq!(dl.verts.len(), 6, "one quad");
+        assert_eq!(dl.runs.last().unwrap().image, Some(SHAPE));
+        let rec = dl.shapes()[0];
+        // 48 × 36 → a 60 px path; the band is the stroke, across it.
+        assert_eq!(rec.half, [30.0, 1.5]);
+        assert_eq!(rec.corner, [0.0; 4]);
+        assert_eq!(rec.flags, Shape::FILL, "square corners, kind Box, fill only");
+        assert_eq!(rec.stroke, 0.0);
+        let (f, len) = Frame::along(a, b).unwrap();
+        assert_eq!(len, 60.0);
+        for v in &dl.verts {
+            assert_eq!(v.shape, 0);
+            // The padded local corner, and the screen point it maps to.
+            assert_eq!(v.uv.map(f32::abs), [31.0, 2.5]);
+            let want = f.to_screen(v.uv);
+            assert!(
+                (v.pos[0] - want[0]).abs() <= 1e-3 && (v.pos[1] - want[1]).abs() <= 1e-3,
+                "{:?} is not to_screen({:?}) = {want:?}",
+                v.pos,
+                v.uv
+            );
+        }
+    }
+
+    /// **The weld trap, and why an oriented record never offers itself.**
+    /// The two arms of a cross — `checkbox.rs:70-71`, drawn on every
+    /// unchecked box in the "cross" tick style — share their centre,
+    /// their half sizes, their corners and their flags exactly. §2.10's
+    /// offer compares those four things, so a bed left open would have
+    /// swallowed the second arm and drawn a single diagonal.
+    #[test]
+    fn the_two_arms_of_a_cross_stay_two_shapes() {
+        let m = Rect::new(20.0, 40.0, 16.0, 16.0);
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.polyline(&[[m.x, m.y], [m.right(), m.bottom()]], 2.0, ink(), false);
+        dl.polyline(&[[m.right(), m.y], [m.x, m.bottom()]], 2.0, ink(), false);
+        assert_eq!(dl.shape_len(), 2, "the second arm welded onto the first");
+        assert_eq!(dl.verts.len(), 12);
+        assert_eq!(dl.shapes()[0], dl.shapes()[1], "the trap: identical records");
+        // Different frames, same record: the two quads do not overlap
+        // in the uv they carry, which is the whole difference.
+        assert_ne!(dl.verts[0].pos, dl.verts[6].pos);
+        // …and a shape drawn after a diagonal cannot weld onto it
+        // either: the offer is closed, not merely unmatched.
+        let r = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.ring_fill(r, &[Corner::SQUARE; 4], 6, wash());
+        dl.line(0.0, 0.0, 10.0, 7.0, 1.0, ink());
+        dl.ring(r, &[Corner::SQUARE; 4], 6, 1.0, ink());
+        assert_eq!(dl.shape_len(), 3, "the border welded across a diagonal");
+    }
+
+    /// A disc lands where the path TURNS and both arms are on the field
+    /// — and nowhere else. The tick of a checkbox turns once, the
+    /// disclosure triangle three times, a straight run not at all, and
+    /// a corner with an axis-aligned arm keeps the picture §2.7
+    /// promised it.
+    #[test]
+    fn a_path_gets_a_disc_where_it_turns_and_nowhere_else() {
+        let count = |pts: &[[f32; 2]], closed: bool| {
+            let mut dl = DrawList::new();
+            dl.set_vector(true);
+            dl.polyline(pts, 2.0, ink(), closed);
+            (dl.shape_len(), dl.verts.len())
+        };
+        // The tick: two diagonal arms, one corner. Three records.
+        let tick = [[10.0f32, 25.0], [18.0, 33.0], [34.0, 12.0]];
+        assert_eq!(count(&tick, false), (3, 18));
+        // A closed triangle with no arm on the grid: three arms, three
+        // corners, six records.
+        let tri = [[10.0f32, 10.0], [26.0, 18.0], [12.0, 26.0]];
+        assert_eq!(count(&tri, true), (6, 36));
+        // The disclosure triangle the toolkit actually draws
+        // (`paint.rs:657`) closes on a VERTICAL edge: two diagonal arms
+        // and one quad, and the two corners that edge touches keep
+        // today's picture — 2 records for the arms, 1 for the single
+        // joint between them, and the vertical arm still a plain quad.
+        let disclosure = [[10.0f32, 10.0], [26.0, 18.0], [10.0, 26.0]];
+        assert_eq!(count(&disclosure, true), (3, 24));
+        // A path that runs straight through its middle point: two
+        // segments, no turn, no disc.
+        let straight = [[0.0f32, 0.0], [10.0, 5.0], [20.0, 10.0]];
+        assert_eq!(count(&straight, false), (2, 12));
+        // One arm on the grid: that corner keeps today's picture.
+        let bent = [[0.0f32, 0.0], [20.0, 0.0], [30.0, 14.0]];
+        assert_eq!(count(&bent, false), (1, 12), "a mixed joint grew a disc");
+        // The disc itself: a Box record with round corners as big as
+        // its own half size, which `sdf` proves is the circle exactly.
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.polyline(&tick, 2.0, ink(), false);
+        let joint = dl.shapes()[2];
+        assert_eq!(joint.half, [1.0, 1.0]);
+        assert_eq!(joint.corner, [1.0; 4]);
+        assert_eq!(joint.flags & Shape::SILHOUETTE, 0b01_01_01_01);
+        // …centred on the corner the path turns at, to the pixel it was
+        // given — no snap: a snapped joint would bend the line.
+        let centre = [
+            dl.verts[12].pos[0] - dl.verts[12].uv[0],
+            dl.verts[12].pos[1] - dl.verts[12].uv[1],
+        ];
+        assert_eq!(centre, tick[1]);
+    }
+
+    /// §2.8 where it actually fires. The snap lifts every sub-pixel
+    /// band on the axis-aligned lane before the record is written; a
+    /// diagonal has no grid to round to, and a single coverage ramp
+    /// over-reads a slab thinner than the filter. So a 0.4 px stroke is
+    /// drawn one pixel wide at 0.4 of its alpha — same mass, no
+    /// shimmer, no fattening — and a stroke at or above a pixel is
+    /// untouched.
+    #[test]
+    fn a_sub_pixel_diagonal_dims_instead_of_fattening() {
+        let record = |t: f32| {
+            let mut dl = DrawList::new();
+            dl.set_vector(true);
+            dl.line(0.0, 0.0, 30.0, 40.0, t, Color::rgba8(255, 255, 255, 128));
+            (dl.shapes()[0], dl.verts[0].color[3])
+        };
+        let (thin, alpha) = record(0.4);
+        assert_eq!(thin.half, [25.0, 0.5], "the band did not reach a pixel");
+        let full = Color::rgba8(255, 255, 255, 128).a;
+        assert!((alpha - full * 0.4).abs() <= 1e-6, "alpha {alpha} of {full}");
+        let (fat, alpha) = record(3.0);
+        assert_eq!(fat.half, [25.0, 1.5]);
+        assert_eq!(alpha, full, "a stroke above a pixel was dimmed");
+    }
+
+    /// The register holds INTENT, and a lane is not one: a polyline is
+    /// a polyline whichever geometry carries it. The twin of
+    /// `the_vector_switch_moves_the_vertices_and_not_the_register`, for
+    /// the primitives K4 moves.
+    #[test]
+    fn the_diagonal_lane_moves_the_vertices_and_not_the_register() {
+        let draw = |vector: bool| {
+            let mut dl = DrawList::recording();
+            dl.set_vector(vector);
+            dl.line(4.0, 5.0, 44.0, 35.0, 2.0, ink());
+            dl.polyline(&[[0.0, 0.0], [12.0, 9.0], [30.0, 2.0]], 1.5, wash(), false);
+            dl
+        };
+        let (old, new) = (draw(false), draw(true));
+        assert_eq!(dump(&old), dump(&new));
+        assert_eq!(old.shape_len(), 0);
+        assert_eq!(new.shape_len(), 4, "two segments, one joint, and the line");
+        assert_ne!(old.verts.len(), new.verts.len());
     }
 
     // -----------------------------------------------------------------
