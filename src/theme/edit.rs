@@ -11,6 +11,14 @@
 //! current state), while a slider MOVES (to preview), and when SAVE writes.
 //! Three callers, one answer, or they drift.
 //!
+//! TWO PAGES, ONE MODEL. The sets above are the editor's ADVANCED page: one
+//! control per thing. The BASIC page at the bottom of this file is the same
+//! theme asked three questions — HUE, SATURATION, LIGHTNESS — and answers
+//! them by moving the tokens the others are DERIVED from ([`tone_edits`]).
+//! Neither page eats the other's work: BASIC is a move RELATIVE to the theme
+//! as it stands, so leaving it folds the move into the file and re-opens at
+//! rest ([`ToneSeeds::shifted`]).
+//!
 //! # What this module deliberately does NOT offer
 //!
 //! Only what the renderer actually draws. The theme language declares far more
@@ -681,6 +689,291 @@ pub fn scrollbar_edits(
     out
 }
 
+// ------------------------------------------------------------- BASIC mode
+//
+// THE WHOLE THEME ON THREE SLIDERS. Everything above this line is the
+// ADVANCED page: nine groups, one control per thing. BASIC is the same
+// theme asked three questions — HUE, SATURATION, LIGHTNESS — and the only
+// way three sliders can move a hundred colours is to move the ones the
+// others are DERIVED from. So this group writes AUTHORS, and lets the
+// cascade do what it already does (5.0b).
+//
+// WHO AUTHORS WHAT, measured in default.theme on 2026-08-17:
+//
+//   palette.accent   the ONE author of the interface's hue and chroma.
+//                    hue.accent = hue(it), chroma.accent = sat(it); the six
+//                    surface rungs are oklch(<fixed L>, k*@chroma.accent,
+//                    @surface.hue) and surface.hue = @hue.accent; the seven
+//                    text roles are oklch(<fixed L>, k*@chroma.accent,
+//                    @hue.accent); [accent], [border], [data] (via
+//                    palette.data = @palette.accent), every [class] base
+//                    and the whole of [component] hang off those.
+//   severity.<r>.text  seven authors, one per MEANING. Each derives its own
+//                    .glyph/.edge/.fill/.on, and accent.warm rides
+//                    severity.warning.text.
+//   surface.lift / text.lift   the two authors of LIGHTNESS that the
+//                    colours above cannot reach: the rungs' L is written
+//                    into each level expression and the language has no
+//                    arithmetic, so "the same ladder, lifted" is a scalar
+//                    the bake applies (bake.rs:519, :525).
+//   palette.black / palette.white   the shade()/tint() targets. NOT touched:
+//                    they are the ends of the axis every other colour is
+//                    measured against, and rotating them rotates the ruler.
+//   palette.neutral  the grey anchor, and its ONLY use is
+//                    severity.offline.text = ensure(@palette.neutral, ...),
+//                    which this group pins directly. Not written.
+//
+// EVERYTHING ELSE IS DERIVED and is deliberately left alone: writing a
+// derived token would pin it, and the next slider move would find it deaf.
+//
+// WHY ONE HUE FOR THE INTERFACE AND A ROTATION FOR SEVERITY IS THE SAME
+// MECHANISM (the owner's 2026-08-17 clarification, which reads like two
+// rules and is one). Every author is rotated by the SAME number of degrees.
+// The chrome family has exactly ONE author, so rotating it lands surfaces,
+// containers, controls and text on a single shared hue — that is 5.0b's
+// cascade, not an extra rule. The severity family has SEVEN authors, so the
+// same rotation carries all seven and the gaps between them survive: green
+// `ok` and red `critical` stay as far apart as their author wrote them.
+// What tells the families apart afterwards is SHADE, and the shades are the
+// master's own ladders — the six surface rungs, the seven text L's, the
+// [state] rungs — none of which this group touches.
+
+/// Every severity role, in declaration order (`ui.rs:86`).
+pub const SEVERITY_ROLES: [SeverityRole; 7] = [
+    SeverityRole::Ok,
+    SeverityRole::Info,
+    SeverityRole::Warning,
+    SeverityRole::Critical,
+    SeverityRole::Contained,
+    SeverityRole::Offline,
+    SeverityRole::Unknown,
+];
+
+/// The three BASIC knobs, as RELATIVE moves over whatever the theme says.
+///
+/// Relative, not absolute, by the owner's decision: an absolute hue would
+/// flatten a theme's `ok`/`critical` pair into one colour, an absolute
+/// chroma would flatten the accent onto the surfaces, and an absolute
+/// lightness would throw away the ladder that makes a theme legible. So a
+/// rotation, a multiplier and an offset — each one leaves every difference
+/// the author wrote exactly where it was.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Tone {
+    /// Degrees added to every author's hue. Wraps; no range.
+    pub hue_deg: f32,
+    /// Multiplier over every author's chroma. 1.0 is the theme unchanged.
+    pub sat: f32,
+    /// Offset added to every author's OKLab L, and to the two ladder lifts.
+    pub light: f32,
+}
+
+impl Tone {
+    /// The theme as it stands. What the three sliders read when BASIC opens,
+    /// and what makes "open the editor and change nothing" a no-op.
+    pub const NEUTRAL: Tone = Tone { hue_deg: 0.0, sat: 1.0, light: 0.0 };
+
+    pub fn is_neutral(&self) -> bool {
+        *self == Tone::NEUTRAL
+    }
+
+    /// The same move, snapped to what the pipeline can actually show.
+    pub fn snapped(self, step: &ToneStep) -> Tone {
+        Tone {
+            hue_deg: snap(self.hue_deg, step.hue_deg),
+            sat: snap(self.sat, step.sat),
+            light: snap(self.light, step.light),
+        }
+    }
+}
+
+fn snap(value: f32, step: f32) -> f32 {
+    if step > 0.0 && step.is_finite() {
+        (value / step).round() * step
+    } else {
+        value
+    }
+}
+
+/// The authors as the LIVE theme resolves them: what a relative move is
+/// relative TO.
+///
+/// The caller fills this from the running theme when BASIC opens — that is
+/// the "know what the source is" half of the job, and it is why the model
+/// takes a struct instead of reading the engine itself: the same three
+/// sliders have to work over the master, over a user's file and over a
+/// preview that has not been saved, and none of those is "the theme" from
+/// inside this module.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ToneSeeds {
+    /// `palette.accent`.
+    pub accent: Oklch,
+    /// `severity.<r>.text`, indexed by [`SEVERITY_ROLES`].
+    pub severity: [Oklch; 7],
+    /// `surface.lift`.
+    pub surface_lift: f32,
+    /// `text.lift`.
+    pub text_lift: f32,
+}
+
+impl ToneSeeds {
+    /// The seeds AFTER a move — the fold that makes BASIC survive a trip
+    /// through ADVANCED.
+    ///
+    /// Leaving BASIC and coming back re-reads the seeds off the live theme,
+    /// so the three sliders return to [`Tone::NEUTRAL`] while the LOOK stays
+    /// where it was put: the move has become part of what the sliders are
+    /// now relative to. Nothing is lost in either direction — ADVANCED edits
+    /// land on the same authors and BASIC picks them up on the way back, and
+    /// an ADVANCED-only token (a focus ring's colour, a scrollbar's width)
+    /// is never written here at all. This function is what a test can hold
+    /// that promise to, and it applies the same clamps the writes do so the
+    /// two cannot drift.
+    pub fn shifted(&self, tone: Tone) -> ToneSeeds {
+        let mut severity = self.severity;
+        for s in severity.iter_mut() {
+            *s = tone_shift(*s, tone);
+        }
+        ToneSeeds {
+            accent: tone_shift(self.accent, tone),
+            severity,
+            surface_lift: clamp_surface_lift(self.surface_lift + tone.light),
+            text_lift: clamp_text_lift(self.text_lift + tone.light),
+        }
+    }
+}
+
+/// One author, moved. Hue wraps, chroma cannot go negative, L is a real
+/// 0..1 quantity and is held there — none of the three is a gamut clamp,
+/// which the owner ruled out; they are what the numbers MEAN.
+fn tone_shift(c: Oklch, tone: Tone) -> Oklch {
+    Oklch {
+        l: (c.l + tone.light).clamp(0.0, 1.0),
+        c: (c.c * tone.sat).max(0.0),
+        h: (c.h + tone.hue_deg).rem_euclid(360.0),
+        alpha: c.alpha,
+    }
+}
+
+/// The bake's own wall (`bake.rs:519`), not a new opinion: writing a wilder
+/// number saves a file that resolves to the clamp anyway and reopens with a
+/// slider past its own end.
+fn clamp_surface_lift(v: f32) -> f32 {
+    v.clamp(-0.09, 0.09)
+}
+
+/// The bake's own wall for the text ladder (`bake.rs:525`).
+fn clamp_text_lift(v: f32) -> f32 {
+    v.clamp(-0.10, 0.10)
+}
+
+/// BASIC's three sliders, as edits to the theme's authors.
+///
+/// TEN TOKENS AND NO MORE, every one of them already on this module's ALIVE
+/// list with its reader named: `palette.accent`, the seven
+/// `severity.<r>.text`, `surface.lift` and `text.lift` — plus `surface.hue`
+/// on the one condition below.
+///
+/// WHY SATURATION DOES NOT TOUCH `surface.chroma` OR `text.chroma`. Both
+/// ladders take their C from `@chroma.accent = sat(@palette.accent)` and are
+/// THEN scaled by those two scalars at bake. Scaling the seed and the scalar
+/// both would square the slider: a 1.2 nudge would land as 1.44 on every
+/// surface and every letter. So SATURATION moves the seed alone, and a
+/// theme's own `surface.chroma = 1.4` survives the trip as the extra tint
+/// its author meant.
+///
+/// WHY LIGHTNESS DOES NEED THE TWO LIFTS. The opposite case: the surface
+/// rungs and the text roles carry their L as a LITERAL in each expression
+/// (`oklch(0.232, …)`) and take nothing but hue and chroma from the seed, so
+/// moving the seed's L moves the accent, the borders and the class bases and
+/// leaves every bed and every letter exactly where they were. `surface.lift`
+/// and `text.lift` are the master's own answer to that, and this is what
+/// they are for.
+///
+/// THE ONE CONDITIONAL WRITE. `surface.hue` is a reference in the master
+/// (`@hue.accent`) and a theme is allowed to override it with plain degrees,
+/// cutting the beds loose from the chrome. BASIC's HUE slider promises ONE
+/// hue for the whole interface, and over such a theme it could not keep that
+/// promise: the accent would turn and the beds would not. So a hue move
+/// re-points the token at the accent, and — the same shape as
+/// [`border_colour_edit`] — a move that is NOT a hue move does not send it,
+/// because arriving on the page and dragging SATURATION must not silently
+/// re-weld a surface hue somebody chose on purpose.
+pub fn tone_edits(scope: Scope, seeds: &ToneSeeds, tone: Tone) -> Vec<Edit> {
+    let Scope::Theme = scope;
+    let mut out = Vec::with_capacity(11);
+    out.push(accent_edit(scope, tone_shift(seeds.accent, tone)));
+    if tone.hue_deg != 0.0 {
+        out.push(Edit::new("surface.hue", "@hue.accent"));
+    }
+    for (i, role) in SEVERITY_ROLES.iter().enumerate() {
+        out.push(severity_role_edit(scope, *role, tone_shift(seeds.severity[i], tone)));
+    }
+    out.push(Edit::new(
+        "surface.lift",
+        format!("{:.4}", clamp_surface_lift(seeds.surface_lift + tone.light)),
+    ));
+    out.push(Edit::new(
+        "text.lift",
+        format!("{:.4}", clamp_text_lift(seeds.text_lift + tone.light)),
+    ));
+    out
+}
+
+/// How far one notch of each BASIC slider moves.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ToneStep {
+    /// Degrees per notch of HUE.
+    pub hue_deg: f32,
+    /// Multiplier per notch of SATURATION.
+    pub sat: f32,
+    /// OKLab L per notch of LIGHTNESS.
+    pub light: f32,
+}
+
+/// What [`tone_step`] assumes when nobody has said. Eight bits: the floor
+/// every swapchain supports, and the same default the desktop's config
+/// carries (`nacelle-desktop/src/config.rs`, `color_prefs().depth`). A step
+/// COARSER than the pipeline is honest — every notch changes the picture; a
+/// step finer is a slider that does nothing for several notches and reads
+/// as broken, so the unknown case takes the coarse side.
+pub const DEFAULT_DEPTH_BITS: u32 = 8;
+
+/// The slider's notch, from the swapchain's bit depth.
+///
+/// WHERE THE DEPTH LIVES, and why this is a PARAMETER and not a token. The
+/// depth is not a look — it is what the compositor was asked for, chosen on
+/// SETTINGS -> COLOR (the DEPTH chips, 8/10/12/16) and kept in the desktop's
+/// own config beside the colour space, the LUT and the ICC profile. Putting
+/// it in the theme would let a theme file lie about the hardware, and would
+/// break the rule that a theme carries appearance and nothing else; reading
+/// it from here is worse still, since libnacelle has no config and the value
+/// can change while the editor is open. So it arrives as an argument, `None`
+/// meaning nobody said.
+///
+/// THE ARITHMETIC. One code of the output channel is `q = 1/(2^bits - 1)`,
+/// and a notch is the smallest move that can change one code:
+///
+/// * LIGHTNESS is an offset in OKLab L over the same 0..1 span, so the notch
+///   is `q` itself.
+/// * SATURATION is a multiplier over the seed's chroma `C`, so a notch of
+///   `k` moves the output by `k*C` and the notch is `q/C`.
+/// * HUE turns a colour of chroma `C` along an arc, so `C * theta = q` and
+///   the notch is `q/C` radians.
+///
+/// `C` is the seed's own chroma, so a grey theme gets coarse notches and a
+/// vivid one fine ones — which is right: a rotation of a grey moves nothing
+/// however far it goes. The guard is `C.max(q)`: below one code the seed is
+/// achromatic at this depth, and the two derived notches settle at 1.0 and
+/// one radian (57.3 deg) rather than running away. No invented constant.
+pub fn tone_step(depth_bits: Option<u32>, seed_chroma: f32) -> ToneStep {
+    // 16 is the widest the DEPTH chips offer and the widest a float step is
+    // worth stating; 1 keeps the shift below from eating the whole word.
+    let bits = depth_bits.unwrap_or(DEFAULT_DEPTH_BITS).clamp(1, 16);
+    let q = 1.0 / ((1u32 << bits) - 1) as f32;
+    let c = seed_chroma.max(q);
+    ToneStep { hue_deg: (q / c).to_degrees(), sat: q / c, light: q }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -988,6 +1281,10 @@ mod tests {
             all.extend(focus_ring_edits(Scope::Theme, enabled, &ring));
         }
         all.push(unfocused_dim_edit(Scope::Theme, 0.62));
+        // BASIC's three sliders, both sides of the one conditional write.
+        for tone in [Tone::NEUTRAL, Tone { hue_deg: 37.0, sat: 1.3, light: -0.02 }] {
+            all.extend(tone_edits(Scope::Theme, &seeds(), tone));
+        }
         all.extend(menu_edits(Scope::Theme, colour, colour, 0.2, colour));
         all.extend(tooltip_edits(Scope::Theme, colour, colour, 0.2, colour));
         for (mode, auto_hide, track) in [
@@ -1236,5 +1533,229 @@ mod tests {
             of(&off, "component.scrollbar.track").is_none(),
             "track OFF overwrote the theme's groove colour"
         );
+    }
+
+    // ------------------------------------------------------------- BASIC
+
+    /// The master's own authors, near enough: a mint accent, seven severity
+    /// hues spread round the circle, both ladders unlifted.
+    fn seeds() -> ToneSeeds {
+        ToneSeeds {
+            accent: c(0.82, 0.130, 162.0, 1.0),
+            severity: [
+                c(0.78, 0.170, 150.0, 1.0), // ok
+                c(0.76, 0.120, 230.0, 1.0), // info
+                c(0.80, 0.150, 80.0, 1.0),  // warning
+                c(0.62, 0.220, 25.0, 1.0),  // critical
+                c(0.72, 0.160, 55.0, 1.0),  // contained
+                c(0.60, 0.010, 160.0, 1.0), // offline (the grey anchor)
+                c(0.70, 0.100, 300.0, 1.0), // unknown
+            ],
+            surface_lift: 0.0,
+            text_lift: 0.0,
+        }
+    }
+
+    fn value_of(edits: &[Edit], token: &str) -> Option<String> {
+        edits.iter().find(|e| e.token == token).map(|e| e.value.clone())
+    }
+
+    /// The set is closed at ten tokens plus the one conditional weld, and
+    /// every one of them is an AUTHOR. The two derived families a slider
+    /// might tempt somebody into — `hue.accent`/`chroma.accent`, which are
+    /// literally `hue(@palette.accent)` and `sat(@palette.accent)` — must
+    /// never be written: pinning them would cut the cascade at the joint
+    /// and the next drag would move the seed and nothing else.
+    #[test]
+    fn basic_writes_authors_only_and_nothing_derived() {
+        let quiet = tone_edits(Scope::Theme, &seeds(), Tone { hue_deg: 0.0, sat: 1.2, light: 0.01 });
+        let names: Vec<&str> = quiet.iter().map(|e| e.token).collect();
+        assert_eq!(
+            names,
+            [
+                "palette.accent",
+                "severity.ok.text",
+                "severity.info.text",
+                "severity.warning.text",
+                "severity.critical.text",
+                "severity.contained.text",
+                "severity.offline.text",
+                "severity.unknown.text",
+                "surface.lift",
+                "text.lift",
+            ],
+            "BASIC's token set drifted"
+        );
+        for derived in [
+            "hue.accent",
+            "chroma.accent",
+            "accent.primary",
+            "text.title",
+            "surface.panel",
+            "surface.chroma",
+            "text.chroma",
+            "palette.neutral",
+            "palette.black",
+            "palette.white",
+        ] {
+            assert!(
+                value_of(&quiet, derived).is_none(),
+                "BASIC pinned `{derived}`, which the cascade derives — the next drag would find it deaf"
+            );
+        }
+        // Doubling the slider is the trap this avoids: SATURATION scales the
+        // seed, and the two ladder scalars stay the theme's own.
+        let loud = tone_edits(Scope::Theme, &seeds(), Tone { hue_deg: 0.0, sat: 2.0, light: 0.0 });
+        assert!(value_of(&loud, "surface.chroma").is_none());
+        assert!(value_of(&loud, "text.chroma").is_none());
+    }
+
+    /// The rotation is RELATIVE, which is the whole of the owner's decision:
+    /// every author turns by the same number of degrees, so the chrome —
+    /// which has ONE author — lands on one hue, and severity — which has
+    /// SEVEN — keeps every gap its author wrote.
+    #[test]
+    fn a_hue_move_turns_every_author_by_the_same_degrees() {
+        let s = seeds();
+        for turn in [17.0f32, 90.0, 213.0, -140.0] {
+            let e = tone_edits(Scope::Theme, &s, Tone { hue_deg: turn, ..Tone::NEUTRAL });
+            let hue_written = |token: &str| -> f32 {
+                let v = value_of(&e, token).unwrap();
+                let inner = v.trim_start_matches("oklch(").trim_end_matches(')');
+                inner.split(',').nth(2).unwrap().trim().parse::<f32>().unwrap()
+            };
+            let want = |h: f32| (h + turn).rem_euclid(360.0);
+            assert!((hue_written("palette.accent") - want(s.accent.h)).abs() < 0.02);
+            for (i, role) in SEVERITY_ROLES.iter().enumerate() {
+                let token = severity_role_edit(Scope::Theme, *role, s.severity[i]).token;
+                assert!(
+                    (hue_written(token) - want(s.severity[i].h)).abs() < 0.02,
+                    "{token} did not turn with the rest at {turn} deg"
+                );
+            }
+            // The gaps that carry MEANING survive: ok and critical stay as
+            // far apart as the author put them, whatever the slider says.
+            let gap = |a: f32, b: f32| {
+                let d = (a - b).rem_euclid(360.0);
+                d.min(360.0 - d)
+            };
+            let before = gap(s.severity[0].h, s.severity[3].h);
+            let after = gap(hue_written("severity.ok.text"), hue_written("severity.critical.text"));
+            assert!((before - after).abs() < 0.05, "severity flattened: {before} -> {after}");
+        }
+    }
+
+    /// LIGHTNESS has to reach the beds and the letters, and they do not take
+    /// their L from the seed — the two ladder lifts are the only road there.
+    /// The walls are the bake's own, so the file never saves a number that
+    /// resolves to something else.
+    #[test]
+    fn lightness_moves_the_seed_and_both_ladders_and_stops_at_the_bakes_walls() {
+        let e = tone_edits(Scope::Theme, &seeds(), Tone { light: 0.03, ..Tone::NEUTRAL });
+        assert_eq!(value_of(&e, "surface.lift").unwrap(), "0.0300");
+        assert_eq!(value_of(&e, "text.lift").unwrap(), "0.0300");
+        assert!(value_of(&e, "palette.accent").unwrap().starts_with("oklch(0.8500"));
+        // Past the wall the two ladders part company, because the master
+        // gives them different walls (bake.rs:519 and :525).
+        let far = tone_edits(Scope::Theme, &seeds(), Tone { light: 0.5, ..Tone::NEUTRAL });
+        assert_eq!(value_of(&far, "surface.lift").unwrap(), "0.0900");
+        assert_eq!(value_of(&far, "text.lift").unwrap(), "0.1000");
+        // and L is a real quantity: it stops at white, not past it.
+        assert!(value_of(&far, "palette.accent").unwrap().starts_with("oklch(1.0000"));
+        let down = tone_edits(Scope::Theme, &seeds(), Tone { light: -0.5, ..Tone::NEUTRAL });
+        assert_eq!(value_of(&down, "surface.lift").unwrap(), "-0.0900");
+        assert_eq!(value_of(&down, "text.lift").unwrap(), "-0.1000");
+    }
+
+    /// The weld is conditional, and the condition is the promise: only a HUE
+    /// move claims one hue for the interface, so only a HUE move re-points
+    /// `surface.hue` at the accent. Dragging SATURATION over a theme that
+    /// cut its beds loose must leave them loose.
+    #[test]
+    fn only_a_hue_move_re_welds_the_surface_hue() {
+        let s = seeds();
+        for tone in [
+            Tone::NEUTRAL,
+            Tone { sat: 1.5, ..Tone::NEUTRAL },
+            Tone { light: 0.04, ..Tone::NEUTRAL },
+        ] {
+            assert!(
+                value_of(&tone_edits(Scope::Theme, &s, tone), "surface.hue").is_none(),
+                "a move that is not a hue move re-welded the surface hue: {tone:?}"
+            );
+        }
+        let turned = tone_edits(Scope::Theme, &s, Tone { hue_deg: -1.0, ..Tone::NEUTRAL });
+        assert_eq!(
+            value_of(&turned, "surface.hue").unwrap(),
+            "@hue.accent",
+            "the weld must be a REFERENCE — a number would cut the beds loose again on the next drag"
+        );
+    }
+
+    /// BASIC and ADVANCED do not eat each other's work. Leaving BASIC folds
+    /// the move into the seeds and re-opens at NEUTRAL: same file, sliders
+    /// back at rest. The fold uses the same clamps as the writes, so a move
+    /// that hit a wall re-opens where it actually landed.
+    #[test]
+    fn leaving_basic_and_coming_back_writes_the_same_theme() {
+        let s = seeds();
+        for tone in [
+            Tone { hue_deg: 40.0, sat: 1.25, light: 0.02 },
+            Tone { hue_deg: -200.0, sat: 0.4, light: -0.5 }, // past both walls
+            Tone::NEUTRAL,
+        ] {
+            let once = tone_edits(Scope::Theme, &s, tone);
+            let rebased = tone_edits(Scope::Theme, &s.shifted(tone), Tone::NEUTRAL);
+            let strip = |v: Vec<Edit>| -> Vec<Edit> {
+                v.into_iter().filter(|e| e.token != "surface.hue").collect()
+            };
+            assert_eq!(
+                strip(once),
+                strip(rebased),
+                "a trip through ADVANCED changed the theme: {tone:?}"
+            );
+        }
+        // Two BASIC moves in a row are one move: relative composes.
+        let a = Tone { hue_deg: 30.0, sat: 1.2, light: 0.01 };
+        let b = Tone { hue_deg: 45.0, sat: 1.5, light: 0.02 };
+        let both = Tone { hue_deg: 75.0, sat: 1.8, light: 0.03 };
+        let stepwise = s.shifted(a).shifted(b);
+        let direct = s.shifted(both);
+        assert!((stepwise.accent.h - direct.accent.h).abs() < 0.05);
+        assert!((stepwise.accent.c - direct.accent.c).abs() < 1e-4);
+        assert!((stepwise.accent.l - direct.accent.l).abs() < 1e-4);
+    }
+
+    /// The notch is the smallest move that can change one output code, so a
+    /// deeper swapchain gets a finer one and nothing else about the sliders
+    /// changes. Unknown depth takes the coarse side on purpose.
+    #[test]
+    fn the_notch_narrows_with_the_swapchains_depth() {
+        let chroma = 0.13;
+        let eight = tone_step(Some(8), chroma);
+        let ten = tone_step(Some(10), chroma);
+        let sixteen = tone_step(Some(16), chroma);
+        assert!((eight.light - 1.0 / 255.0).abs() < 1e-6);
+        assert!((ten.light - 1.0 / 1023.0).abs() < 1e-6);
+        assert!(sixteen.light < ten.light && ten.light < eight.light);
+        assert!(sixteen.hue_deg < ten.hue_deg && ten.hue_deg < eight.hue_deg);
+        assert!(sixteen.sat < ten.sat && ten.sat < eight.sat);
+        // 8 bits on a mint seed: a shade under two degrees a notch, three
+        // percent of chroma, one 255th of L. Numbers a hand can feel.
+        assert!((eight.hue_deg - 1.728).abs() < 0.01, "{}", eight.hue_deg);
+        assert!((eight.sat - 0.0302).abs() < 1e-3, "{}", eight.sat);
+        // Nobody said: 8 bits, the floor every swapchain supports.
+        assert_eq!(tone_step(None, chroma), tone_step(Some(DEFAULT_DEPTH_BITS), chroma));
+        // A grey seed cannot be turned however far the slider goes, so the
+        // guard settles the two derived notches at one code's worth rather
+        // than letting them run away: one radian and a full multiplier.
+        let grey = tone_step(Some(8), 0.0);
+        assert!((grey.sat - 1.0).abs() < 1e-5, "{}", grey.sat);
+        assert!((grey.hue_deg - 57.2958).abs() < 0.01, "{}", grey.hue_deg);
+        // And a snapped move lands on the notch, so the file never carries
+        // a number finer than the screen can show.
+        let snapped = Tone { hue_deg: 5.0, sat: 1.111, light: 0.007 }.snapped(&eight);
+        assert!((snapped.hue_deg / eight.hue_deg).fract().abs() < 1e-3, "{snapped:?}");
+        assert!(Tone::NEUTRAL.is_neutral() && !snapped.is_neutral());
     }
 }

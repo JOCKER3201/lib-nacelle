@@ -1980,6 +1980,24 @@ decor.enabled    = false
         (schema, r, t)
     }
 
+    /// An edit list as a theme file: `palette.accent` is `[palette]` +
+    /// `accent`, `severity.ok.text` is `[severity]` + `ok.text`. The split is
+    /// at the FIRST dot, which is exactly how the master spells its own
+    /// sections.
+    fn as_theme_file(edits: &[edit::Edit]) -> String {
+        let mut out = String::new();
+        let mut section = String::new();
+        for e in edits {
+            let (sec, key) = e.token.split_once('.').expect("a token is section.key");
+            if sec != section {
+                out.push_str(&format!("[{sec}]\n"));
+                section = sec.to_string();
+            }
+            out.push_str(&format!("{key} = {}\n", e.value));
+        }
+        out
+    }
+
     fn lch(c: ThemeColor) -> color::Oklch {
         c.to_linear().to_oklch()
     }
@@ -2044,6 +2062,108 @@ decor.enabled    = false
         let one = lch(t3.color(s3.id("component.settings.rail_fill").unwrap()));
         let other = lch(t3.color(s3.id("component.settings.sub_fill").unwrap()));
         assert!(one.l > other.l, "the theme could not lift one band alone");
+    }
+
+    /// ŻYCZENIE 2b, MEASURED. After BASIC's HUE slider has moved, a column's
+    /// container and a control's plate carry THE SAME hue and two clearly
+    /// different shades — checked at four positions of the slider, not one.
+    ///
+    /// The second half of the claim is the exception the owner carved out:
+    /// the severity roles keep their own hues apart, because those carry
+    /// MEANING and not style.
+    #[test]
+    fn a_basic_hue_move_gives_one_hue_to_the_chrome_and_keeps_severity_apart() {
+        // The seeds, off the master itself — BASIC is relative, so this is
+        // what it is relative to.
+        let (s0, _, t0) = baked("");
+        let seed_of = |n: &str| lch(t0.color(s0.id(n).expect(n)));
+        let mut severity = [color::Oklch { l: 0.0, c: 0.0, h: 0.0, alpha: 1.0 }; 7];
+        for (i, role) in edit::SEVERITY_ROLES.iter().enumerate() {
+            let token = edit::severity_role_edit(edit::Scope::Theme, *role, severity[i]).token;
+            severity[i] = seed_of(token);
+        }
+        let seeds = edit::ToneSeeds {
+            accent: seed_of("palette.accent"),
+            severity,
+            surface_lift: t0.px(s0.id("surface.lift").unwrap()),
+            text_lift: t0.px(s0.id("text.lift").unwrap()),
+        };
+
+        for turn in [0.0f32, 47.0, 133.0, 251.0] {
+            let file = as_theme_file(&edit::tone_edits(
+                edit::Scope::Theme,
+                &seeds,
+                edit::Tone { hue_deg: turn, ..edit::Tone::NEUTRAL },
+            ));
+            let (schema, r, t) = baked(&file);
+
+            // The CONTAINER: a settings column's bed.
+            let container = lch(t.color(schema.id("component.settings.sub_fill").unwrap()));
+            // The PLATE: what the renderer actually lays under a button —
+            // the class ladder's idle fill, whose colour is the button's
+            // class base (`class.button = @accent.primary`).
+            let button = r
+                .class_ids
+                .iter()
+                .position(|&id| schema.name(id) == "class.button")
+                .unwrap() as u16;
+            let plate = lch(t.class_state(button, parse::State::Idle).fill);
+
+            // ONE BARWA.
+            assert!(
+                hue_gap(container.h, plate.h) < 2.0,
+                "at {turn} deg the column and the button are two colours: {} vs {}",
+                container.h,
+                plate.h
+            );
+            // RÓŻNE ODCIENIE — both lightness and chroma, well clear of any
+            // rounding, so the two never read as one material.
+            assert!(
+                (plate.l - container.l).abs() > 0.20,
+                "at {turn} deg the column and the button share a lightness: {} vs {}",
+                container.l,
+                plate.l
+            );
+            assert!(
+                (plate.c - container.c).abs() > 0.05,
+                "at {turn} deg the column and the button share a chroma: {} vs {}",
+                container.c,
+                plate.c
+            );
+            // And the interface really did turn: the whole family moved by
+            // the slider's own degrees.
+            assert!(
+                hue_gap(container.h, seeds.accent.h + turn) < 2.0,
+                "the interface did not turn {turn} deg: {}",
+                container.h
+            );
+
+            // THE EXCEPTION. Severity is a rotation, not a flattening: the
+            // roles that were different colours are still different colours.
+            let sev = |n: &str| lch(t.color(schema.id(n).unwrap()));
+            let ok = sev("severity.ok.text");
+            let crit = sev("severity.critical.text");
+            let warn = sev("severity.warning.text");
+            for (a, b, an, bn) in [
+                (ok, crit, "ok", "critical"),
+                (ok, warn, "ok", "warning"),
+                (warn, crit, "warning", "critical"),
+            ] {
+                assert!(
+                    hue_gap(a.h, b.h) > 15.0,
+                    "at {turn} deg {an} and {bn} collapsed onto one hue: {} vs {}",
+                    a.h,
+                    b.h
+                );
+            }
+            // They kept the gap the AUTHOR wrote, not just some gap.
+            let before = hue_gap(seeds.severity[0].h, seeds.severity[3].h);
+            assert!(
+                (hue_gap(ok.h, crit.h) - before).abs() < 2.0,
+                "severity drifted at {turn} deg: {before} -> {}",
+                hue_gap(ok.h, crit.h)
+            );
+        }
     }
 
     #[test]
