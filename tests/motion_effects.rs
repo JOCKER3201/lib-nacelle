@@ -15,7 +15,7 @@
 //! test that swaps themes must not run beside the ~500 that read them.
 
 use nacelle::motion::{easing_of, Crossfade, Easing, Effect};
-use nacelle::theme;
+use nacelle::{motion, theme};
 
 /// Loads a fixture theme whose base is the master, so every token but
 /// the ones in `body` is the master's own.
@@ -52,6 +52,7 @@ fn the_motion_resolver_answers_for_the_theme() {
     a_cyclic_source_matches_blink_factor_and_scales();
     a_crossfade_retargets_without_jumping();
     an_unknown_effect_is_reported_and_ignored();
+    the_a11y_switch_reaches_the_scale();
 }
 
 /// The master's `menu_unfold`: 150 ms of `ease_out`, run on a hand-wound
@@ -228,4 +229,59 @@ fn an_unknown_effect_is_reported_and_ignored() {
     assert_eq!(e.cyclic(0.7), 1.0);
     assert_eq!(e.one_shot_secs(), 0.0);
     assert_eq!(nacelle::ui::blink_factor("also_not_real", 0.3), 1.0);
+}
+
+/// `a11y.reduced_motion` — declared in §5.23 since the file was written
+/// and read by NOTHING until now, which left §5.22's whole reduced-motion
+/// contract reachable only through a theme that hand-wrote
+/// `motion.scale = 0`. That is not a setting an accessible program can
+/// ask its user to find.
+///
+/// The three words, each measured against a `motion.scale` the fixture
+/// leaves at the master's 1.0 — so what is being measured is the SWITCH,
+/// never the multiplier.
+fn the_a11y_switch_reaches_the_scale() {
+    // The platform half starts quiet, and this test owns it: it is
+    // process-wide, and this binary is one test.
+    let _ = motion::set_platform_reduce_motion(false);
+
+    // `on` — the theme decides, and every one-shot is at its end state on
+    // the frame it begins, which is a JUMP and not a run in zero ms.
+    skin("[a11y]\nreduced_motion = on\n");
+    let e = Effect::of("menu_unfold");
+    assert_eq!(e.one_shot(5.0, 5.0), 1.0, "reduced_motion = on did not freeze the unfold");
+    assert_eq!(e.one_shot_secs(), 0.0, "…and the host's clock is a hard cut");
+    assert_eq!(Effect::of("value_blink").cyclic(0.75), 1.0, "a source did not freeze visible");
+    assert!(motion::reduce_motion());
+
+    // The master's own value is `system`, and with no host to ask the
+    // answer is "no preference known" — the toolkit animates.
+    skin("[a11y]\nreduced_motion = system\n");
+    assert!(!motion::reduce_motion(), "an unasked platform suppressed motion");
+    assert_eq!(Effect::of("menu_unfold").one_shot(5.0, 5.0), 0.0, "the unfold was frozen anyway");
+
+    // A host that HAS asked: the same theme, the other answer.
+    let was = motion::set_platform_reduce_motion(true);
+    assert!(!was, "set_platform_reduce_motion did not answer what it replaced");
+    assert!(motion::reduce_motion(), "the platform's preference was not honoured");
+    assert_eq!(Effect::of("menu_unfold").one_shot(5.0, 5.0), 1.0);
+
+    // `off` is a DECISION, not an absence of one: a theme saying it wants
+    // animation is a user overriding their desktop for this program, and
+    // it wins over the platform.
+    skin("[a11y]\nreduced_motion = off\n");
+    assert!(!motion::reduce_motion(), "the theme's `off` lost to the platform");
+    assert_eq!(Effect::of("menu_unfold").one_shot(5.0, 5.0), 0.0);
+
+    // A word this build does not know falls to the platform, never to
+    // `off`: an accessibility switch fails toward the stated preference.
+    skin("[a11y]\nreduced_motion = someday\n");
+    assert!(motion::reduce_motion(), "an unknown word turned the suppression off");
+
+    // …and `on` still wins when the platform says nothing.
+    motion::set_platform_reduce_motion(false);
+    skin("[a11y]\nreduced_motion = on\n");
+    assert!(motion::reduce_motion());
+    master();
+    assert!(!motion::reduce_motion(), "the master's own file suppresses motion");
 }

@@ -88,6 +88,7 @@ fn the_state_fades_answer_for_the_theme() {
     a_fade_leaves_one_rung_and_lands_exactly_on_the_other();
     an_interrupted_fade_turns_round_where_it_stands();
     reduced_motion_draws_todays_picture();
+    the_a11y_switch_draws_the_same_picture();
     a_disabled_effect_is_a_jump();
     which_rung_moved_picks_the_effect();
     a_transition_needs_a_clock_that_moved();
@@ -181,6 +182,57 @@ fn reduced_motion_draws_todays_picture() {
         t += 0.016;
     }
     assert!(!motion::pending(t), "reduced motion asked the host for a frame");
+    master();
+}
+
+/// …and `a11y.reduced_motion` reaches the same freeze WITHOUT the theme
+/// touching `motion.scale`, which is the whole point of the switch: the
+/// user's preference is a word in `[a11y]`, not a multiplier a theme
+/// author has to know to zero.
+///
+/// The pixels are compared against the stage above, not merely asserted
+/// to be "settled": the promise is that a build under reduced motion
+/// draws the picture a build without any of this draws.
+fn the_a11y_switch_draws_the_same_picture() {
+    // The platform half is process-wide and this binary is one test, so
+    // the stage owns it and hands it back at the end.
+    let _ = motion::set_platform_reduce_motion(false);
+
+    // The theme's own decision, with the scale left at the master's 1.0.
+    skin("[a11y]\nreduced_motion = on\n");
+    let mut t = 8.0;
+    for s in [State::Idle, State::Hover, State::Press, State::Selected, State::Disabled] {
+        assert!(identical(ink(BOX, s, t), rung(s)), "the a11y switch drew a blend for {}", s.name());
+        assert!(state_mix("button", BOX, s, t).is_settled());
+        t += 0.016;
+    }
+    assert!(!motion::pending(t), "the a11y switch asked the host for a frame");
+    // The focus gate freezes with everything else: exactly 0 and exactly
+    // 1, never a value between them.
+    assert_eq!(motion::gate("a11y.ring", BOX, true, "focus", t), 1.0);
+    assert_eq!(motion::gate("a11y.ring", BOX, false, "focus", t + 0.016), 0.0);
+
+    // The PLATFORM's half, through the master's own `system`: the same
+    // freeze, asked for by the desk rather than by the file.
+    skin("[a11y]\nreduced_motion = system\n");
+    motion::set_platform_reduce_motion(true);
+    motion::forget_fades();
+    let _ = ink(BOX, State::Idle, 30.0);
+    assert!(
+        identical(ink(BOX, State::Hover, 30.016), rung(State::Hover)),
+        "a platform preference did not suppress the fade"
+    );
+
+    // And with the platform quiet again the fade is back — this is the
+    // control for the experiment, and without it the two stages above
+    // would pass on a toolkit that had simply stopped animating.
+    motion::set_platform_reduce_motion(false);
+    motion::forget_fades();
+    let _ = ink(BOX, State::Idle, 40.0);
+    assert!(
+        !identical(ink(BOX, State::Hover, 40.016), rung(State::Hover)),
+        "the fade never came back"
+    );
     master();
 }
 

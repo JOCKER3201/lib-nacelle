@@ -3931,7 +3931,7 @@ hit_pad_mode    = grow     # how the hit rect reaches min_hit; -; one of grow | 
 grab_pad        = 1.5u     # the invisible band that starts a resize/drag; -; u, 0.5u .. 4u; editor.rs's EDGE = 8.0, generalised
 grab_pad_min_px = 6px      # absolute floor for grab_pad; -; device px, 3px .. 24px; companion of grab_pad (3.2)
 drag_slop       = 1.5u     # travel between press and release under which the gesture is a CLICK, not a drag; -; u, 0u .. 6u; the companion of grab_pad on the other side of the gesture
-reduced_motion  = system   # honour the platform's reduce-motion preference; -; one of off | system | on; forces motion.scale to 0 when active
+reduced_motion  = system   # honour the platform's reduce-motion preference; -; one of off | system | on; forces motion.scale to 0 when active — motion::reduce_motion reads the WORD, and `system` asks the host through motion::set_platform_reduce_motion (no preference known = animate)
 contrast_floor  = false    # when true the contrast lint CORRECTS instead of reporting; -; bool; lifts OKLab L at constant hue and chroma
 lc_term_fg      = 90       # advisory APCA minimum for terminal foreground vs term.background; -; f, 0 .. 108; 4.4 pass D 4
 lc_primary      = 75       # advisory minimum for text.primary, data values, table cells; -; f, 0 .. 108; 4.4 pass D 4

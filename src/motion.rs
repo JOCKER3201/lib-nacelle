@@ -30,7 +30,10 @@
 //! what makes every consumer testable against a clock the test winds by
 //! hand.
 //!
-//! THE FREEZE RULES, stated once:
+//! THE FREEZE RULES, stated once. `motion.scale <= 0` below means the
+//! EFFECTIVE scale — [`reduce_motion`] clamps the theme's own number to
+//! zero when `a11y.reduced_motion` says so, which is the one place §5.23's
+//! switch reaches §5.22's catalogue:
 //!
 //! * a ONE-SHOT under `motion.scale <= 0`, a disabled effect, a zero
 //!   duration or an id the master does not declare answers **1.0** —
@@ -64,11 +67,86 @@ fn tok(cell: &'static OnceLock<TokenId>, name: &'static str) -> TokenId {
     *cell.get_or_init(|| theme::id(name).unwrap_or(TokenId::MISSING))
 }
 
-/// `motion.scale` — the global multiplier on every duration and period.
-/// Zero (reduced motion) is the freeze, handled by the callers above.
+/// `motion.scale` — the global multiplier on every duration and period,
+/// with [`reduce_motion`] clamping it to zero. Zero is the freeze, and the
+/// freeze itself is handled by the callers above.
 fn motion_scale() -> f32 {
     static SCALE: OnceLock<TokenId> = OnceLock::new();
+    if reduce_motion() {
+        return 0.0;
+    }
     theme::resolved().px(tok(&SCALE, "motion.scale"))
+}
+
+// -------------------------------------------------------- reduced motion
+
+/// Whether the PLATFORM says the user asked for less animation. Process-
+/// wide rather than thread-local: it is a fact about the person at the
+/// desk, and every screen and every window shares it — unlike
+/// [`set_surface`], which is a fact about the frame being drawn.
+static PLATFORM_REDUCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Tells the toolkit what the platform's reduce-motion preference is, and
+/// answers what it was.
+///
+/// **NO CALLER IN THIS REPOSITORY**, and that is a statement rather than
+/// an oversight: libnacelle has no platform to ask. The preference lives
+/// in a desktop portal (`org.freedesktop.appearance`'s
+/// `prefers-reduced-motion`), in `gtk-enable-animations`, in a Windows
+/// SPI — all of them the HOST's business, all of them able to change while
+/// the program runs. The host reads whichever it has and calls this; until
+/// one does, the answer is false and `a11y.reduced_motion = system` means
+/// "no preference known", which is the only honest reading of a question
+/// nobody asked.
+///
+/// A theme writing `on` needs none of this: it is a decision, not a
+/// preference, and [`reduce_motion`] honours it whatever the platform says.
+pub fn set_platform_reduce_motion(on: bool) -> bool {
+    PLATFORM_REDUCE.swap(on, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether animation is being SUPPRESSED right now — `a11y.reduced_motion`
+/// finally read.
+///
+/// The token has been in the master since §5.23 was written and nothing
+/// looked at it, so the entire reduced-motion contract §5.22 spells out
+/// was reachable only by a theme that hand-wrote `motion.scale = 0`. That
+/// is a setting an accessible program cannot ask its user to discover.
+///
+/// The three words, and what each one means:
+///
+/// * `on` — the theme decides. Suppressed whatever the platform thinks.
+/// * `off` — the theme decides the other way. NOT suppressed, even if the
+///   platform prefers it: a theme that says `off` is a user overriding
+///   their own desktop for this program, which is a legitimate thing to
+///   want and the only way to want it.
+/// * `system`, and anything this build does not recognise — the platform
+///   decides, through [`set_platform_reduce_motion`]. Unknown words fall
+///   here rather than to `off` because an accessibility switch must fail
+///   toward the user's stated preference, not away from it.
+///
+/// # Why the WORD, and why not at bake
+///
+/// By word, because an enum INDEX only names a word against the schema it
+/// was interned in — this module exists because two hand-rolled resolvers
+/// cached indices and froze at whatever the first theme meant.
+///
+/// Not folded into `motion.scale` at bake time, though that would save
+/// this lookup, because the platform half can change without a theme
+/// changing: a baked-in clamp would need a re-bake — the whole font-and-
+/// token sweep whose per-frame repetition was the desktop's 100 % CPU
+/// fault — on an event that has nothing to do with the theme. This costs
+/// one memoised word compare and one relaxed atomic load, on the fade path
+/// only: a settled track and a landed gate never reach it, so a resting
+/// screen pays nothing at all.
+pub fn reduce_motion() -> bool {
+    static PREF: OnceLock<TokenId> = OnceLock::new();
+    with_theme_word(tok(&PREF, "a11y.reduced_motion"), |w| match w {
+        "on" => true,
+        "off" => false,
+        _ => PLATFORM_REDUCE.load(std::sync::atomic::Ordering::Relaxed),
+    })
 }
 
 // ------------------------------------------------------------- the curves
