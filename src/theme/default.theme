@@ -5089,6 +5089,22 @@ note.role = caption                 # type role of a section note · - · role �
 row_label_role = body               # type role of every settings row label: COLUMNS, PADDING, VOLUME … · - · role · settings.rs:925 and four siblings, all font_px(1.0)
 section_role = label.section        # type role of a section header inside a page: the FONT view's TERMINAL and INTERFACE · - · role · type.label.section, the role settings.rs spelled out for these two headers before a binding existed
 section_gap = @space.6              # the break between the BACK row and the first setting · - · len (u) · @space.6 = 4u = 21.6 px; settings.rs:926's undeclared gap*2.0
+band_lift = 1.20                    # one column's bed against the bed of the column INSIDE it, as a multiple of OKLab L · - · f, 0.5 .. 2.0 · read by component.settings.*_fill (5.26) and applied twice, off the window body outwards
+band_corner = @corner.md            # the corner a navigation column's bed wears · - · len (u) · @corner.md = 1.2u = 6.5 px; the panel/card radius, one step under the @corner.lg of the modal these columns stand inside — a nested box takes the smaller arc or it reads as the wider one
+band_corner_mode = @corner.mode     # how that corner is cut · - · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
+# WHY A COLUMN'S BED IS CUT ON ALL FOUR CORNERS. Measured on this file's own
+# numbers: the bands are laid inside `content_rect`, which insets the modal by
+# `modal.pad` (2.8u = 15.1 px) on the left, the right and the bottom, and drops
+# `modal.body_top` (14.4u) from the top before the BACK row takes another
+# button's height. So no corner of any band ever reaches the frame — there is
+# 15 px of window body between the outermost band and the nearest edge on every
+# side that could meet one. A corner that meets nothing has nothing to square
+# itself against: the band is a plate lying ON the body, not a piece cut out of
+# it, and a plate is cut the same on all four. The other case — a theme setting
+# `modal.pad = 0`, where the outer corners WOULD meet the frame and would have
+# to take `modal.corner` instead — is a theme this master does not ship and a
+# rule no reader can guess; it is named here so the day it arrives it is
+# recognised rather than rediscovered.
 
 # =========================================================================
 # toast / dialog / boot / empty state / control / filetile
@@ -5363,48 +5379,79 @@ nameplate.fill = alpha(@surface.raised, 0.90)    # the plate behind a floating n
 # beside it, and the page — and each is to read as a different SHADE of the
 # same colour, never a different colour.
 #
-# NOTHING NEW IS INVENTED FOR IT. The surface ladder (5.5) already IS one
-# hue at six lightnesses, all six sitting on @surface.hue, so a band is
-# NAMED here and pointed at a rung. The naming is the whole of the work:
-# reaching for `surface.base` from Rust would weld the settings columns to
-# the desktop field, and no theme could ever separate them again — which is
-# the rule this section opens with (5.26).
+# WHAT WAS WRONG WITH THE FIRST ANSWER (owner, from a screenshot, 2026-08-17:
+# "both navigation columns are BLACK"). The two bands were pointed straight
+# at rungs of the surface ladder — @surface.void and @surface.base — and the
+# arithmetic was defensible: L 0.115 / 0.178 / 0.232, two even steps of about
+# 0.06. What the arithmetic missed is that OKLab L and the SCREEN part company
+# at the bottom of the ladder. Encoded to the 8-bit swapchain those three beds
+# reach the codes 6, 19 and 32 of 255 on their BRIGHTEST channel, and code 6 is
+# not a dark shade of anything — it is black. Worse, §5.5 says in its own
+# words what the
+# first rung is FOR: "the absolute bed … THE SWAPCHAIN CLEAR COLOUR", the
+# nothing behind the picture. A column of interface is not the nothing behind
+# the picture. The rung was wrong, not the idea.
 #
-# THREE BANDS, TWO NAMES, AND THAT IS THE WHOLE POINT. The page has no bed
-# of its own: the WINDOW BODY is it, and the body's rung is `panel.fill`
-# (@surface.panel, L 0.232) laid by window::frame over the page's whole
-# area. The two tokens below are the DEVIATIONS from the rung the window
-# already stands on, and a deviation is the only thing there is to paint.
-# A third name pointed at that same rung was tried and taken back out: it
-# had no reader that was not a SECOND coat over the body, and the rung is
-# TRANSLUCENT (alpha 0.82), so a second coat composes the alpha twice —
-# #131E19 against #15201B on this master's own field, an OKLab dE of
-# 0.0078. Two worse cases stand behind that one: where elev.panel.glass
-# lifts the body off its fill the body is a blur and ANY bed over it ends
-# the blur; and the moment a theme (or the editor's BACKGROUND section)
-# moves `panel.fill`, a copy still pointing at the old rung would paint the
-# OLD colour back over the new one. TO RE-SHADE THE PAGE, MOVE
-# `panel.fill` — the page is the window's body and shades with it by
-# construction, not by copy.
+# AND THE SECOND FAULT THE SAME SCREENSHOT SHOWED. Two of the three bands were
+# pinned to rungs and the third was not: the page's bed is the window body,
+# `component.panel.fill`, which the theme editor's BACKGROUND section writes as
+# a LITERAL colour off its own sliders (theme/edit.rs, `glass_edits`). So the
+# page followed the sliders and the two columns did not, and the window came
+# apart down the middle. A ladder whose rungs are anchored to three different
+# things is not a ladder.
 #
-# WHICH RUNGS, AND WHY THOSE. L 0.115 / 0.178 / 0.232, two steps of about
-# 0.06 in OKLab L — wide enough to see across a whole column, and the same
-# size, so the three read as one ladder and not as an accident. The third
-# rung is the body's, which is what every control on the page was drawn
-# against: a field stays recessed under it (@surface.sunken, 0.152), a
-# badge or an icon plate stays lifted over it (@surface.inset, 0.283) and
-# a drop-down still floats clear of both (@surface.raised, 0.330). Move
-# `panel.fill` off @surface.panel and those three relationships all have
-# to be re-argued.
+# THE ANSWER: THE LADDER IS MEASURED FROM THE BODY, NOT FROM THE FLOOR. The
+# page's bed is `component.panel.fill` and the other two are that same bed
+# lifted by `settings.band_lift` (1.20) once and twice. On this master's own
+# numbers that lands them at OKLab L 0.232 -> 0.278 -> 0.334 — within 0.005 of
+# the ladder's own `inset` (0.283) and `raised` (0.330) rungs, so the surface
+# ladder is still what the eye sees, while the ANCHOR is the one thing every
+# author and every slider already moves. Encoded, the three now reach the codes
+# 32 / 44 / 58: no band is black, and every step is a dozen codes wide. As WCAG
+# contrast against pure black — the ruler that does not flatten down there —
+# 1.26 / 1.44 / 1.76 where the old pair read 1.03 and 1.12.
+#
+# WHY THE STAIRCASE CLIMBS OUTWARD. The page is the well and the navigation is
+# the rim: the further from the content, the higher the bed. That also puts the
+# two columns on the material `@surface.inset` and `@surface.raised` describe —
+# "a bordered box nested inside a panel" and the floating chrome of menus and
+# the taskbar — which is what a navigation column is. A menu opened over the
+# rail shares that rung; what keeps the two apart is the menu's own ring
+# (`component.menu.edge`), not its bed, which is how every float on that rung
+# has always been separated from what it floats over.
+#
+# `band_lift` DECIDES THE DIRECTION AS WELL AS THE SIZE, and that is deliberate.
+# Above 1.0 the chrome stands above the page, which is right for a dark theme
+# where there is no room below. A LIGHT theme sets it under 1.0 — `0.85`, say —
+# and the same two expressions run the staircase downward instead, with no
+# other edit and no second set of tokens. At exactly 1.0 the three columns are
+# one colour, which is the honest way to say "no stripes".
+#
+# THE PAGE'S OWN NAME IS HERE TOO, AND IT IS THE SENTINEL. All three columns
+# are named, so a theme may bed any one of them; the master leaves the page's
+# at `none` — "there is nothing to draw here" — because the page's bed is
+# ALREADY on the screen. The window body is it, laid by window::frame over the
+# page's whole area, and `panel.fill` is TRANSLUCENT (alpha 0.82): a second
+# coat of the same colour composes that alpha twice and comes out somewhere
+# else (#131E19 against #15201B over this master's own field, an OKLab dE of
+# 0.0078). Where `elev.panel.glass.rank` lifts the body off its fill it is
+# worse still — the body is a blur there, and any opaque bed laid over it is
+# the end of the blur the BACKGROUND section just put down. So the master
+# declines to paint it, and the two columns that ARE painted inherit the body's
+# own alpha through the expression, which is what keeps a blurred or
+# translucent window blurred and translucent across all three columns.
 #
 # WHEN THE WINDOW FOLDS — content narrower than settings.col_min_w — there
 # are no columns: the rail's rows become the first bands of the one vertical
-# flow. A band's fill is a COLUMN's fill, so a folded window paints neither
-# of these and the body stands alone over the whole interior — which is the
-# rung the page was on all along, so a folded window looks exactly as it
-# does today. No stripes, and no special case in Rust to keep them away.
-settings.rail_fill = @surface.void    # the section rail's bed, the deepest of the three · - · col · @surface.void, the rung the screen itself bottoms out on
-settings.sub_fill = @surface.base     # the sub-page column's bed, one step up · - · col · @surface.base, the rung the desktop field stands on
+# flow. A band's fill is a COLUMN's fill, so a folded window paints none of
+# these and the body stands alone over the whole interior — which is the rung
+# the page was on all along, so a folded window looks exactly as it does
+# today. No stripes, and no special case in Rust to keep them away.
+settings.page_fill = none             # the page column's bed · - · col | none · sentinel none = draw nothing; the window body (@component.panel.fill) is already standing there, and it is the rung the other two are measured from
+settings.sub_fill = lum(@component.panel.fill, @settings.band_lift)
+                    # the sub-page column's bed: the body, one lift up · - · col · L 0.232 x 1.20 = 0.278, beside the ladder's own @surface.inset (0.283); the body's alpha rides through lum() untouched
+settings.rail_fill = lum(@component.settings.sub_fill, @settings.band_lift)
+                    # the section rail's bed: the same lift again, off the column INSIDE it · - · col · L 0.278 x 1.20 = 0.334, beside the ladder's own @surface.raised (0.330); written off sub_fill rather than off the body so that ONE number states the whole staircase
 
 # ---------------------------------------------------------------- toast / terminal chrome
 toast.title = @severity.warning.text    # the WARNING word at the top of a toast · - · col · popup.rs:65 draws it in the chrome accent; the toast says "warning" and [severity] exists for exactly this

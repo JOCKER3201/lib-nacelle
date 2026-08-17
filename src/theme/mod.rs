@@ -2086,37 +2086,93 @@ decor.enabled    = false
         d.min(360.0 - d)
     }
 
-    /// ŻYCZENIE 1. The settings window's three columns are three SHADES of
-    /// one colour, and no new colour was invented to get them: the bands
-    /// point at three rungs of the surface ladder, which is already one hue
-    /// at six lightnesses.
+    /// How far a bed stands off pure black, as WCAG 2.x contrast.
     ///
-    /// THREE BANDS, TWO NAMES. The page's rung is not named in `[settings]`
-    /// and must not be: the page's bed IS the window body, `panel.fill`,
-    /// which `window::frame` lays over that whole area. A third name
-    /// pointed at the same rung could only be painted as a SECOND coat, and
-    /// the rung is translucent — so the third rung this measures is
-    /// `component.panel.fill`, which is what the window really shows where
-    /// the page is.
+    /// WHY THIS AND NOT OKLab L, which is what the rest of this file
+    /// measures shades with. OKLab L is a good ruler for the DIFFERENCE
+    /// between two beds and a bad one for "is this bed black", because it
+    /// has no opinion about where black stops: L 0.115 and L 0.178 are
+    /// 0.063 apart, an honest step by that ruler, and on the screen their
+    /// brightest channels are the sRGB codes 6 and 19 — two blacks.
+    /// Contrast against black
+    /// is `(Y + 0.05)/0.05`, and the 0.05 flare pedestal is exactly the
+    /// term that makes the ratio move fastest in the region OKLab L
+    /// flattens. 1.00 IS black; anything above it is how far from black
+    /// the bed got.
+    ///
+    /// ALPHA IS NOT IN IT, and does not need to be. A band is painted over
+    /// the window body and is LIGHTER than it, so compositing can only
+    /// move the pixel from the body's reading toward the band's — the body
+    /// clears this gate itself, so the composite clears it too.
+    fn off_black(c: ThemeColor) -> f32 {
+        let black = ThemeColor::from_hex("#000000").unwrap();
+        ThemeColor::wcag_contrast(c.to_linear(), black.to_linear())
+    }
+
+    /// The floor a COLUMN's bed must clear to be a shade and not a black.
+    ///
+    /// WHERE THE NUMBER COMES FROM, and it is not a taste. It is set
+    /// between two of the master's own rungs, measured: `@surface.panel`
+    /// (the window body — the darkest bed this master ever stands a
+    /// control on) reads 1.26, and `@surface.base` (the desktop field,
+    /// one of the two rungs the columns used to point at) reads 1.12.
+    /// Anything a whole column of interface is painted with belongs on the
+    /// body's side of that line. It is deliberately NOT a floor for every
+    /// bed in the file: `@surface.sunken` is a progress trough and a field
+    /// interior, a few hundred pixels of recess inside a lit control, and
+    /// it is under this line on purpose.
+    const NOT_BLACK: f32 = 1.15;
+
+    /// ŻYCZENIE 1, RE-ARGUED FROM A SCREENSHOT. The settings window's three
+    /// columns are three SHADES of one colour — and, since 2026-08-17, three
+    /// shades the eye can actually tell apart on a screen.
+    ///
+    /// WHAT THE OWNER SAW, and what this test could not see before. The two
+    /// navigation columns were pointed at `@surface.void` and
+    /// `@surface.base`, and by the only ruler this test carried — OKLab L,
+    /// two even steps of about 0.06 — they were three shades. Encoded to the
+    /// swapchain their brightest channel reads 6, 19 and 32 of 255: two black
+    /// stripes beside a coloured page. So a step gate alone is not the claim. The
+    /// claim is that no band is BLACK, and [`off_black`] is the ruler for
+    /// that half of it.
+    ///
+    /// AND ONE ANCHOR, NOT THREE. The three beds are the window body and
+    /// that same body lifted by `settings.band_lift` once and twice, so
+    /// whatever moves the body — a theme, BASIC's sliders, or the editor's
+    /// BACKGROUND section writing `component.panel.fill` as a literal —
+    /// moves all three together. The screenshot's second fault was exactly
+    /// this: the page followed the BACKGROUND sliders and the two pinned
+    /// columns did not.
+    ///
+    /// THE PAGE'S NAME IS DECLARED AND IS THE SENTINEL. All three columns
+    /// are named so a theme may bed any one of them; the master leaves the
+    /// page's at `none`, because the body is already standing there and
+    /// `panel.fill` is translucent — a second coat composes its alpha twice.
     ///
     /// The folded case is in the same claim: with no columns there is
-    /// nothing to stripe, and the interior is the body — the rung the page
+    /// nothing to stripe, and the interior is the body — the bed the page
     /// was on all along.
     #[test]
     fn the_three_settings_bands_are_three_shades_of_one_hue() {
         let (schema, _, t) = baked("");
-        let band = |n: &str| lch(t.color(schema.id(n).expect(n)));
+        let raw = |n: &str| t.color(schema.id(n).expect(n));
+        let band = |n: &str| lch(raw(n));
         let rail = band("component.settings.rail_fill");
         let sub = band("component.settings.sub_fill");
         let page = band("component.panel.fill");
 
-        // FAIL-CLOSED ON THE NAME. A `settings.page_fill` back in the
-        // master would be a token no reader honours — a theme could move
-        // it and see nothing move — because the only reader available to
-        // it is a second coat over the body it duplicates.
-        assert!(
-            schema.id("component.settings.page_fill").is_none(),
-            "the page's bed was named a second time; the body's `panel.fill` is it"
+        // THE PAGE'S BED IS NAMED, and what it is set to is the sentinel:
+        // the token exists so a theme may bed the page, and the master
+        // declines because the window body already is that bed. `none`
+        // answers `color()` with alpha 0, which is how every reader in this
+        // toolkit spells "there is nothing to draw here"
+        // (`tests/sentinel_none_colour.rs`).
+        let page_tok =
+            schema.id("component.settings.page_fill").expect("the page's bed has no name");
+        assert_eq!(
+            t.color(page_tok).a,
+            0.0,
+            "the master bedded the page a second time; the body's `panel.fill` is it"
         );
 
         // ONE HUE — the three sit on @surface.hue, which is @hue.accent.
@@ -2130,17 +2186,51 @@ decor.enabled    = false
             );
         }
 
-        // THREE SHADES — and the two steps are the same size, so they read
-        // as one ladder rather than as an accident.
-        assert!(rail.l < sub.l && sub.l < page.l, "{} {} {}", rail.l, sub.l, page.l);
-        let (a, b) = (sub.l - rail.l, page.l - sub.l);
+        // THREE SHADES, CLIMBING OUTWARD — the page is the well and the
+        // navigation the rim — and the two steps are the same size, so the
+        // three read as one ladder rather than as an accident.
+        assert!(page.l < sub.l && sub.l < rail.l, "{} {} {}", page.l, sub.l, rail.l);
+        let (a, b) = (sub.l - page.l, rail.l - sub.l);
         assert!(a > 0.03 && b > 0.03, "two bands too close to tell apart: {a} and {b}");
         assert!((a - b).abs() < 0.02, "the ladder is uneven: {a} then {b}");
 
-        // THE TOP RUNG IS TRANSLUCENT, which is the whole reason the page
-        // is not bedded a second time: two coats of it are not one coat.
-        let raw = t.color(schema.id("component.panel.fill").unwrap());
-        assert!(raw.a < 1.0, "the body's rung went opaque; a second coat would be free");
+        // AND NOT ONE OF THEM IS BLACK. This is the assertion the owner's
+        // screenshot is about, and the one the old master fails.
+        for (name, c) in [
+            ("rail", raw("component.settings.rail_fill")),
+            ("sub", raw("component.settings.sub_fill")),
+            ("page", raw("component.panel.fill")),
+        ] {
+            assert!(
+                off_black(c) >= NOT_BLACK,
+                "the {name} band reads {} against pure black — a black stripe, not a shade",
+                off_black(c)
+            );
+        }
+        // The gate is the one that catches the defect and not a gate that
+        // everything passes: the two rungs the bands used to be pinned to
+        // are BELOW it, measured here rather than asserted from memory.
+        for name in ["surface.void", "surface.base"] {
+            assert!(
+                off_black(raw(name)) < NOT_BLACK,
+                "`{name}` now clears the black floor, so this gate no longer \
+                 separates a column's bed from the nothing behind the picture"
+            );
+        }
+
+        // THE BODY'S RUNG IS TRANSLUCENT, which is why the page's own name
+        // stays at the sentinel: two coats of it are not one coat. It is
+        // also what carries a blurred or translucent window ACROSS all
+        // three columns — the two painted bands inherit this alpha through
+        // `lum()`.
+        assert!(raw("component.panel.fill").a < 1.0, "the body's rung went opaque");
+        for name in ["component.settings.rail_fill", "component.settings.sub_fill"] {
+            assert!(
+                (raw(name).a - raw("component.panel.fill").a).abs() < 1e-4,
+                "`{name}` stopped carrying the body's alpha; a translucent window \
+                 would go opaque under its own navigation"
+            );
+        }
 
         // And a theme moves them: the seed alone re-skins all three...
         let (s2, _, t2) = baked("[palette]\naccent = #FF2A35\n");
@@ -2155,26 +2245,82 @@ decor.enabled    = false
         }
         // ...and one band can be re-pointed on its own, which is the whole
         // reason these are named tokens instead of three rungs named in Rust.
-        let (s3, _, t3) =
-            baked("[component]\nsettings.rail_fill = @surface.raised\n");
+        let (s3, _, t3) = baked("[component]\nsettings.rail_fill = @surface.raised\n");
         let one = lch(t3.color(s3.id("component.settings.rail_fill").unwrap()));
         let other = lch(t3.color(s3.id("component.settings.sub_fill").unwrap()));
         assert!(one.l > other.l, "the theme could not lift one band alone");
 
-        // THE PAGE'S BAND MOVES ALONE TOO — through the token that IS the
-        // page's bed. Nothing is lost by not naming it twice: an author
-        // re-shades the page by re-shading the body it is a part of, and
-        // the two columns stay exactly where this theme left them.
-        let (s4, _, t4) = baked("[component]\npanel.fill = @surface.void\n");
-        let moved = lch(t4.color(s4.id("component.panel.fill").unwrap()));
-        let void = lch(t4.color(s4.id("surface.void").unwrap()));
-        assert!((moved.l - void.l).abs() < 1e-4, "the page's bed did not follow panel.fill");
-        for (name, was) in
-            [("component.settings.rail_fill", rail), ("component.settings.sub_fill", sub)]
-        {
-            let now = lch(t4.color(s4.id(name).unwrap()));
-            assert!((now.l - was.l).abs() < 1e-4, "{name} moved with the body it is beside");
+        // ONE ANCHOR: MOVE THE BODY AND ALL THREE FOLLOW. This is the
+        // editor's own case written as a theme — `edit::glass_edits`'
+        // SOLID writes `component.panel.fill` as exactly such a literal —
+        // and it is the divergence the owner photographed: the page went
+        // with the sliders and the two columns stayed behind.
+        let (s5, _, t5) =
+            baked("[component]\npanel.fill = oklch(0.4200, 0.0400, 292.00 / 0.820)\n");
+        let moved = |n: &str| t5.color(s5.id(n).expect(n));
+        let body = lch(moved("component.panel.fill"));
+        assert!((body.l - 0.42).abs() < 0.01, "the body did not take the literal: {}", body.l);
+        let (r5, u5) = (
+            lch(moved("component.settings.rail_fill")),
+            lch(moved("component.settings.sub_fill")),
+        );
+        for (name, c) in [("rail", r5), ("sub", u5)] {
+            assert!(
+                hue_gap(c.h, body.h) < 2.0,
+                "the {name} band kept the theme's old hue while the body took a new one: \
+                 {} vs {}",
+                c.h,
+                body.h
+            );
         }
+        assert!(
+            body.l < u5.l && u5.l < r5.l,
+            "the staircase did not follow the body it is measured from: {} {} {}",
+            body.l,
+            u5.l,
+            r5.l
+        );
+        assert!(
+            u5.l - body.l > 0.03 && r5.l - u5.l > 0.03,
+            "the bands collapsed onto the body they follow: {} {} {}",
+            body.l,
+            u5.l,
+            r5.l
+        );
+
+        // ONE NUMBER STATES THE WHOLE STAIRCASE — its size AND its
+        // direction. At 1.0 the three columns are one colour, which is the
+        // honest way for a theme to say "no stripes"; under 1.0 the
+        // staircase runs the other way, which is the escape a LIGHT theme
+        // takes instead of a second set of tokens.
+        let (s6, _, t6) = baked("[settings]\nband_lift = 1.0\n");
+        let flat = |n: &str| lch(t6.color(s6.id(n).expect(n)));
+        let (fr, fs, fp) = (
+            flat("component.settings.rail_fill"),
+            flat("component.settings.sub_fill"),
+            flat("component.panel.fill"),
+        );
+        assert!(
+            (fr.l - fp.l).abs() < 1e-3 && (fs.l - fp.l).abs() < 1e-3,
+            "band_lift = 1.0 left a staircase behind: {} {} {}",
+            fp.l,
+            fs.l,
+            fr.l
+        );
+        let (s7, _, t7) = baked("[settings]\nband_lift = 0.85\n");
+        let down = |n: &str| lch(t7.color(s7.id(n).expect(n)));
+        assert!(
+            down("component.settings.rail_fill").l < down("component.settings.sub_fill").l
+                && down("component.settings.sub_fill").l < down("component.panel.fill").l,
+            "a lift under 1.0 did not run the staircase the other way"
+        );
+
+        // AND THE PAGE CAN BE BEDDED AFTER ALL, by the theme that wants it:
+        // the name is not decoration. What the master declines, a file may
+        // ask for.
+        let (s8, _, t8) = baked("[component]\nsettings.page_fill = @surface.sunken\n");
+        let bedded = t8.color(s8.id("component.settings.page_fill").unwrap());
+        assert!(bedded.a > 0.0, "a theme could not bed the page at all");
     }
 
     /// ŻYCZENIE 2b, MEASURED. After BASIC's HUE slider has moved, a column's
@@ -2249,6 +2395,49 @@ decor.enabled    = false
                 hue_gap(container.h, seeds.accent.h + turn) < 2.0,
                 "the interface did not turn {turn} deg: {}",
                 container.h
+            );
+
+            // AND NOT ONE OF THE THREE COLUMNS IS BLACK, at any position of
+            // the wheel. A HUE move is a rotation and rotations do not
+            // darken, so a band that comes out black here came out black
+            // from the master — which is the owner's screenshot, and which
+            // this test used to walk straight past because a ROTATION check
+            // cannot see a lightness.
+            //
+            // GATED ON THE LIGHTNESS SLIDER STANDING STILL, which it does
+            // here (`Tone::NEUTRAL` but for the hue). Dragged to its floor
+            // BASIC really can take the whole interface down to a black
+            // theme, and a black theme's beds are allowed to be black —
+            // "not black when the theme is not black" is the claim, not
+            // "never black".
+            for name in [
+                "component.settings.rail_fill",
+                "component.settings.sub_fill",
+                "component.panel.fill",
+            ] {
+                let bed = t.color(schema.id(name).unwrap());
+                assert!(
+                    off_black(bed) >= NOT_BLACK,
+                    "at {turn} deg `{name}` reads {} against pure black — the columns \
+                     turned but one of them is a black stripe",
+                    off_black(bed)
+                );
+            }
+            // Still a staircase, and still climbing outward, wherever the
+            // wheel stopped: the three are one expression off one anchor,
+            // so a turn cannot part them.
+            let bed = |n: &str| lch(t.color(schema.id(n).unwrap()));
+            let (page, sub, rail) = (
+                bed("component.panel.fill"),
+                bed("component.settings.sub_fill"),
+                bed("component.settings.rail_fill"),
+            );
+            assert!(
+                sub.l - page.l > 0.03 && rail.l - sub.l > 0.03,
+                "at {turn} deg the three columns stopped being three shades: {} {} {}",
+                page.l,
+                sub.l,
+                rail.l
             );
 
             // THE EXCEPTION. Severity is a rotation, not a flattening: the
