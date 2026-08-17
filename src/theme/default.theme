@@ -2635,8 +2635,13 @@ face                      = ui_medium         # face slot for the suffix word, o
 # 
 # A corner value is [ <style>, <size> ] - two things, one token, because a
 # Corner is two things. corners sets all four; corners_tl/tr/br/bl override one
-# and default to the `same_as_parent` sentinel (-3.0, 5.0), whose parent here
-# is this preset's own `corners`.
+# and are written as the SAME PAIR, each slot defaulting to the
+# `same_as_parent` sentinel (-3.0), whose parent here is this preset's own
+# `corners`. Two slots and not one, because the two halves are independent: a
+# theme may chamfer one corner at the radius the rest of the preset already
+# carries, or keep the style and shorten the cut, and neither is expressible
+# in a token that can hold only a word or only a length. K6 gave these keys
+# their first reader (view::paint::preset).
 # 
 # SHAPE AND ELEV DO NOT COMPETE FOR THE SAME PIXEL (5.0). Twelve presets name
 # something with no elevation and shape.* is the sole owner of their fill,
@@ -2652,10 +2657,14 @@ face                      = ui_medium         # face slot for the suffix word, o
 # signature of images 1-6
 [shape.panel]
 corners               = [ round, @corner.md ] # all four corners of the panel ring · 1-6 · [ style, len ] · enum: square | round | chamfer | chevron | hexagon · 8.6px at 1440p, which is the brief's "~8px at 1440p" measured off image 1
-corners_tl            = same_as_parent        # the top-left corner alone · 1-6 · [ style, len ] or same_as_parent · copies @shape.panel.corners
-corners_tr            = same_as_parent        # the top-right corner alone · 1-6 · [ style, len ] or same_as_parent · copies @shape.panel.corners
-corners_br            = same_as_parent        # the bottom-right corner alone · 1-6 · [ style, len ] or same_as_parent · copies @shape.panel.corners
-corners_bl            = same_as_parent        # the bottom-left corner alone · 1-6 · [ style, len ] or same_as_parent · copies @shape.panel.corners
+corners_tl            = [ same_as_parent, same_as_parent ]
+                                              # the top-left corner alone · 1-6 · [ style, len ] · a slot left same_as_parent copies @shape.panel.corners
+corners_tr            = [ same_as_parent, same_as_parent ]
+                                              # the top-right corner alone · 1-6 · [ style, len ] · a slot left same_as_parent copies @shape.panel.corners
+corners_br            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-right corner alone · 1-6 · [ style, len ] · a slot left same_as_parent copies @shape.panel.corners
+corners_bl            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-left corner alone · 1-6 · [ style, len ] · a slot left same_as_parent copies @shape.panel.corners
 border_style          = solid                 # how the ring is stroked · 1-6 · enum: solid | segmented | brackets | none · @border.edge.style; brackets draw only the corners and any preset may wear them (5.7)
 border_width          = same_as_parent        # stroke weight of the ring · 1-6 · str (device px, never panel-scaled) or same_as_parent · reads elev.panel.edge.width
 border_color          = same_as_parent        # colour of the ring · 1-6 · colour or same_as_parent · reads elev.panel.edge.color
@@ -2678,10 +2687,14 @@ bracket_inset         = @border.edge.bracket_inset
 # family B's rounded glass card
 [shape.card]
 corners               = [ round, 1.8u ]       # all four corners of the card ring · 7, 8, 10 · [ style, len ] · enum: square | round | chamfer | chevron | hexagon · softer than a family-A panel; a card is held, a panel is mounted
-corners_tl            = same_as_parent        # the top-left corner alone · 7, 8, 10 · [ style, len ] or same_as_parent · copies @shape.card.corners
-corners_tr            = same_as_parent        # the top-right corner alone · 7, 8, 10 · [ style, len ] or same_as_parent · copies @shape.card.corners
-corners_br            = same_as_parent        # the bottom-right corner alone · 7, 8, 10 · [ style, len ] or same_as_parent · copies @shape.card.corners
-corners_bl            = same_as_parent        # the bottom-left corner alone · 7, 8, 10 · [ style, len ] or same_as_parent · copies @shape.card.corners
+corners_tl            = [ same_as_parent, same_as_parent ]
+                                              # the top-left corner alone · 7, 8, 10 · [ style, len ] · a slot left same_as_parent copies @shape.card.corners
+corners_tr            = [ same_as_parent, same_as_parent ]
+                                              # the top-right corner alone · 7, 8, 10 · [ style, len ] · a slot left same_as_parent copies @shape.card.corners
+corners_br            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-right corner alone · 7, 8, 10 · [ style, len ] · a slot left same_as_parent copies @shape.card.corners
+corners_bl            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-left corner alone · 7, 8, 10 · [ style, len ] · a slot left same_as_parent copies @shape.card.corners
 border_style          = solid                 # how the ring is stroked · 7, 8, 10 · enum: solid | segmented | brackets | none · @border.edge.style; brackets draw only the corners and any preset may wear them (5.7)
 border_width          = same_as_parent        # stroke weight of the ring · 7, 8, 10 · str (device px, never panel-scaled) or same_as_parent · reads elev.panel.edge.width
 border_color          = same_as_parent        # colour of the ring · 7, 8, 10 · colour or same_as_parent · reads elev.panel.edge.color
@@ -2705,10 +2718,14 @@ bracket_inset         = @border.edge.bracket_inset
 [shape.window]
 corners               = [ chamfer, @corner.lg ]
                                               # all four corners of the window ring · 1, 2, 7 · [ style, len ] · enum: square | round | chamfer | chevron | hexagon · today's winframe.rs cut = vh*1.1, now a ladder step
-corners_tl            = same_as_parent        # the top-left corner alone · 1, 2, 7 · [ style, len ] or same_as_parent · copies @shape.window.corners
-corners_tr            = same_as_parent        # the top-right corner alone · 1, 2, 7 · [ style, len ] or same_as_parent · copies @shape.window.corners
-corners_br            = same_as_parent        # the bottom-right corner alone · 1, 2, 7 · [ style, len ] or same_as_parent · copies @shape.window.corners
-corners_bl            = same_as_parent        # the bottom-left corner alone · 1, 2, 7 · [ style, len ] or same_as_parent · copies @shape.window.corners
+corners_tl            = [ same_as_parent, same_as_parent ]
+                                              # the top-left corner alone · 1, 2, 7 · [ style, len ] · a slot left same_as_parent copies @shape.window.corners
+corners_tr            = [ same_as_parent, same_as_parent ]
+                                              # the top-right corner alone · 1, 2, 7 · [ style, len ] · a slot left same_as_parent copies @shape.window.corners
+corners_br            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-right corner alone · 1, 2, 7 · [ style, len ] · a slot left same_as_parent copies @shape.window.corners
+corners_bl            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-left corner alone · 1, 2, 7 · [ style, len ] · a slot left same_as_parent copies @shape.window.corners
 border_style          = solid                 # how the ring is stroked · 1, 2, 7 · enum: solid | segmented | brackets | none · @border.edge.style; brackets draw only the corners and any preset may wear them (5.7)
 border_width          = same_as_parent        # stroke weight of the ring · 1, 2, 7 · str (device px, never panel-scaled) or same_as_parent · reads elev.window.edge.width
 border_color          = same_as_parent        # colour of the ring · 1, 2, 7 · colour or same_as_parent · reads elev.window.edge.color
@@ -2731,10 +2748,14 @@ bracket_inset         = @border.edge.bracket_inset
 # a taskbar button: START, SZUKAJ, NAWIG., KADLUB
 [shape.button]
 corners               = [ chamfer, 0.7u ]     # all four corners of the button ring · 9 · [ style, len ] · enum: square | round | chamfer | chevron | hexagon · a small cut reads as machined rather than rounded
-corners_tl            = same_as_parent        # the top-left corner alone · 9 · [ style, len ] or same_as_parent · copies @shape.button.corners
-corners_tr            = same_as_parent        # the top-right corner alone · 9 · [ style, len ] or same_as_parent · copies @shape.button.corners
-corners_br            = same_as_parent        # the bottom-right corner alone · 9 · [ style, len ] or same_as_parent · copies @shape.button.corners
-corners_bl            = same_as_parent        # the bottom-left corner alone · 9 · [ style, len ] or same_as_parent · copies @shape.button.corners
+corners_tl            = [ same_as_parent, same_as_parent ]
+                                              # the top-left corner alone · 9 · [ style, len ] · a slot left same_as_parent copies @shape.button.corners
+corners_tr            = [ same_as_parent, same_as_parent ]
+                                              # the top-right corner alone · 9 · [ style, len ] · a slot left same_as_parent copies @shape.button.corners
+corners_br            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-right corner alone · 9 · [ style, len ] · a slot left same_as_parent copies @shape.button.corners
+corners_bl            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-left corner alone · 9 · [ style, len ] · a slot left same_as_parent copies @shape.button.corners
 border_style          = solid                 # how the ring is stroked · 9 · enum: solid | segmented | brackets | none · @border.edge.style; brackets draw only the corners and any preset may wear them (5.7)
 border_width          = @border.edge.width    # stroke weight of the ring · 9 · str (device px, never panel-scaled) or same_as_parent · @border.edge.width -> @stroke.hair, i.e. the "solid 1x" of 5.18's table
 border_color          = @border.default       # colour of the ring · 9 · colour or same_as_parent · -> @border.default -> alpha(@accent.primary, 0.78)
@@ -2757,10 +2778,12 @@ bracket_inset         = @border.edge.bracket_inset
 # the asymmetric button variant
 [shape.button_alt]
 corners               = [ chamfer, 0.9u ]     # all four corners of the button_alt ring · 9 · [ style, len ] · enum: square | round | chamfer | chevron | hexagon · applied to tl and br only
-corners_tl            = same_as_parent        # the top-left corner alone · 9 · [ style, len ] or same_as_parent · copies @shape.button_alt.corners
-corners_tr            = [ square, 0u ]        # the top-right corner alone · 9 · [ style, len ] or same_as_parent · pinned square so the preset is asymmetric on purpose
-corners_br            = same_as_parent        # the bottom-right corner alone · 9 · [ style, len ] or same_as_parent · copies @shape.button_alt.corners
-corners_bl            = [ square, 0u ]        # the bottom-left corner alone · 9 · [ style, len ] or same_as_parent · pinned square so the preset is asymmetric on purpose
+corners_tl            = [ same_as_parent, same_as_parent ]
+                                              # the top-left corner alone · 9 · [ style, len ] · a slot left same_as_parent copies @shape.button_alt.corners
+corners_tr            = [ square, 0u ]        # the top-right corner alone · 9 · [ style, len ] · pinned square so the preset is asymmetric on purpose
+corners_br            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-right corner alone · 9 · [ style, len ] · a slot left same_as_parent copies @shape.button_alt.corners
+corners_bl            = [ square, 0u ]        # the bottom-left corner alone · 9 · [ style, len ] · pinned square so the preset is asymmetric on purpose
 border_style          = solid                 # how the ring is stroked · 9 · enum: solid | segmented | brackets | none · @border.edge.style; brackets draw only the corners and any preset may wear them (5.7)
 border_width          = @border.edge.width    # stroke weight of the ring · 9 · str (device px, never panel-scaled) or same_as_parent · @border.edge.width -> @stroke.hair, i.e. the "solid 1x" of 5.18's table
 border_color          = @border.default       # colour of the ring · 9 · colour or same_as_parent · -> @border.default -> alpha(@accent.primary, 0.78)
@@ -2784,10 +2807,14 @@ bracket_inset         = @border.edge.bracket_inset
 # image 1's "each icon in its own bordered square"
 [shape.icon_tile]
 corners               = [ round, 0.7u ]       # all four corners of the icon_tile ring · 1 · [ style, len ] · enum: square | round | chamfer | chevron | hexagon · just enough radius to stop the square reading as a table cell
-corners_tl            = same_as_parent        # the top-left corner alone · 1 · [ style, len ] or same_as_parent · copies @shape.icon_tile.corners
-corners_tr            = same_as_parent        # the top-right corner alone · 1 · [ style, len ] or same_as_parent · copies @shape.icon_tile.corners
-corners_br            = same_as_parent        # the bottom-right corner alone · 1 · [ style, len ] or same_as_parent · copies @shape.icon_tile.corners
-corners_bl            = same_as_parent        # the bottom-left corner alone · 1 · [ style, len ] or same_as_parent · copies @shape.icon_tile.corners
+corners_tl            = [ same_as_parent, same_as_parent ]
+                                              # the top-left corner alone · 1 · [ style, len ] · a slot left same_as_parent copies @shape.icon_tile.corners
+corners_tr            = [ same_as_parent, same_as_parent ]
+                                              # the top-right corner alone · 1 · [ style, len ] · a slot left same_as_parent copies @shape.icon_tile.corners
+corners_br            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-right corner alone · 1 · [ style, len ] · a slot left same_as_parent copies @shape.icon_tile.corners
+corners_bl            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-left corner alone · 1 · [ style, len ] · a slot left same_as_parent copies @shape.icon_tile.corners
 border_style          = solid                 # how the ring is stroked · 1 · enum: solid | segmented | brackets | none · a segmented border is rejected on this preset with a warning (5.7): 13 dashes per side per icon is a quad storm
 border_width          = @border.edge.width    # stroke weight of the ring · 1 · str (device px, never panel-scaled) or same_as_parent · @border.edge.width -> @stroke.hair, i.e. the "solid 1x" of 5.18's table
 border_color          = @component.launcher.border
@@ -2815,10 +2842,14 @@ bracket_inset         = @border.edge.bracket_inset
 [shape.badge]
 corners               = [ round, @corner.pill ]
                                               # all four corners of the badge ring · 1, 3, 4 · [ style, len ] · enum: square | round | chamfer | chevron | hexagon · the pill sentinel (-2.0, 5.0): radius = half the shorter side
-corners_tl            = same_as_parent        # the top-left corner alone · 1, 3, 4 · [ style, len ] or same_as_parent · copies @shape.badge.corners
-corners_tr            = same_as_parent        # the top-right corner alone · 1, 3, 4 · [ style, len ] or same_as_parent · copies @shape.badge.corners
-corners_br            = same_as_parent        # the bottom-right corner alone · 1, 3, 4 · [ style, len ] or same_as_parent · copies @shape.badge.corners
-corners_bl            = same_as_parent        # the bottom-left corner alone · 1, 3, 4 · [ style, len ] or same_as_parent · copies @shape.badge.corners
+corners_tl            = [ same_as_parent, same_as_parent ]
+                                              # the top-left corner alone · 1, 3, 4 · [ style, len ] · a slot left same_as_parent copies @shape.badge.corners
+corners_tr            = [ same_as_parent, same_as_parent ]
+                                              # the top-right corner alone · 1, 3, 4 · [ style, len ] · a slot left same_as_parent copies @shape.badge.corners
+corners_br            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-right corner alone · 1, 3, 4 · [ style, len ] · a slot left same_as_parent copies @shape.badge.corners
+corners_bl            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-left corner alone · 1, 3, 4 · [ style, len ] · a slot left same_as_parent copies @shape.badge.corners
 border_style          = none                  # how the ring is stroked · 1, 3, 4 · enum: solid | segmented | brackets | none · a segmented border is rejected on this preset with a warning (5.7)
 border_width          = @border.edge.width    # stroke weight of the ring · 1, 3, 4 · str (device px, never panel-scaled) or same_as_parent · @border.edge.width -> @stroke.hair, i.e. the "solid 1x" of 5.18's table
 border_color          = @component.badge.edge # colour of the ring · 1, 3, 4 · colour or same_as_parent · -> @border.default -> alpha(@accent.primary, 0.78)
@@ -2841,10 +2872,14 @@ bracket_inset         = @border.edge.bracket_inset
 # image 8's DFS / SDN chips
 [shape.chip]
 corners               = [ round, 0.5u ]       # all four corners of the chip ring · 8 · [ style, len ] · enum: square | round | chamfer | chevron | hexagon · tighter than a badge: a chip is square-ish, a badge is a pill
-corners_tl            = same_as_parent        # the top-left corner alone · 8 · [ style, len ] or same_as_parent · copies @shape.chip.corners
-corners_tr            = same_as_parent        # the top-right corner alone · 8 · [ style, len ] or same_as_parent · copies @shape.chip.corners
-corners_br            = same_as_parent        # the bottom-right corner alone · 8 · [ style, len ] or same_as_parent · copies @shape.chip.corners
-corners_bl            = same_as_parent        # the bottom-left corner alone · 8 · [ style, len ] or same_as_parent · copies @shape.chip.corners
+corners_tl            = [ same_as_parent, same_as_parent ]
+                                              # the top-left corner alone · 8 · [ style, len ] · a slot left same_as_parent copies @shape.chip.corners
+corners_tr            = [ same_as_parent, same_as_parent ]
+                                              # the top-right corner alone · 8 · [ style, len ] · a slot left same_as_parent copies @shape.chip.corners
+corners_br            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-right corner alone · 8 · [ style, len ] · a slot left same_as_parent copies @shape.chip.corners
+corners_bl            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-left corner alone · 8 · [ style, len ] · a slot left same_as_parent copies @shape.chip.corners
 border_style          = solid                 # how the ring is stroked · 8 · enum: solid | segmented | brackets | none · @border.edge.style; brackets draw only the corners and any preset may wear them (5.7)
 border_width          = @border.edge.width    # stroke weight of the ring · 8 · str (device px, never panel-scaled) or same_as_parent · @border.edge.width -> @stroke.hair, i.e. the "solid 1x" of 5.18's table
 border_color          = @border.default       # colour of the ring · 8 · colour or same_as_parent · -> @border.default -> alpha(@accent.primary, 0.78)
@@ -2867,10 +2902,14 @@ bracket_inset         = @border.edge.bracket_inset
 # image 7's search field holding the placeholder `browser`
 [shape.field]
 corners               = [ round, @corner.sm ] # all four corners of the field ring · 7 · [ style, len ] · enum: square | round | chamfer | chevron | hexagon · the ladder's small step
-corners_tl            = same_as_parent        # the top-left corner alone · 7 · [ style, len ] or same_as_parent · copies @shape.field.corners
-corners_tr            = same_as_parent        # the top-right corner alone · 7 · [ style, len ] or same_as_parent · copies @shape.field.corners
-corners_br            = same_as_parent        # the bottom-right corner alone · 7 · [ style, len ] or same_as_parent · copies @shape.field.corners
-corners_bl            = same_as_parent        # the bottom-left corner alone · 7 · [ style, len ] or same_as_parent · copies @shape.field.corners
+corners_tl            = [ same_as_parent, same_as_parent ]
+                                              # the top-left corner alone · 7 · [ style, len ] · a slot left same_as_parent copies @shape.field.corners
+corners_tr            = [ same_as_parent, same_as_parent ]
+                                              # the top-right corner alone · 7 · [ style, len ] · a slot left same_as_parent copies @shape.field.corners
+corners_br            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-right corner alone · 7 · [ style, len ] · a slot left same_as_parent copies @shape.field.corners
+corners_bl            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-left corner alone · 7 · [ style, len ] · a slot left same_as_parent copies @shape.field.corners
 border_style          = solid                 # how the ring is stroked · 7 · enum: solid | segmented | brackets | none · @border.edge.style; brackets draw only the corners and any preset may wear them (5.7)
 border_width          = @border.edge.width    # stroke weight of the ring · 7 · str (device px, never panel-scaled) or same_as_parent · @border.edge.width -> @stroke.hair, i.e. the "solid 1x" of 5.18's table
 border_color          = @component.field.border
@@ -2894,10 +2933,12 @@ bracket_inset         = @border.edge.bracket_inset
 # a terminal session tab
 [shape.tab]
 corners               = [ chamfer, 1.0u ]     # all four corners of the tab ring · 1, 2 · [ style, len ] · enum: square | round | chamfer | chevron | hexagon · applied to tl and tr only; the bottom corners stay square so the tab meets its strip
-corners_tl            = same_as_parent        # the top-left corner alone · 1, 2 · [ style, len ] or same_as_parent · copies @shape.tab.corners
-corners_tr            = same_as_parent        # the top-right corner alone · 1, 2 · [ style, len ] or same_as_parent · copies @shape.tab.corners
-corners_br            = [ square, 0u ]        # the bottom-right corner alone · 1, 2 · [ style, len ] or same_as_parent · pinned square so the preset is asymmetric on purpose
-corners_bl            = [ square, 0u ]        # the bottom-left corner alone · 1, 2 · [ style, len ] or same_as_parent · pinned square so the preset is asymmetric on purpose
+corners_tl            = [ same_as_parent, same_as_parent ]
+                                              # the top-left corner alone · 1, 2 · [ style, len ] · a slot left same_as_parent copies @shape.tab.corners
+corners_tr            = [ same_as_parent, same_as_parent ]
+                                              # the top-right corner alone · 1, 2 · [ style, len ] · a slot left same_as_parent copies @shape.tab.corners
+corners_br            = [ square, 0u ]        # the bottom-right corner alone · 1, 2 · [ style, len ] · pinned square so the preset is asymmetric on purpose
+corners_bl            = [ square, 0u ]        # the bottom-left corner alone · 1, 2 · [ style, len ] · pinned square so the preset is asymmetric on purpose
 border_style          = solid                 # how the ring is stroked · 1, 2 · enum: solid | segmented | brackets | none · @border.edge.style; brackets draw only the corners and any preset may wear them (5.7)
 border_width          = @border.edge.width    # stroke weight of the ring · 1, 2 · str (device px, never panel-scaled) or same_as_parent · @border.edge.width -> @stroke.hair, i.e. the "solid 1x" of 5.18's table
 border_color          = @border.default       # colour of the ring · 1, 2 · colour or same_as_parent · -> @border.default -> alpha(@accent.primary, 0.78)
@@ -2920,10 +2961,14 @@ bracket_inset         = @border.edge.bracket_inset
 # image 7's taskbar, "a stretched chevron/arrow"
 [shape.taskbar]
 corners               = [ chevron, 0u ]       # all four corners of the taskbar ring · 7 · [ style, len ] · enum: square | round | chamfer | chevron | hexagon · a shape word, not a corner: the ring generator collapses one or both vertical ends to a point at mid-height. The size term is unused; depth is chevron_depth
-corners_tl            = same_as_parent        # the top-left corner alone · 7 · [ style, len ] or same_as_parent · copies @shape.taskbar.corners
-corners_tr            = same_as_parent        # the top-right corner alone · 7 · [ style, len ] or same_as_parent · copies @shape.taskbar.corners
-corners_br            = same_as_parent        # the bottom-right corner alone · 7 · [ style, len ] or same_as_parent · copies @shape.taskbar.corners
-corners_bl            = same_as_parent        # the bottom-left corner alone · 7 · [ style, len ] or same_as_parent · copies @shape.taskbar.corners
+corners_tl            = [ same_as_parent, same_as_parent ]
+                                              # the top-left corner alone · 7 · [ style, len ] · a slot left same_as_parent copies @shape.taskbar.corners
+corners_tr            = [ same_as_parent, same_as_parent ]
+                                              # the top-right corner alone · 7 · [ style, len ] · a slot left same_as_parent copies @shape.taskbar.corners
+corners_br            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-right corner alone · 7 · [ style, len ] · a slot left same_as_parent copies @shape.taskbar.corners
+corners_bl            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-left corner alone · 7 · [ style, len ] · a slot left same_as_parent copies @shape.taskbar.corners
 border_style          = solid                 # how the ring is stroked · 7 · enum: solid | segmented | brackets | none · @border.edge.style; brackets draw only the corners and any preset may wear them (5.7)
 border_width          = @border.edge.width    # stroke weight of the ring · 7 · str (device px, never panel-scaled) or same_as_parent · @border.edge.width -> @stroke.hair, i.e. the "solid 1x" of 5.18's table
 border_color          = @component.taskbar.border
@@ -2947,10 +2992,14 @@ bracket_inset         = @border.edge.bracket_inset
 # image 1's five gradient hexagons, image 3's solid ones
 [shape.hex]
 corners               = [ hexagon, 0u ]       # all four corners of the hex ring · 1, 3 · [ style, len ] · enum: square | round | chamfer | chevron | hexagon · a shape word, not a corner: a 6-triangle fan whose orientation is shape.hex.orientation
-corners_tl            = same_as_parent        # the top-left corner alone · 1, 3 · [ style, len ] or same_as_parent · copies @shape.hex.corners
-corners_tr            = same_as_parent        # the top-right corner alone · 1, 3 · [ style, len ] or same_as_parent · copies @shape.hex.corners
-corners_br            = same_as_parent        # the bottom-right corner alone · 1, 3 · [ style, len ] or same_as_parent · copies @shape.hex.corners
-corners_bl            = same_as_parent        # the bottom-left corner alone · 1, 3 · [ style, len ] or same_as_parent · copies @shape.hex.corners
+corners_tl            = [ same_as_parent, same_as_parent ]
+                                              # the top-left corner alone · 1, 3 · [ style, len ] · a slot left same_as_parent copies @shape.hex.corners
+corners_tr            = [ same_as_parent, same_as_parent ]
+                                              # the top-right corner alone · 1, 3 · [ style, len ] · a slot left same_as_parent copies @shape.hex.corners
+corners_br            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-right corner alone · 1, 3 · [ style, len ] · a slot left same_as_parent copies @shape.hex.corners
+corners_bl            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-left corner alone · 1, 3 · [ style, len ] · a slot left same_as_parent copies @shape.hex.corners
 border_style          = solid                 # how the ring is stroked · 1, 3 · enum: solid | segmented | brackets | none · @border.edge.style; brackets draw only the corners and any preset may wear them (5.7)
 border_width          = @border.edge.width    # stroke weight of the ring · 1, 3 · str (device px, never panel-scaled) or same_as_parent · @border.edge.width -> @stroke.hair, i.e. the "solid 1x" of 5.18's table
 border_color          = @component.hexcell.border
@@ -2975,10 +3024,14 @@ bracket_inset         = @border.edge.bracket_inset
 # a launcher tile: FILES, CPU, STAR MAP
 [shape.tile]
 corners               = [ round, @corner.md ] # all four corners of the tile ring · 1 · [ style, len ] · enum: square | round | chamfer | chevron | hexagon · the same radius as a panel; a tile is a small panel
-corners_tl            = same_as_parent        # the top-left corner alone · 1 · [ style, len ] or same_as_parent · copies @shape.tile.corners
-corners_tr            = same_as_parent        # the top-right corner alone · 1 · [ style, len ] or same_as_parent · copies @shape.tile.corners
-corners_br            = same_as_parent        # the bottom-right corner alone · 1 · [ style, len ] or same_as_parent · copies @shape.tile.corners
-corners_bl            = same_as_parent        # the bottom-left corner alone · 1 · [ style, len ] or same_as_parent · copies @shape.tile.corners
+corners_tl            = [ same_as_parent, same_as_parent ]
+                                              # the top-left corner alone · 1 · [ style, len ] · a slot left same_as_parent copies @shape.tile.corners
+corners_tr            = [ same_as_parent, same_as_parent ]
+                                              # the top-right corner alone · 1 · [ style, len ] · a slot left same_as_parent copies @shape.tile.corners
+corners_br            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-right corner alone · 1 · [ style, len ] · a slot left same_as_parent copies @shape.tile.corners
+corners_bl            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-left corner alone · 1 · [ style, len ] · a slot left same_as_parent copies @shape.tile.corners
 border_style          = solid                 # how the ring is stroked · 1 · enum: solid | segmented | brackets | none · @border.edge.style; brackets draw only the corners and any preset may wear them (5.7)
 border_width          = @border.edge.width    # stroke weight of the ring · 1 · str (device px, never panel-scaled) or same_as_parent · @border.edge.width -> @stroke.hair, i.e. the "solid 1x" of 5.18's table
 border_color          = @component.launcher.border
@@ -3002,10 +3055,14 @@ bracket_inset         = @border.edge.bracket_inset
 # an on-screen keyboard key
 [shape.key]
 corners               = [ round, @corner.sm ] # all four corners of the key ring · 3 · [ style, len ] · enum: square | round | chamfer | chevron | hexagon · the ladder's small step
-corners_tl            = same_as_parent        # the top-left corner alone · 3 · [ style, len ] or same_as_parent · copies @shape.key.corners
-corners_tr            = same_as_parent        # the top-right corner alone · 3 · [ style, len ] or same_as_parent · copies @shape.key.corners
-corners_br            = same_as_parent        # the bottom-right corner alone · 3 · [ style, len ] or same_as_parent · copies @shape.key.corners
-corners_bl            = same_as_parent        # the bottom-left corner alone · 3 · [ style, len ] or same_as_parent · copies @shape.key.corners
+corners_tl            = [ same_as_parent, same_as_parent ]
+                                              # the top-left corner alone · 3 · [ style, len ] · a slot left same_as_parent copies @shape.key.corners
+corners_tr            = [ same_as_parent, same_as_parent ]
+                                              # the top-right corner alone · 3 · [ style, len ] · a slot left same_as_parent copies @shape.key.corners
+corners_br            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-right corner alone · 3 · [ style, len ] · a slot left same_as_parent copies @shape.key.corners
+corners_bl            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-left corner alone · 3 · [ style, len ] · a slot left same_as_parent copies @shape.key.corners
 border_style          = solid                 # how the ring is stroked · 3 · enum: solid | segmented | brackets | none · @border.edge.style; brackets draw only the corners and any preset may wear them (5.7)
 border_width          = @border.edge.width    # stroke weight of the ring · 3 · str (device px, never panel-scaled) or same_as_parent · @border.edge.width -> @stroke.hair, i.e. the "solid 1x" of 5.18's table
 border_color          = @border.default       # colour of the ring · 3 · colour or same_as_parent · -> @border.default -> alpha(@accent.primary, 0.78)
@@ -3032,10 +3089,14 @@ bracket_inset         = @border.edge.bracket_inset
 [shape.modal]
 corners               = [ chamfer, @corner.lg ]
                                               # all four corners of the modal ring · - · [ style, len ] · enum: square | round | chamfer | chevron | hexagon · the same cut as a window frame
-corners_tl            = same_as_parent        # the top-left corner alone · - · [ style, len ] or same_as_parent · copies @shape.modal.corners
-corners_tr            = same_as_parent        # the top-right corner alone · - · [ style, len ] or same_as_parent · copies @shape.modal.corners
-corners_br            = same_as_parent        # the bottom-right corner alone · - · [ style, len ] or same_as_parent · copies @shape.modal.corners
-corners_bl            = same_as_parent        # the bottom-left corner alone · - · [ style, len ] or same_as_parent · copies @shape.modal.corners
+corners_tl            = [ same_as_parent, same_as_parent ]
+                                              # the top-left corner alone · - · [ style, len ] · a slot left same_as_parent copies @shape.modal.corners
+corners_tr            = [ same_as_parent, same_as_parent ]
+                                              # the top-right corner alone · - · [ style, len ] · a slot left same_as_parent copies @shape.modal.corners
+corners_br            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-right corner alone · - · [ style, len ] · a slot left same_as_parent copies @shape.modal.corners
+corners_bl            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-left corner alone · - · [ style, len ] · a slot left same_as_parent copies @shape.modal.corners
 border_style          = solid                 # how the ring is stroked · - · enum: solid | segmented | brackets | none · @border.edge.style; brackets draw only the corners and any preset may wear them (5.7)
 border_width          = same_as_parent        # stroke weight of the ring · - · str (device px, never panel-scaled) or same_as_parent · reads elev.modal.edge.width
 border_color          = same_as_parent        # colour of the ring · - · colour or same_as_parent · reads elev.modal.edge.color
@@ -3058,10 +3119,14 @@ bracket_inset         = @border.edge.bracket_inset
 # the one reserved preset slot, so a seventeenth shape needs no ABI break
 [shape.spare]
 corners               = [ square, 0u ]        # all four corners of the spare ring · - · [ style, len ] · enum: square | round | chamfer | chevron | hexagon · square and invisible until a theme claims it
-corners_tl            = same_as_parent        # the top-left corner alone · - · [ style, len ] or same_as_parent · copies @shape.spare.corners
-corners_tr            = same_as_parent        # the top-right corner alone · - · [ style, len ] or same_as_parent · copies @shape.spare.corners
-corners_br            = same_as_parent        # the bottom-right corner alone · - · [ style, len ] or same_as_parent · copies @shape.spare.corners
-corners_bl            = same_as_parent        # the bottom-left corner alone · - · [ style, len ] or same_as_parent · copies @shape.spare.corners
+corners_tl            = [ same_as_parent, same_as_parent ]
+                                              # the top-left corner alone · - · [ style, len ] · a slot left same_as_parent copies @shape.spare.corners
+corners_tr            = [ same_as_parent, same_as_parent ]
+                                              # the top-right corner alone · - · [ style, len ] · a slot left same_as_parent copies @shape.spare.corners
+corners_br            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-right corner alone · - · [ style, len ] · a slot left same_as_parent copies @shape.spare.corners
+corners_bl            = [ same_as_parent, same_as_parent ]
+                                              # the bottom-left corner alone · - · [ style, len ] · a slot left same_as_parent copies @shape.spare.corners
 border_style          = none                  # how the ring is stroked · - · enum: solid | segmented | brackets | none · @border.edge.style; brackets draw only the corners and any preset may wear them (5.7)
 border_width          = @border.edge.width    # stroke weight of the ring · - · str (device px, never panel-scaled) or same_as_parent · @border.edge.width -> @stroke.hair, i.e. the "solid 1x" of 5.18's table
 border_color          = @border.default       # colour of the ring · - · colour or same_as_parent · -> @border.default -> alpha(@accent.primary, 0.78)
@@ -3109,11 +3174,16 @@ orientation           = pointy                # which way the hexagon's vertex p
 #      as the four keys they are. This fragment writes all twenty, so shape.*
 #      is 16 x 20 + 5 = 325 keys. Lead: the count in the heading needs fixing,
 #      not the file.
-#   2. `chevron` and `hexagon` are written as corner STYLE words even though
-#      5.18's CornerStyle enum lists only Square/Round/Chamfer, because
-#      5.18's own preset table gives shape.taskbar and shape.hex exactly those
-#      two words in the corners column. Either the enum grows two variants or
-#      the two presets need a separate `generator` key.
+#   2. SETTLED 2026-08-17 (vector K6): `chevron` and `hexagon` are written as
+#      corner STYLE words even though 5.18's CornerStyle enum lists only
+#      Square/Round/Chamfer. Neither of the two ways out this note proposed
+#      was taken. The words name a SHAPE KIND, which the draw record has
+#      carried a field for since K3 (bits 8-11), and CornerStyle stays the
+#      three cuts a corner can take; view::paint::preset reads the corners
+#      word once, hands the kind to the record and the cut to the corners.
+#      No new key, no fourth cut, and no preset table to keep in step.
+#      A shape word on a PER-CORNER key means nothing — one corner of a
+#      hexagon is not a shape — and falls back to this preset's own cut.
 #   3. fill_to defaults to this preset's own fill (flat) rather than to a
 #      sentinel, so `fill_to == fill => flat` from 5.20 holds by construction.
 

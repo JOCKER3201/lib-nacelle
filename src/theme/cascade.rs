@@ -647,8 +647,25 @@ fn set(
         ));
         return;
     }
-    if want == Kind::Enum {
-        if let Expr::Word(w) = &value {
+    // A WORD a theme assigns has to be readable back AS A WORD, and the
+    // schema's word table is the only place it can be read from.
+    //
+    // The condition used to be `want == Kind::Enum` alone, which left a
+    // hole exactly where §4.2 promised the opposite: a token whose
+    // master default is a sentinel "adopts whatever the first theme
+    // assigns", but a sentinel makes the token `Kind::Scalar`, so the
+    // assignment was accepted, stored, baked — and then `enum_word` had
+    // nothing to answer with, because nothing had ever interned it.
+    // The value went in and could not come out. `shape.*.corners_tl`
+    // and its three siblings are sentinel pairs in all sixteen presets,
+    // so that was every per-corner corner style in the master
+    // (measured 2026-08-17, K6).
+    //
+    // A sentinel is NOT interned: §5.0 says it is a scalar with a magic
+    // number, it folds to that number at bake, and putting it in the
+    // word table would give it an index it must never be read by.
+    if let Expr::Word(w) = &value {
+        if want == Kind::Enum || super::expr::sentinel(w).is_none() {
             schema.intern_word(id, w);
         }
     }
@@ -1149,6 +1166,52 @@ ansi = [ #000000, #CD3131, #0DBC79, #E5E510 ]
         let past = doc("[term]\nansi[9] = #FFFFFF\n", &mut src, &mut out);
         let _ = cascade(&mut s, &[Stage::Document(&past)], Options::default(), &mut out);
         assert!(out.iter().any(|d| d.message.contains("unknown key \"term.ansi[9]\"")), "{out:?}");
+    }
+
+    /// The road K6 opened, walked end to end: a theme states one corner
+    /// of a preset as the PAIR the master declares, and both halves
+    /// arrive — the word readable AS A WORD, the length as a length.
+    ///
+    /// The word half is the one that was broken. A slot whose master
+    /// default is a sentinel has no kind of its own — §4.2 says it
+    /// "adopts whatever the first theme assigns" — and `Kind::Scalar` is
+    /// what a sentinel makes it, so the word a theme assigned was never
+    /// interned and `enum_word` had nothing to answer with. The value
+    /// went in and could not come out. Every per-corner key in the
+    /// master is a sentinel pair, so that was every one of them.
+    #[test]
+    fn a_theme_may_state_one_corner_of_a_preset_and_both_halves_arrive() {
+        let (mut s, mut src, mut out) = schema_of(
+            "[shape.p]\ncorners = [ round, 6u ]\n\
+             corners_tl = [ same_as_parent, same_as_parent ]\n\
+             corners_tr = [ same_as_parent, same_as_parent ]\n",
+        );
+        assert!(out.is_empty(), "{out:?}");
+        // The pair is a family of two, per corner, or none of this can
+        // be written at all.
+        assert_eq!(s.family("shape.p.corners_tl").map(|f| f.len()), Some(2));
+        let t = doc(
+            "[shape.p]\ncorners_tl = [ chamfer, 2u ]\ncorners_tr[1] = 3u\n",
+            &mut src,
+            &mut out,
+        );
+        let spec = cascade(&mut s, &[Stage::Document(&t)], Options::default(), &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        let style = s.id("shape.p.corners_tl[0]").unwrap();
+        assert_eq!(spec.get(style), Some(&Expr::Word("chamfer".into())));
+        assert_eq!(
+            s.enum_word(style, s.enum_index(style, "chamfer").expect("the word was not interned")),
+            Some("chamfer"),
+            "the word went in and could not come out"
+        );
+        assert_eq!(spec.get(s.id("shape.p.corners_tl[1]").unwrap()), Some(&Expr::Len(2.0, Unit::U)));
+        // One slot alone: the tr corner keeps the preset's cut and takes
+        // its own length, which is the whole reason the key is a pair.
+        assert_eq!(
+            spec.get(s.id("shape.p.corners_tr[0]").unwrap()),
+            Some(&Expr::Word("same_as_parent".into()))
+        );
+        assert_eq!(spec.get(s.id("shape.p.corners_tr[1]").unwrap()), Some(&Expr::Len(3.0, Unit::U)));
     }
 
     #[test]

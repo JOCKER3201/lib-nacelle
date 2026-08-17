@@ -5,10 +5,17 @@
 //! line for line alike, and a change to one without the other is wrong
 //! by definition.
 //!
-//! The scope is `kind = Box` alone, through K4 as through K3. `p` is
-//! the fragment's position in local pixels relative to the shape's
-//! centre — exactly what a shape vertex carries in its `uv` slot — and
-//! `b` the half sizes; screen convention throughout, y grows downward.
+//! `p` is the fragment's position in local pixels relative to the
+//! shape's centre — exactly what a shape vertex carries in its `uv`
+//! slot — and `b` the half sizes; screen convention throughout, y grows
+//! downward.
+//!
+//! K6 ended the scope of "kind = Box alone". Bits 8-11 of the record
+//! now select a field, and [`d_record`] is the whole of that selection:
+//! one function, the mirror of the shader's own, so the contract at the
+//! top of this file has exactly one place to be checked. What was added
+//! is what the Box family could not spell — the truncated arc, the
+//! hexagon, the chevron — and nothing that it could.
 //!
 //! K4 adds the ORIENTED frame ([`Frame`]) and not one field: a diagonal
 //! stroke is the same box read along its own axes, and a joint disc is
@@ -76,6 +83,167 @@ pub fn d_shape(p: [f32; 2], b: [f32; 2], corners: &[Corner; 4]) -> f32 {
         CornerStyle::Round => d_round(p, b, c.size),
         CornerStyle::Chamfer => d_chamfer(p, b, c.size),
     }
+}
+
+// ---- The kinds past Box (K6) -----------------------------------------
+//
+// Three fields, three silhouettes the Box family cannot spell, and one
+// rule they were admitted under: a kind is added only when the family
+// CANNOT already draw it. The disc and the closed annulus were turned
+// away by that rule and are Box records to this day (see [`d_disc`]);
+// what got in was the truncated arc, the hexagon and the chevron.
+//
+// All three are read the same way as Box — signed, in local px, with
+// `|∇d| = 1` near the boundary so [`coverage`] and [`band_coverage`]
+// work on them unchanged.
+
+/// The regular hexagon of apothem `r`, FLAT-TOPPED: horizontal edges at
+/// `y = ±r`, vertices at `x = ±2r/√3`. A turn is the CALLER's, applied
+/// to `p` before this is read ([`turned`]), because the field is
+/// cheaper to rotate than the shape.
+///
+/// The fold is the standard one for a six-fold lattice: reflect into one
+/// sixth by the mirror whose normal is `(−cos 30°, sin 30°)`, then read
+/// the distance to that sixth's single edge, the segment `x ∈ [−r/√3,
+/// r/√3]` at `y = r`. Exact everywhere, inside and out, which is what
+/// lets the band and the AA ramp read it without a second thought.
+pub fn d_hex(p0: [f32; 2], r: f32) -> f32 {
+    // (−cos 30°, sin 30°, 1/√3): the mirror's normal and the half length
+    // of one edge in units of the apothem.
+    const HK: [f32; 3] = [-0.866_025_4, 0.5, 0.577_350_3];
+    let mut p = [p0[0].abs(), p0[1].abs()];
+    let fold = 2.0 * (HK[0] * p[0] + HK[1] * p[1]).min(0.0);
+    p = [p[0] - fold * HK[0], p[1] - fold * HK[1]];
+    p = [p[0] - p[0].clamp(-HK[2] * r, HK[2] * r), p[1] - r];
+    let len = (p[0] * p[0] + p[1] * p[1]).sqrt();
+    // The sign by comparison and not by `signum`: WGSL's `sign(0.0)` is
+    // zero where Rust's `signum(0.0)` is one, and the two files may not
+    // disagree on the boundary itself.
+    if p[1] >= 0.0 {
+        len
+    } else {
+        -len
+    }
+}
+
+/// `p` rotated by `a` — the one rotation in this file, so a field
+/// written about a single axis can be read about any.
+///
+/// A silhouette turned by `t` is the base field read at `turned(p, −t)`:
+/// rotating the QUESTION the other way is the same as rotating the
+/// answer, and it costs two multiplies instead of a shape.
+///
+/// The sign is the SCREEN's. y grows downward here, so the matrix that
+/// a mathematician reads as anticlockwise turns clockwise on the glass —
+/// and clockwise is what an angle means to everything else in this
+/// project, from `donut.start_deg` to a knob's travel.
+pub fn turned(p: [f32; 2], a: f32) -> [f32; 2] {
+    let (s, c) = a.sin_cos();
+    [p[0] * c - p[1] * s, p[0] * s + p[1] * c]
+}
+
+/// The annular ARC: a band of half width `rb` about the circle of
+/// radius `ra`, swept `2·half_sweep` about local +y, with round caps.
+///
+/// This is the one member of the family the Box records cannot spell.
+/// A closed ring — `half_sweep ≥ π` — they can: `d_round(p, [R, R], R)`
+/// with the inward stroke is the same annulus, and the branch below
+/// answers the same number for it (the test says so). The branch earns
+/// its instructions only where the sweep is cut short, because a cut
+/// arc has CAPS, and a cap is a distance to a point rather than to a
+/// circle.
+///
+/// Outside the swept wedge the nearest boundary is the nearer cap's
+/// centre-line end; inside it, the circle. The two agree exactly on the
+/// ray that divides them — both read `|distance to the cap centre| − rb`
+/// there — so the seam carries no gradient step and the AA ramp crosses
+/// it without a mark.
+pub fn d_arc(p0: [f32; 2], half_sweep: f32, ra: f32, rb: f32) -> f32 {
+    let (sn, cs) = half_sweep.sin_cos();
+    // A sweep of half a turn or more is CLOSED, and the wedge test has
+    // to say so without an `if`. `sin` is what carries that: it falls to
+    // zero at π and turns negative past it, so clamping it at zero
+    // leaves `cos·|x| > 0`, which a non-positive left side can never
+    // satisfy — every fragment takes the circle. Without the clamp a
+    // full ring drawn as `half_sweep = PI` fell to the CAP branch on
+    // half the rays, because `sin(PI)` in f32 is a hair BELOW zero and
+    // that hair decided the comparison.
+    let sn = sn.max(0.0);
+    let p = [p0[0].abs(), p0[1]];
+    if cs * p[0] > sn * p[1] {
+        let (dx, dy) = (p[0] - sn * ra, p[1] - cs * ra);
+        (dx * dx + dy * dy).sqrt() - rb
+    } else {
+        ((p[0] * p[0] + p[1] * p[1]).sqrt() - ra).abs() - rb
+    }
+}
+
+/// The chevron: the box of half sizes `b` with its left and/or right
+/// end collapsed to a point at mid-height, `left` and `right` px deep.
+///
+/// Each collapsed end is a pair of mirror-image half-planes through the
+/// tip `(∓b.x, 0)` and the end of the cut `(∓b.x ± depth, ±b.y)`, which
+/// `|p.y|` folds into one. A depth of zero gives back the end's own
+/// vertical edge exactly — `(0·|p.y| − b.y·along)/b.y = −along` — so an
+/// end that is not collapsed costs the field nothing and changes it not
+/// at all, and `chevron_dir = left` needs no second formula.
+///
+/// `max` of half-planes is the exact distance near every edge and an
+/// underestimate in the acute wedge behind a tip, where the true
+/// distance is to the point. Coverage reads the boundary, the boundary
+/// is where the estimate is exact, and §2.2 accepted the same trade for
+/// the chamfer.
+pub fn d_chevron(p: [f32; 2], b: [f32; 2], left: f32, right: f32) -> f32 {
+    // `along` grows inward from the end's own edge; the normalisation is
+    // the length of the slanted edge, so the quotient is a true distance
+    // and not merely a sign.
+    let end = |depth: f32, along: f32| {
+        let l = (b[1] * b[1] + depth * depth).sqrt().max(1e-6);
+        (depth * p[1].abs() - b[1] * along) / l
+    };
+    d_box(p, b)
+        .max(end(left, p[0] + b[0]))
+        .max(end(right, b[0] - p[0]))
+}
+
+/// The distance ONE record computes — the whole of `fs_shape`'s branch
+/// on bits 8-11, in the reference's own terms.
+///
+/// This is the function the shader mirrors line for line. It reads the
+/// record and nothing else, exactly as the fragment does: the kind out
+/// of the flag word, the lengths out of `corner`, the angles out of
+/// `arc_half` / `arc_dir`, all per the table on
+/// [`crate::draw::ShapeKind`].
+pub fn d_record(s: &crate::draw::Shape, p: [f32; 2]) -> f32 {
+    use crate::draw::ShapeKind;
+    let b = s.half;
+    match ShapeKind::of_code((s.flags >> crate::draw::Shape::KIND_SHIFT) & 0xF) {
+        ShapeKind::Ring { .. } => {
+            let rb = s.corner[0];
+            // The band's OUTER edge meets the shorter side of the rect,
+            // so the axis radius sits one half thickness inside it.
+            let ra = (b[0].min(b[1]) - rb).max(0.0);
+            d_arc(turned(p, -s.arc_dir), s.arc_half, ra, rb)
+        }
+        ShapeKind::Hex { .. } => d_hex(turned(p, -s.arc_dir), s.corner[0]),
+        ShapeKind::Chevron { .. } => d_chevron(p, b, s.corner[0], s.corner[1]),
+        // Box, and Capsule until something emits one: the four corner
+        // treatments over the box.
+        _ => d_shape(p, b, &record_corners(s)),
+    }
+}
+
+/// The four corner treatments back out of a record's flag word — what
+/// the fragment shader reads, read the same way.
+pub fn record_corners(s: &crate::draw::Shape) -> [Corner; 4] {
+    [0usize, 1, 2, 3].map(|i| Corner {
+        style: match (s.flags >> (2 * i as u32)) & 3 {
+            1 => CornerStyle::Round,
+            2 => CornerStyle::Chamfer,
+            _ => CornerStyle::Square,
+        },
+        size: s.corner[i],
+    })
 }
 
 /// Box-filter coverage of the half-plane at signed distance `d` under
@@ -388,6 +556,242 @@ mod tests {
         assert!(d_round(c45, B, k).abs() <= e);
         let d = d_round(B, B, k);
         assert!((d - k * (std::f32::consts::SQRT_2 - 1.0)).abs() <= e, "{d}");
+    }
+
+    /// A field is only a field if its gradient has unit norm ON THE
+    /// COVERAGE BAND — that is what makes `0.5 − d/w` a coverage and not
+    /// a guess, and it is the only place the shader ever reads it.
+    ///
+    /// Sampled over a grid, keeping `|d| ≤ 1.5` — a pixel and a half
+    /// either side of the silhouette, wider than any AA ramp — and
+    /// dropping a 2 px disc around each `corner` the caller names.
+    ///
+    /// EVERY polygon corner starts a medial axis, and inside a corner
+    /// the nearest boundary point is not one point but two: there is no
+    /// gradient there to have a norm, in the geometry and not in the
+    /// arithmetic. It does not show, and cannot: on that ridge `|d|`
+    /// already exceeds what the ramp resolves, so coverage is saturated
+    /// at 1 whichever of the two edges the field answered — which is the
+    /// same argument §2.2 made when it accepted `max` for the chamfer.
+    fn gradient_is_unit(d: impl Fn([f32; 2]) -> f32, span: [f32; 2], corners: &[[f32; 2]]) {
+        let h = 0.05f32;
+        let (mut worst, mut seen) = (0.0f32, 0usize);
+        for iy in -60..=60 {
+            for ix in -60..=60 {
+                let p = [ix as f32 / 60.0 * span[0], iy as f32 / 60.0 * span[1]];
+                if d(p).abs() > 1.5 {
+                    continue;
+                }
+                if corners.iter().any(|c| {
+                    let (dx, dy) = (p[0] - c[0], p[1] - c[1]);
+                    dx * dx + dy * dy < 4.0
+                }) {
+                    continue;
+                }
+                seen += 1;
+                let gx = (d([p[0] + h, p[1]]) - d([p[0] - h, p[1]])) / (2.0 * h);
+                let gy = (d([p[0], p[1] + h]) - d([p[0], p[1] - h])) / (2.0 * h);
+                worst = worst.max(((gx * gx + gy * gy).sqrt() - 1.0).abs());
+            }
+        }
+        // Fail closed: a band nobody sampled proves nothing.
+        assert!(seen >= 100, "only {seen} samples landed on the band");
+        assert!(worst <= 0.02, "gradient norm strayed by {worst}");
+    }
+
+    /// The bisection the box family is proved by, run on any field: 64
+    /// rays out of the centre, and where the sign flips the coverage
+    /// must read a half. `reach` is a radius known to be outside.
+    fn boundary_reads_half(d: impl Fn([f32; 2]) -> f32, reach: f32, what: &str) {
+        for i in 0..64 {
+            let a = i as f32 / 64.0 * std::f32::consts::TAU;
+            let (s, co) = a.sin_cos();
+            let (mut lo, mut hi) = (0.0f32, reach);
+            for _ in 0..48 {
+                let mid = 0.5 * (lo + hi);
+                if d([co * mid, s * mid]) < 0.0 {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            let t = 0.5 * (lo + hi);
+            let cov = coverage(d([co * t, s * t]), 1.0);
+            assert!((cov - 0.5).abs() <= 0.02, "{what}, direction {i}: coverage {cov}");
+        }
+    }
+
+    /// The hexagon stands where its own geometry says: a flat edge at
+    /// `y = ±r`, a vertex at `x = ±2r/√3`, the boundary reading a half
+    /// all the way round, and the field a true distance.
+    #[test]
+    fn a_hexagon_stands_on_its_apothem_and_its_circumradius() {
+        let r = 30.0f32;
+        let circum = 2.0 * r / 3.0f32.sqrt();
+        let e = 1e-3;
+        for p in [[0.0, r], [0.0, -r], [r * 0.4, r], [circum, 0.0], [-circum, 0.0]] {
+            assert!(d_hex(p, r).abs() <= e, "{p:?} reads {}", d_hex(p, r));
+        }
+        assert!(d_hex([0.0, 0.0], r) < -r + e, "the centre is an apothem deep");
+        // A vertex of the FLAT-topped hexagon sits on +x; turned by 30°
+        // it sits on +y, which is what `pointy` means.
+        let turn = std::f32::consts::FRAC_PI_6;
+        let pointy = |p: [f32; 2]| d_hex(turned(p, -turn), r);
+        assert!(pointy([0.0, circum]).abs() <= e, "pointy has its vertex on +y");
+        assert!(pointy([r, 0.0]).abs() <= e, "and a flat edge on +x");
+        boundary_reads_half(|p| d_hex(p, r), 200.0, "hexagon");
+        // The six vertices, where a hexagon's own medial axis reaches
+        // the boundary.
+        let verts: Vec<[f32; 2]> = (0..6)
+            .map(|k| {
+                let a = k as f32 * std::f32::consts::FRAC_PI_3;
+                [a.cos() * circum, a.sin() * circum]
+            })
+            .collect();
+        gradient_is_unit(|p| d_hex(p, r), [60.0, 60.0], &verts);
+    }
+
+    /// The chevron collapses the end the caller named and leaves the
+    /// other one alone: the tip lands at mid-height on the rect's own
+    /// edge, the cut lands `depth` inside it, and an end of depth zero
+    /// gives back the box exactly — the same numbers, not merely the
+    /// same picture.
+    #[test]
+    fn a_chevron_collapses_the_end_it_was_given_and_no_other() {
+        let b = [50.0f32, 20.0];
+        let (e, depth) = (1e-3, 16.0f32);
+        let one = |p| d_chevron(p, b, 0.0, depth);
+        assert!(one([b[0], 0.0]).abs() <= e, "the right tip is on the edge");
+        assert!(one([b[0] - depth, b[1]]).abs() <= e, "the cut meets the bottom");
+        assert!(one([b[0] - depth, -b[1]]).abs() <= e, "and the top");
+        // The MIDDLE of each slant, which is the only place the two of
+        // them can be told apart. The two ends above sit on the rect's
+        // own boundary, where the box distance is zero anyway, so a
+        // chevron that collapsed one side only would satisfy them both.
+        for half in [-1.0f32, 1.0] {
+            let mid = [b[0] - depth * 0.5, half * b[1] * 0.5];
+            assert!(one(mid).abs() <= e, "the slant at {mid:?} reads {}", one(mid));
+        }
+        assert!(one([b[0] - 1.0, 0.0]) < 0.0, "mid-height is still inside");
+        assert!(one([b[0] - 1.0, b[1] - 1.0]) > 0.0, "the cut corner is gone");
+        // The uncollapsed end is the box's, to the bit: a depth of zero
+        // is not a special case in the formula, it is the identity.
+        for p in [[-b[0], 0.0], [-b[0] + 3.0, 5.0], [-b[0] - 4.0, 0.0]] {
+            assert_eq!(one(p), d_box(p, b), "the left end moved: {p:?}");
+        }
+        boundary_reads_half(one, 400.0, "chevron");
+        // Everywhere but the tip the collapse leaves, the field is a
+        // true distance — the tip is the acute wedge `max` cannot see
+        // round.
+        gradient_is_unit(one, [70.0, 40.0], &[[b[0], 0.0]]);
+    }
+
+    /// The arc is the ONE thing the Box family cannot spell — and the
+    /// test says both halves of that sentence. Closed, it reproduces the
+    /// annulus a Box record draws through its own round corner, to
+    /// within the float noise of two different routes to one circle.
+    /// Cut short, it grows caps the box has no way to state.
+    #[test]
+    fn a_closed_arc_is_the_box_s_own_annulus_and_a_cut_one_is_not() {
+        let (ra, rb) = (40.0f32, 6.0);
+        let closed = std::f32::consts::PI;
+        for i in 0..64 {
+            let a = i as f32 / 64.0 * std::f32::consts::TAU;
+            let (s, c) = a.sin_cos();
+            for t in [ra - rb, ra - 2.0, ra, ra + 2.0, ra + rb] {
+                let p = [c * t, s * t];
+                // The annulus as a Box record reads it: the silhouette
+                // is the disc of radius ra + rb, and the inward band of
+                // width 2·rb is the ring itself.
+                let outer = ra + rb;
+                let disc = d_round(p, [outer, outer], outer);
+                let band = disc.max(-disc - 2.0 * rb);
+                let arc = d_arc(p, closed, ra, rb);
+                assert!((band - arc).abs() <= 1e-3, "at {t} on ray {i}: {band} vs {arc}");
+            }
+        }
+        // Cut to a quarter turn: the far side is empty and the cap is a
+        // half circle of radius rb about the end of the axis.
+        let quarter = std::f32::consts::FRAC_PI_4;
+        let far = d_arc([0.0, -ra], quarter, ra, rb);
+        assert!(far > 0.0, "the unswept side is outside, not inside: {far}");
+        let (s, c) = quarter.sin_cos();
+        let cap = [s * ra, c * ra];
+        let d_cap = d_arc(cap, quarter, ra, rb);
+        assert!((d_cap + rb).abs() <= 1e-3, "the cap's centre is rb deep, not {d_cap}");
+        // The cap is ROUND: a half width further along the tangent — off
+        // the end of the axis, where a butt cap would have stopped — the
+        // field still reads the boundary.
+        let tip = [cap[0] + rb * c, cap[1] - rb * s];
+        assert!(d_arc(tip, quarter, ra, rb).abs() <= 1e-3, "the cap is not round");
+        // A ring's centre is OUTSIDE it, so the bisection every other
+        // silhouette is proved by has no inside to start from: both of
+        // its boundaries are read straight instead.
+        for i in 0..64 {
+            let a = i as f32 / 64.0 * std::f32::consts::TAU;
+            let (s, c) = a.sin_cos();
+            for t in [ra - rb, ra + rb] {
+                let cov = coverage(d_arc([c * t, s * t], closed, ra, rb), 1.0);
+                assert!((cov - 0.5).abs() <= 0.02, "ring at {t}, direction {i}: {cov}");
+            }
+        }
+        // Inside the band, and outside it only as far as coverage ever
+        // looks: past that lies the exterior medial axis every
+        // non-convex silhouette has, the hole's own centre included.
+        gradient_is_unit(|p| d_arc(p, quarter, ra, rb), [60.0, 60.0], &[]);
+    }
+
+    /// The record is the only thing the shader gets, so the reference
+    /// has to read it the same way: the kind out of bits 8-11, the
+    /// lengths out of `corner`, the angles out of `arc_*`. What
+    /// [`crate::draw::DrawList::shape`] wrote is what `d_record`
+    /// answers.
+    #[test]
+    fn the_record_carries_each_kind_s_own_numbers() {
+        use crate::draw::{DrawList, ShapeKind, ShapeSpec};
+        use crate::theme::Color;
+        use crate::Rect;
+        let r = Rect::new(0.0, 0.0, 120.0, 60.0);
+        let emit = |kind| {
+            let mut dl = DrawList::new();
+            dl.shape(&ShapeSpec {
+                rect: r,
+                corners: [Corner::round(9.0); 4],
+                kind,
+                fill: Some(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+                stroke: None,
+            });
+            dl.shapes()[0]
+        };
+        let turn = std::f32::consts::FRAC_PI_6;
+        let hex = emit(ShapeKind::Hex { turn });
+        assert_eq!(hex.flags >> crate::draw::Shape::KIND_SHIFT & 0xF, 2);
+        assert_eq!(hex.arc_dir, turn);
+        // The corner treatments the caller happened to pass do NOT
+        // reach a record that has no corners: bits 0-7 are Box's alone.
+        assert_eq!(hex.flags & 0xFF, 0, "a hexagon carried Box's corner bits");
+        assert_eq!(hex.corner[1..], [0.0; 3], "only the apothem is spent");
+        // A pointy hexagon in a 120x60 rect is limited by the HEIGHT:
+        // its circumradius runs along y, so apothem = 30·(√3/2).
+        let want = 30.0 * 3.0f32.sqrt() * 0.5;
+        assert!((hex.corner[0] - want).abs() <= 1e-3, "apothem {}", hex.corner[0]);
+        assert!(d_record(&hex, [0.0, 30.0]).abs() <= 1e-2, "the vertex is on the rect");
+        assert!(d_record(&hex, [59.0, 0.0]) > 0.0, "and the rect's own corner is not");
+
+        let chev = emit(ShapeKind::Chevron { left: 0.0, right: 18.0 });
+        assert_eq!(chev.flags >> crate::draw::Shape::KIND_SHIFT & 0xF, 3);
+        assert_eq!([chev.corner[0], chev.corner[1]], [0.0, 18.0]);
+        assert_eq!((chev.arc_half, chev.arc_dir), (0.0, 0.0), "a chevron has no angle");
+        assert!(d_record(&chev, [60.0, 0.0]).abs() <= 1e-3, "the tip is on the edge");
+        assert!(d_record(&chev, [-59.0, 29.0]) < 0.0, "the untouched end is square");
+
+        let ring = emit(ShapeKind::Ring { width: 8.0, half_sweep: 0.6, dir: 0.3 });
+        assert_eq!(ring.flags >> crate::draw::Shape::KIND_SHIFT & 0xF, 1);
+        assert_eq!(ring.corner[0], 4.0, "half the thickness");
+        assert_eq!((ring.arc_half, ring.arc_dir), (0.6, 0.3));
+        // The band's outer edge meets the shorter side, turned by dir.
+        let out = turned([0.0, 30.0], 0.3);
+        assert!(d_record(&ring, out).abs() <= 1e-3, "outer edge reads {}", d_record(&ring, out));
     }
 
     /// The chamfer passes through (b.x − c, b.y) and (b.x, b.y − c) —
@@ -785,19 +1189,6 @@ mod tests {
     use crate::draw::{DrawList, Shape, NO_SHAPE};
     use crate::theme::Color;
 
-    /// The corner treatments back out of a record's flag word — what
-    /// the fragment shader reads, read the same way.
-    fn record_corners(s: &Shape) -> [Corner; 4] {
-        [0usize, 1, 2, 3].map(|i| Corner {
-            style: match (s.flags >> (2 * i as u32)) & 3 {
-                1 => CornerStyle::Round,
-                2 => CornerStyle::Chamfer,
-                _ => CornerStyle::Square,
-            },
-            size: s.corner[i],
-        })
-    }
-
     /// One `fs_shape` fragment, spelled out of this file's own
     /// functions: the shader is the implementation and these are the
     /// specification, so a proof written here is a proof about the
@@ -809,7 +1200,7 @@ mod tests {
     /// derivatives of `d` are taken over framebuffer-aligned 2×2 blocks
     /// that neither variant can move.
     fn fs_shape(rec: &Shape, local: [f32; 2], colour: [f32; 4]) -> [f32; 4] {
-        let d = d_shape(local, rec.half, &record_corners(rec));
+        let d = d_record(rec, local);
         let has = |bit: u32| f32::from(rec.flags & bit != 0);
         let fill = [colour[0], colour[1], colour[2], colour[3] * has(Shape::FILL)];
         compose(
@@ -1468,7 +1859,20 @@ mod tests {
         };
         assert_eq!(emit(1, ShapeKind::Box, r), 30, "the frame");
         assert_eq!(emit(3, ShapeKind::Box, r), 54, "a ride keeps whole quads");
-        assert_eq!(emit(1, ShapeKind::Hex, r), 6, "a foreign silhouette");
+        // A foreign silhouette, and one whose OWN numbers would let the
+        // cut through if the kind did not stop it. A hexagon's apothem
+        // is large enough that `CORE_MIN` refuses the split anyway, so
+        // it proves nothing on its own: a chevron 20 px deep leaves a
+        // core of 77×27 px, far past the minimum, and its interior is
+        // NOT the rect's — the plain-fill path would paint the corners
+        // the collapse cut away, at full alpha. That is the picture the
+        // guard exists to stop, and this is the case that shows it.
+        assert_eq!(emit(1, ShapeKind::Hex { turn: 0.0 }, r), 6, "a foreign silhouette");
+        assert_eq!(
+            emit(1, ShapeKind::Chevron { left: 20.0, right: 20.0 }, r),
+            6,
+            "a chevron split its core: the rect's corners will fill solid"
+        );
         // A core of 4×24 px is 96 px² — under the 256 the four strips
         // have to earn — so this one stays one quad.
         assert_eq!(emit(1, ShapeKind::Box, Rect::new(0.0, 0.0, 44.0, 30.0)), 6, "too small");

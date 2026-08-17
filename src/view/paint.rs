@@ -15,7 +15,7 @@
 //! inside it.
 
 use super::surface::{StateInk, Surface};
-use crate::draw::CornerStyle;
+use crate::draw::{Corner, CornerStyle, ShapeKind};
 use crate::theme::parse::State;
 use crate::theme::Color;
 use crate::ui::{sev_of, Align, BadgeStyle, Sev, SEVERITY_ROLES};
@@ -230,6 +230,104 @@ pub fn corner_radius(sf: &mut impl Surface, name: &str, r: Rect, shrink: f32) ->
         );
     }
     radius.min(r.w.min(r.h).max(0.0) / 2.0)
+}
+
+// ------------------------------------------------------- shape presets
+
+/// A `shape.*` preset resolved into what a draw list takes: the
+/// silhouette's KIND and its four corners, one of which may differ from
+/// the next.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Preset {
+    pub kind: ShapeKind,
+    /// tl, tr, br, bl — `ring_points`' order, the order every
+    /// `[Corner; 4]` in this toolkit is written in.
+    pub corners: [Corner; 4],
+}
+
+/// One `shape.*` preset, read the way §5.0 wrote it (f3 K6).
+///
+/// **This is the first reader `corners_tl/tr/br/bl` have ever had.**
+/// Sixteen presets have carried the four keys since the master was
+/// written and nothing looked at them, so no theme could shape one
+/// corner differently from the next however plainly it said so — the
+/// record has had two bits per corner since K3 and there was simply no
+/// road from the theme to them. This is the road.
+///
+/// Each per-corner key is the same PAIR as `corners` itself, and each
+/// of its two slots inherits on its own: a slot holding
+/// `same_as_parent` takes the preset's `corners`, anything else is that
+/// slot's own answer. So a theme may chamfer one corner at the radius
+/// the preset already carries, or keep the style and shorten the cut,
+/// without restating the half it did not mean to change.
+///
+/// **The kind comes from `corners` and from nowhere else.** The master
+/// spends two words of the corner vocabulary on whole SILHOUETTES —
+/// `shape.taskbar` is `[ chevron, 0u ]` and `shape.hex` is
+/// `[ hexagon, 0u ]`, each with a comment saying "a shape word, not a
+/// corner" — and its own TODO asks whether `CornerStyle` should grow
+/// two variants or the presets should grow a `generator` key. Neither:
+/// the two words name a [`ShapeKind`], the record has had a field for
+/// one since K3, and `CornerStyle` stays the three cuts a corner can
+/// take. A shape word on a PER-CORNER key means nothing — one corner of
+/// a hexagon is not a shape — so it falls back to the preset's own cut
+/// rather than inventing a square.
+pub fn preset(sf: &mut impl Surface, name: &str, r: Rect) -> Preset {
+    let base_style = corner_style(sf, &format!("{name}.corners[0]"));
+    let base_size = sf.px(&format!("{name}.corners[1]"));
+    let inherit = crate::theme::expr::sentinel("same_as_parent").unwrap_or(-3.0);
+    let mut corners = [Corner::SQUARE; 4];
+    for (i, slot) in ["tl", "tr", "br", "bl"].iter().enumerate() {
+        let key = format!("{name}.corners_{slot}");
+        let style_slot = format!("{key}[0]");
+        // The scalar is what says "inherit": a sentinel bakes to its own
+        // negative number in the scalar array whatever kind of slot it
+        // sits in (§5.0), so this question can be asked of a word slot
+        // without asking the word first.
+        let style = if sf.px(&style_slot) == inherit {
+            base_style
+        } else {
+            match sf.word(&style_slot).as_str() {
+                "square" => CornerStyle::Square,
+                "round" => CornerStyle::Round,
+                "chamfer" => CornerStyle::Chamfer,
+                _ => base_style,
+            }
+        };
+        let stated = sf.px(&format!("{key}[1]"));
+        let size = if stated == inherit { base_size } else { stated };
+        corners[i] = Corner::sized(style, size, r);
+    }
+    Preset { kind: preset_kind(sf, name, r), corners }
+}
+
+/// The silhouette a preset's `corners` word names, with the numbers its
+/// own preset-specific keys carry (`shape.hex.orientation`,
+/// `shape.taskbar.chevron_depth` / `.chevron_dir`).
+fn preset_kind(sf: &mut impl Surface, name: &str, r: Rect) -> ShapeKind {
+    match sf.word(&format!("{name}.corners[0]")).as_str() {
+        "hexagon" => {
+            // 30° is not a look value — it is what the word `pointy`
+            // means on a six-fold lattice. Which of the two a theme
+            // wants IS the look, and that is the token. A preset that
+            // names no orientation gets NO turn, rather than one this
+            // file chose for it.
+            let turn = match sf.word(&format!("{name}.orientation")).as_str() {
+                "pointy" => std::f32::consts::FRAC_PI_6,
+                _ => 0.0,
+            };
+            ShapeKind::Hex { turn }
+        }
+        "chevron" => {
+            // A fraction of the HEIGHT, per end, which is what the
+            // master's own comment says; `%` bakes to 0..1.
+            let depth = sf.px(&format!("{name}.chevron_depth")).max(0.0) * r.h;
+            let dir = sf.word(&format!("{name}.chevron_dir"));
+            let end = |wanted: &str| if dir == wanted || dir == "both" { depth } else { 0.0 };
+            ShapeKind::Chevron { left: end("left"), right: end("right") }
+        }
+        _ => ShapeKind::Box,
+    }
 }
 
 // --------------------------------------------------------------- text
@@ -932,6 +1030,105 @@ pub(crate) mod tests {
         let auto = crate::theme::expr::sentinel("auto").unwrap();
         let mut sf = FakeSurface::new().token("x.corner", auto);
         assert_eq!(corner_radius(&mut sf, "x.corner", r, 1.0), 0.0);
+    }
+
+    // ---- shape presets ----
+
+    /// A preset standing where `default.theme` stands it: a pair on
+    /// `corners`, and all four per-corner keys inheriting both halves.
+    fn preset_at(style: &str, size: f32) -> FakeSurface {
+        let same = crate::theme::expr::sentinel("same_as_parent").unwrap();
+        let mut sf = FakeSurface::new()
+            .word_at("shape.p.corners[0]", style)
+            .token("shape.p.corners[1]", size);
+        for slot in ["tl", "tr", "br", "bl"] {
+            sf = sf
+                .token(&format!("shape.p.corners_{slot}[0]"), same)
+                .token(&format!("shape.p.corners_{slot}[1]"), same);
+        }
+        sf
+    }
+
+    /// The four corners come out the preset's own until a per-corner key
+    /// says otherwise — and each HALF of that key is independent, which
+    /// is the whole reason the master writes it as a pair.
+    #[test]
+    fn four_corners_inherit_the_preset_and_each_slot_overrides_alone() {
+        let r = Rect::new(0.0, 0.0, 80.0, 40.0);
+        let mut sf = preset_at("round", 6.0);
+        let p = preset(&mut sf, "shape.p", r);
+        assert_eq!(p.kind, ShapeKind::Box);
+        assert_eq!(p.corners, [Corner::round(6.0); 4], "an inheriting preset is uniform");
+
+        // The STYLE alone, at the radius the preset already carries —
+        // the case that a one-slot token could never have expressed.
+        // A stated slot no longer reads the sentinel — the scalar is
+        // what says "inherit", so a real word arrives with it cleared.
+        let mut sf = preset_at("round", 6.0)
+            .token("shape.p.corners_tr[0]", 0.0)
+            .word_at("shape.p.corners_tr[0]", "chamfer");
+        let p = preset(&mut sf, "shape.p", r);
+        assert_eq!(p.corners[1], Corner::chamfer(6.0), "the tr style did not stand alone");
+        assert_eq!(p.corners[0], Corner::round(6.0), "the tl corner moved with it");
+
+        // The SIZE alone, keeping the preset's cut.
+        let mut sf = preset_at("round", 6.0).token("shape.p.corners_bl[1]", 2.0);
+        let p = preset(&mut sf, "shape.p", r);
+        assert_eq!(p.corners[3], Corner::round(2.0));
+        assert_eq!(p.corners[2], Corner::round(6.0));
+
+        // `pill` on one corner alone: §5.0's sentinel is a length ABOUT
+        // the box, and it is resolved on the box the caller passed.
+        let pill = crate::theme::expr::sentinel("pill").unwrap();
+        let mut sf = preset_at("round", 6.0).token("shape.p.corners_br[1]", pill);
+        let p = preset(&mut sf, "shape.p", r);
+        assert_eq!(p.corners[2], Corner::round(20.0), "pill is half the short side");
+    }
+
+    /// `chevron` and `hexagon` are SHAPE words, and this is where the
+    /// master's own open question is answered: they name a kind, they do
+    /// not grow `CornerStyle`, and on a per-corner key they mean nothing
+    /// and inherit rather than squaring the corner off.
+    #[test]
+    fn a_shape_word_names_the_kind_and_never_one_corner() {
+        let r = Rect::new(0.0, 0.0, 80.0, 40.0);
+        let mut sf = preset_at("hexagon", 0.0).word_at("shape.p.orientation", "pointy");
+        assert_eq!(
+            preset(&mut sf, "shape.p", r).kind,
+            ShapeKind::Hex { turn: std::f32::consts::FRAC_PI_6 }
+        );
+        // A preset that names no orientation gets no turn — not one this
+        // file picked for it.
+        let mut sf = preset_at("hexagon", 0.0);
+        assert_eq!(preset(&mut sf, "shape.p", r).kind, ShapeKind::Hex { turn: 0.0 });
+
+        // Depth is a fraction of the HEIGHT, per end, and the direction
+        // says which ends get it.
+        let mut sf = preset_at("chevron", 0.0)
+            .token("shape.p.chevron_depth", 0.5)
+            .word_at("shape.p.chevron_dir", "both");
+        assert_eq!(
+            preset(&mut sf, "shape.p", r).kind,
+            ShapeKind::Chevron { left: 20.0, right: 20.0 }
+        );
+        let mut sf = preset_at("chevron", 0.0)
+            .token("shape.p.chevron_depth", 1.0)
+            .word_at("shape.p.chevron_dir", "right");
+        assert_eq!(
+            preset(&mut sf, "shape.p", r).kind,
+            ShapeKind::Chevron { left: 0.0, right: 40.0 },
+            "the master's own paging arrow"
+        );
+
+        // A shape word where a CORNER was expected is not a corner: the
+        // preset's own cut answers instead, and no square appears from
+        // nowhere.
+        let mut sf = preset_at("round", 6.0)
+            .token("shape.p.corners_tl[0]", 0.0)
+            .word_at("shape.p.corners_tl[0]", "hexagon");
+        let p = preset(&mut sf, "shape.p", r);
+        assert_eq!(p.kind, ShapeKind::Box, "one corner cannot make a hexagon");
+        assert_eq!(p.corners[0], Corner::round(6.0));
     }
 
     // ---- roles ----

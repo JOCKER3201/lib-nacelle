@@ -96,18 +96,28 @@ pub struct Shape {
     /// Softness: shadow feather / glow reach; 0 = crisp. Always 0 so
     /// far — the soft profiles (§2.6) are still ahead.
     pub feather: f32,
-    /// Corner sizes tl, tr, br, bl — [`ring_points`]' order — local px,
-    /// sentinels already resolved on the CPU (R9): never negative here.
+    /// The kind's LENGTHS, local px, sentinels already resolved on the
+    /// CPU (R9): never negative here. Box spends all four on its corner
+    /// sizes tl, tr, br, bl ([`ring_points`]' order); the kinds K6 added
+    /// spend the first one or two on their own — see the table on
+    /// [`ShapeKind`]. A slot no kind reads is zero, so two records of
+    /// one silhouette compare equal whatever the caller passed.
     pub corner: [f32; 4],
     /// The stroke band's colour; the fill colour is the vertex's.
     pub stroke_c: [f32; 4],
-    /// Bits 0-7: [`CornerStyle`] × 4 (tl, tr, br, bl), 2 bits each.
-    /// Bits 8-11: [`ShapeKind`]. Bit 12 [`Shape::FILL`], bit 13
+    /// Bits 0-7: [`CornerStyle`] × 4 (tl, tr, br, bl), 2 bits each —
+    /// Box's, and zero under every other kind. Bits 8-11:
+    /// [`ShapeKind::code`]. Bit 12 [`Shape::FILL`], bit 13
     /// [`Shape::STROKE`]. Bits 14-31 are unclaimed and MUST be zero.
     pub flags: u32,
-    /// Half the arc's sweep, radians; >= PI = a full ring. Ring only.
+    /// The kind's first ANGLE, radians: half the arc's sweep for a Ring
+    /// (>= PI = a closed ring), unread by every other kind. Lengths ride
+    /// [`Shape::corner`]; the split is what keeps one field from meaning
+    /// a px on one record and a radian on the next.
     pub arc_half: f32,
-    /// Direction of the arc's middle, radians. Ring only.
+    /// The kind's second angle, radians: the direction of a Ring's
+    /// middle, the lattice turn of a Hex. Both are measured from local
+    /// +y — DOWNWARD on screen — turning toward +x.
     pub arc_dir: f32,
     pub _pad: f32,
 }
@@ -128,18 +138,84 @@ impl Shape {
     pub const SILHOUETTE: u32 = (1 << 12) - 1;
 }
 
-/// The closed family of silhouettes the vector core draws (f3 §2.1).
-/// Box is the only kind emitted so far; the others are declared now so
-/// the record's bits 8-11 have their meaning pinned before anything
-/// fills them in.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[repr(u8)]
+/// The closed family of silhouettes the vector core draws (f3 §2.1),
+/// each carrying the numbers ITS OWN field reads and no others.
+///
+/// **A kind is worth adding only when the family cannot already spell
+/// it**, and the rule has teeth: a disc is `d_round(p, [r, r], r)`,
+/// which is `|p| − r` identically, so a joint disc, a dot in a matrix
+/// and every circular knob are Box records with round corners as big as
+/// their own half size — one record, one quad, and the shader learns
+/// nothing (`crate::sdf::d_disc`). A closed annulus is the same Box
+/// wearing its inward stroke. What the Box family CANNOT spell is the
+/// angularly truncated arc, and that is the whole of [`ShapeKind::Ring`].
+///
+/// How the payloads reach the 64-byte record ([`Shape`]):
+///
+/// | kind | `corner[0..3]` | `arc_half` | `arc_dir` |
+/// |---|---|---|---|
+/// | `Box` (0) | the four corner sizes | — | — |
+/// | `Ring` (1) | \[0\] half the band's radial thickness | half the sweep | the middle's direction |
+/// | `Hex` (2) | \[0\] the apothem, fitted to the rect here | — | the lattice turn |
+/// | `Chevron` (3) | \[0\] the left end's depth, \[1\] the right's | — | — |
+/// | `Capsule` (4) | reserved: `line()` still tessellates | — | — |
+///
+/// Lengths in `corner`, angles in `arc_*`: one field never means a
+/// pixel on one record and a radian on the next, and a reader of either
+/// file can say which it is holding without knowing the kind.
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum ShapeKind {
-    Box = 0,
-    Ring = 1,
-    Hex = 2,
-    Chevron = 3,
-    Capsule = 4,
+    Box,
+    /// The annular arc — a band of `width` px about a circle, swept
+    /// `2 · half_sweep` radians about `dir`, with round caps. The
+    /// circle's outer edge meets the shorter side of the rect.
+    /// `half_sweep >= PI` closes it into a plain ring, which is the one
+    /// case Box could have drawn too.
+    Ring { width: f32, half_sweep: f32, dir: f32 },
+    /// The regular hexagon, as large as fits the rect under its own
+    /// turn. `turn` is the lattice angle: 0 puts a flat edge at the top
+    /// (`shape.hex.orientation = flat`), 30° puts a vertex there
+    /// (`pointy`). Any angle between is legal and nothing forbids it.
+    Hex { turn: f32 },
+    /// The rect with one or both vertical ends collapsed to a point at
+    /// mid-height — `shape.taskbar`'s silhouette, and at full depth on
+    /// one end the solid paging arrow the master describes. The depths
+    /// are px, measured inward from each end.
+    Chevron { left: f32, right: f32 },
+    /// Reserved. A segment of given width with flat or round caps —
+    /// what `line()` and `polyline()` would become; K4 left them
+    /// tessellated and K6 does not move them.
+    Capsule,
+}
+
+impl ShapeKind {
+    /// The number bits 8-11 carry. Written out rather than derived from
+    /// a discriminant: the payloads make this enum an ordinary Rust one,
+    /// and the wire numbers are a promise to the shader (and, at K7, to
+    /// every compiled plugin) that no reordering here may quietly break.
+    pub fn code(self) -> u32 {
+        match self {
+            ShapeKind::Box => 0,
+            ShapeKind::Ring { .. } => 1,
+            ShapeKind::Hex { .. } => 2,
+            ShapeKind::Chevron { .. } => 3,
+            ShapeKind::Capsule => 4,
+        }
+    }
+
+    /// The kind of a record read back out of its flag word, WITHOUT the
+    /// payloads — which live in the record's own numbers, not in the
+    /// bits. The reference field ([`crate::sdf::d_record`]) takes them
+    /// from there, exactly as the shader does.
+    pub fn of_code(code: u32) -> ShapeKind {
+        match code {
+            1 => ShapeKind::Ring { width: 0.0, half_sweep: 0.0, dir: 0.0 },
+            2 => ShapeKind::Hex { turn: 0.0 },
+            3 => ShapeKind::Chevron { left: 0.0, right: 0.0 },
+            4 => ShapeKind::Capsule,
+            _ => ShapeKind::Box,
+        }
+    }
 }
 
 /// One shape as the caller means it (f3 §2.11: bed and edge; glow and
@@ -151,7 +227,12 @@ pub enum ShapeKind {
 #[derive(Clone, Copy, Debug)]
 pub struct ShapeSpec {
     pub rect: Rect,
-    /// tl, tr, br, bl — [`ring_points`]' order.
+    /// tl, tr, br, bl — [`ring_points`]' order. Read by
+    /// [`ShapeKind::Box`] ALONE: every other kind states its own
+    /// geometry in its payload, and passing corners with one of them is
+    /// not an error, it is simply not read. The record's corner slots
+    /// are then zeroed, so two hexagons of one size weld together
+    /// however each caller happened to fill this field.
     pub corners: [Corner; 4],
     pub kind: ShapeKind,
     /// Interior colour; rides the vertices, like every fill before it.
@@ -336,6 +417,76 @@ fn corner_reach(style: CornerStyle, size: f32) -> f32 {
         // by eye rather than looked up.
         CornerStyle::Chamfer => size * (2.0 + std::f32::consts::SQRT_2) * 0.5,
     }
+}
+
+/// The record's four length slots for a kind past Box (the table on
+/// [`ShapeKind`]), everything the kind does not read left at zero.
+///
+/// Every number is CLAMPED to what the rect can hold, here and not in
+/// the shader: the field has no rect to ask, and a payload that reached
+/// it unclamped would draw a silhouette outside the quad that carries
+/// it — a shape cut off at a straight edge nobody wrote.
+fn kind_lengths(kind: ShapeKind, half: [f32; 2]) -> [f32; 4] {
+    let short = half[0].min(half[1]).max(0.0);
+    match kind {
+        // Half the band's thickness, which is also its radius of
+        // curvature at the caps: past half the short side the band would
+        // swallow its own hole, so that is where it stops.
+        ShapeKind::Ring { width, .. } => [(width * 0.5).clamp(0.0, short), 0.0, 0.0, 0.0],
+        ShapeKind::Hex { turn } => [hex_apothem(half, turn), 0.0, 0.0, 0.0],
+        // Two ends may each eat the whole width; both at once meet in
+        // the middle and the shape closes to a pair of touching points,
+        // which is what "collapsed to a point" says at 100 % twice.
+        ShapeKind::Chevron { left, right } => {
+            let w = (half[0] * 2.0).max(0.0);
+            [left.clamp(0.0, w), right.clamp(0.0, w), 0.0, 0.0]
+        }
+        ShapeKind::Box | ShapeKind::Capsule => [0.0; 4],
+    }
+}
+
+/// The record's two angle slots, radians — likewise zero for a kind
+/// that reads none.
+fn kind_angles(kind: ShapeKind) -> (f32, f32) {
+    match kind {
+        ShapeKind::Ring { half_sweep, dir, .. } => (half_sweep.max(0.0), dir),
+        ShapeKind::Hex { turn } => (0.0, turn),
+        _ => (0.0, 0.0),
+    }
+}
+
+/// The largest apothem a regular hexagon turned by `turn` can wear
+/// inside the rect of half sizes `half`.
+///
+/// A hexagon of apothem `r` has circumradius `2r/√3`, and at `turn = 0`
+/// — the flat-topped one [`crate::sdf::d_hex`] is written about — its
+/// six vertices lie at `k·60°`, the first of them on +x. Its half
+/// extent along an axis is the largest projection of those vertices on
+/// that axis; solve each axis for `r` and take the tighter, so `flat`
+/// fills a wide rect and `pointy` a tall one, and neither ever pokes
+/// out of the quad the emitter padded for it.
+///
+/// The 30° is not a look value: it is what the words `flat` and `pointy`
+/// MEAN on a six-fold lattice, the same way `SQRT1_2` is what a 45° cut
+/// means. The choice between them is the theme's
+/// (`shape.hex.orientation`), and only the choice.
+fn hex_apothem(half: [f32; 2], turn: f32) -> f32 {
+    let circum = 2.0 / 3.0f32.sqrt();
+    let (mut cx, mut cy) = (0.0f32, 0.0f32);
+    // Three vertices span every direction the other three do, mirrored.
+    for k in 0..3 {
+        let a = turn + k as f32 * std::f32::consts::FRAC_PI_3;
+        cx = cx.max(a.cos().abs());
+        cy = cy.max(a.sin().abs());
+    }
+    let fit = |extent: f32, reach: f32| {
+        if reach > 1e-6 {
+            extent / (reach * circum)
+        } else {
+            f32::INFINITY
+        }
+    };
+    fit(half[0].max(0.0), cx).min(fit(half[1].max(0.0), cy))
 }
 
 /// Half sizes of the core a band `band` deep leaves behind — clamped at
@@ -935,13 +1086,30 @@ impl fmt::Display for DrawCmd {
                 f.write_str("shape at")?;
                 nums(f, r, PX)?;
                 corners(f, c)?;
-                f.write_str(match kind {
-                    ShapeKind::Box => " kind box",
-                    ShapeKind::Ring => " kind ring",
-                    ShapeKind::Hex => " kind hex",
-                    ShapeKind::Chevron => " kind chevron",
-                    ShapeKind::Capsule => " kind capsule",
-                })?;
+                // The payload prints with the kind: the register holds
+                // INTENT (level A), and a hexagon's turn is as much of
+                // the caller's intent as a corner's radius is. Box says
+                // exactly what it said before K6, because Box carries
+                // nothing.
+                match kind {
+                    ShapeKind::Box => f.write_str(" kind box")?,
+                    ShapeKind::Ring { width, half_sweep, dir } => {
+                        f.write_str(" kind ring")?;
+                        field(f, "width", *width, PX)?;
+                        field(f, "half_sweep", *half_sweep, FINE)?;
+                        field(f, "dir", *dir, FINE)?;
+                    }
+                    ShapeKind::Hex { turn } => {
+                        f.write_str(" kind hex")?;
+                        field(f, "turn", *turn, FINE)?;
+                    }
+                    ShapeKind::Chevron { left, right } => {
+                        f.write_str(" kind chevron")?;
+                        field(f, "left", *left, PX)?;
+                        field(f, "right", *right, PX)?;
+                    }
+                    ShapeKind::Capsule => f.write_str(" kind capsule")?,
+                }
                 if let Some(col) = fill {
                     f.write_str(" fill")?;
                     rgba(f, *col)?;
@@ -1900,11 +2068,14 @@ impl DrawList {
     }
 
     /// One shape of the vector family (f3 §2.11): bed and/or edge over
-    /// a Box silhouette, one record and one quad (6 vertices) whatever
-    /// the corners — where the ring generator spends up to 168. Kinds
-    /// beyond Box are recorded faithfully but the fragment shader draws
-    /// every record as its Box distance so far; the remaining kinds,
-    /// glow and shadow are still ahead.
+    /// one silhouette, one record and one quad (6 vertices) whatever
+    /// the corners — where the ring generator spends up to 168.
+    ///
+    /// K6 gave bits 8-11 a reader, so Ring, Hex and Chevron now draw as
+    /// themselves rather than as their bounding box; `Capsule` is still
+    /// recorded and still drawn as a box, because nothing emits one and
+    /// `line()` tessellates. Glow and shadow (the `feather` slot) are
+    /// still ahead.
     pub fn shape(&mut self, s: &ShapeSpec) {
         self.cmd(|| DrawCmd::Shape {
             r: [s.rect.x, s.rect.y, s.rect.w, s.rect.h],
@@ -1951,8 +2122,9 @@ impl DrawList {
         // corner. `pill` is half the short side (corner_radius's one
         // rule, sized like ring_points' own cap); `same_as_parent`
         // takes the FIRST corner as its parent — the base every
-        // `[Corner { .. }; 4]` builder repeats — until K6 reads the
-        // per-corner tokens and a real cascade parent exists.
+        // `[Corner { .. }; 4]` builder repeats, and the parent
+        // `view::paint::preset` hands down when a per-corner token says
+        // to inherit.
         let cap = (r.w.min(r.h) * 0.5).max(0.0);
         let same = crate::theme::expr::sentinel("same_as_parent").unwrap_or(-3.0);
         let base = crate::theme::corner_radius(s.corners[0].size, r.w, r.h);
@@ -1967,12 +2139,24 @@ impl DrawList {
         };
         // Corner radii are NOT snapped (§2.7): the curve does not lie
         // on the grid to begin with.
-        let corner = [
-            resolve(&s.corners[0]),
-            resolve(&s.corners[1]),
-            resolve(&s.corners[2]),
-            resolve(&s.corners[3]),
-        ];
+        //
+        // The kinds past Box do not have corners at all, so they do not
+        // come through here: their lengths are the payload's own, in px
+        // already, and `cap` — which exists to stop two corner arcs
+        // meeting — would be the wrong ceiling for every one of them (a
+        // chevron collapsing a whole end reaches the middle of the rect
+        // by DESIGN). Their slots are filled by [`kind_lengths`] and the
+        // rest zeroed, so the weld compares silhouettes and not leftovers.
+        let half = [r.w * 0.5, r.h * 0.5];
+        let corner = match s.kind {
+            ShapeKind::Box => [
+                resolve(&s.corners[0]),
+                resolve(&s.corners[1]),
+                resolve(&s.corners[2]),
+                resolve(&s.corners[3]),
+            ],
+            kind => kind_lengths(kind, half),
+        };
         let (stroke_w, stroke_c) = match stroke {
             // The baker's own hairline rule — `stroke.*` bakes as
             // max(1, round(x·u)) — applied at the same moment as the
@@ -2000,17 +2184,23 @@ impl DrawList {
             None => (0.0, [0.0; 4]),
         };
         let mut flags = 0u32;
-        for (i, c) in s.corners.iter().enumerate() {
-            flags |= (c.style as u32) << (2 * i as u32);
+        // Bits 0-7 belong to Box's four corner treatments and to nothing
+        // else. Under another kind they stay zero rather than carrying
+        // whatever the caller left in `corners`: the shader does not read
+        // them there, and a silhouette bit that varies without changing
+        // the picture would break the weld's own premise (§2.10).
+        if s.kind == ShapeKind::Box {
+            for (i, c) in s.corners.iter().enumerate() {
+                flags |= (c.style as u32) << (2 * i as u32);
+            }
         }
-        flags |= (s.kind as u32) << Shape::KIND_SHIFT;
+        flags |= s.kind.code() << Shape::KIND_SHIFT;
         if s.fill.is_some() {
             flags |= Shape::FILL;
         }
         if stroke.is_some() {
             flags |= Shape::STROKE;
         }
-        let half = [r.w * 0.5, r.h * 0.5];
         let centre = [r.x + half[0], r.y + half[1]];
         // §2.10: a part drawn over the bed that was just written is not
         // a second shape. It is the same silhouette wearing another
@@ -2064,6 +2254,7 @@ impl DrawList {
             }
         }
         let idx = self.shapes.len() as u32;
+        let (arc_half, arc_dir) = kind_angles(s.kind);
         self.shapes.push(Shape {
             half,
             stroke: stroke_w,
@@ -2071,8 +2262,8 @@ impl DrawList {
             corner,
             stroke_c,
             flags,
-            arc_half: 0.0,
-            arc_dir: 0.0,
+            arc_half,
+            arc_dir,
             _pad: 0.0,
         });
         // The quad reaches one pixel past the silhouette so the AA ramp
@@ -2110,11 +2301,19 @@ impl DrawList {
         //   perspective ride it is not, the ramp widens in local units,
         //   and the core's boundary could land inside it. Same
         //   condition as the edge snap, and for the same reason.
-        // * **A kind past Box.** The shader draws every record as its
-        //   Box distance so far, so a Hex or a Chevron record would
-        //   split correctly TODAY and wrongly the day its silhouette
-        //   arrives. The cut is worth nothing on a shape whose
-        //   interior is not the box's.
+        // * **A kind past Box.** THE DAY THIS GUARD WAS WRITTEN FOR HAS
+        //   COME. Until K6 the shader drew every record as its box
+        //   distance, so a Hex record would have split correctly by
+        //   accident; now bits 8-11 are read and its interior is the
+        //   hexagon's, which is strictly smaller than the rect's. Cut a
+        //   core out of it and the plain-fill path would paint the four
+        //   triangles the hexagon does not cover — the corners of the
+        //   rect, at full alpha. The guard is what stops that, it is
+        //   load-bearing rather than cautious, and the test
+        //   `a_ride_a_foreign_kind_and_a_small_core_keep_the_whole_quad`
+        //   is what keeps it. The cut is worth nothing on a shape whose
+        //   interior is not the box's anyway: `core_half` measures the
+        //   rect, and the rect is not the silhouette.
         // * **A core too small to pay for itself** ([`CORE_MIN`]).
         //
         // The cost of the cut is TWO runs more per shape, not one —
@@ -2301,7 +2500,7 @@ impl DrawList {
         // The same ceiling `ring_verts` and `shape_verts` keep: a
         // corner deeper than the short half side would meet itself.
         let cap = half[0].min(half[1]);
-        let mut flags = ((ShapeKind::Box as u32) << Shape::KIND_SHIFT) | Shape::FILL;
+        let mut flags = (ShapeKind::Box.code() << Shape::KIND_SHIFT) | Shape::FILL;
         let mut corner = [0.0f32; 4];
         for (i, c) in corners.iter().enumerate() {
             flags |= (c.style as u32) << (2 * i as u32);
