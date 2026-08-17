@@ -3503,7 +3503,7 @@ color                 = @border.default       # colour of a bracket · 9 · colo
 #
 # [state] writes every rung as arithmetic on `base` — "this class's own base
 # colour" — and until now nothing declared what that base IS, so every state
-# token baked against white. These twenty-five rows are the missing origin:
+# token baked against white. These twenty-six rows are the missing origin:
 # one per interactive class of the 5.27 matrix. @accent.primary is the
 # identity element (it is exactly what ctx.theme.base was at every migrated
 # site), and a theme differs a row only when it means to.
@@ -3533,6 +3533,7 @@ term.cell       = @term.fg          # a terminal cell as an interactive thing ·
 editor.proxy    = @accent.primary   # a widget proxy in the layout editor · - · col · @accent.primary
 boards.tile     = @accent.primary   # a board miniature in the BOARDS view · - · col · @accent.primary
 filetile        = @accent.primary   # a file browser tile · 1 · col · @accent.primary
+table.head      = @accent.primary   # a sortable table heading · 1,9 · col · @accent.primary; the 5.27 matrix has always given this class hover / press / selected (selected = the SORTED column) and ui.rs has always asked for it by name — the row itself was missing, so class_id answered None and every heading fell back to StateStyle::RAW: no wash under the pointer, no press, no mark on the column being sorted by
 script.row      = @accent.primary   # a selectable row a script widget draws · 1 · col · @accent.primary
 
 [state]
@@ -4664,7 +4665,7 @@ bar_align = middle                  # where the bar sits in that row · images 1
 # gauge — image 1's CPU / GPU / NETWORK boxes of vertical bars.
 # =========================================================================
 [gauge]
-h = @size.sm                        # the gauge body's height · image 1 · len (u) · @size.sm = 4u = 21.6 px
+h = @size.sm                        # the gauge body's height, and the CEILING of min_h_for_value below · image 1 · len (u) · @size.sm = 4u = 21.6 px; a gauge drawn at the height this file declares for it must keep its reading, so ui.rs caps the drop threshold here — the two numbers can no longer be set against each other
 gap = @space.1                      # gap between two bars inside one gauge · image 1 · len (u) · @space.1 = 0.5u = 2.7 px
 cols = 2                            # gauges per row when they are laid out in a grid · image 1 · n · -
 style = row                         # what one gauge is drawn as (u2 2.5) · image 1's rows, image 9's donuts · enum: row | cell | bar | donut · row since u2 §2.5 landed: label + thin track + value, image 1's instrument row; cell is the old framed box; bar and donut degrade to row until they can carry their value labels
@@ -4673,7 +4674,7 @@ label_role = caption                # type role of the key half of a gauge row, 
 value_role = value                  # type role of a gauge's numeric readout, `12%` / `33.1106` · image 1 · role · type.value, the role every other numeric readout in the master is bound to (script.meter_value_role, columns.value_role, donut.label_role); ui.rs used to read type.caption.size by name for the label AND the readout, which set a reading at its own label's size
 value_inset = 0.6u                  # inset of that readout inside the gauge box · image 1 · len (u) · 3.2 px
 value_clearance = 1.2u              # fill closer to the number than this flips the number's colour · image 1 · len (u) · ui.rs:138's real contrast decision, now named
-min_h_for_value = 1.4x @type.value.size   # below this height the readout is dropped entirely · image 1 · rat of @type.value.size · the readout's OWN resting size, because the threshold guards the readout: written against the caption it guarded a line 1.8x shorter than the one drawn
+min_h_for_value = 1.4x @type.value.size   # below this height the readout is dropped entirely, never above @gauge.h · image 1 · rat of @type.value.size · the readout's OWN resting size, because the threshold guards the readout: written against the caption it guarded a line 1.8x shorter than the one drawn. At the master's own numbers this asks for 4.55u while the body it guards is 4u — a gauge at its declared height throwing its number away — so ui.rs takes the smaller of the two. The reading's SIZE (type.value.size, 3.25u today, 1.77u before the type ladder was unified) is a separate question and still open
 
 # =========================================================================
 # dotmatrix — the dot grid a script widget draws. gap_min_px guarantees
@@ -4931,7 +4932,7 @@ proxy.close_size_min_px = 18px      # absolute floor for proxy.close_size · - �
 proxy.close_inset = @space.1        # inset of that ✕ from the proxy's top-right corner · - · len (u) · @space.1 = 0.5u = 2.7 px; editor.rs:283's flat 4.0
 proxy.close_stroke = @stroke.thin   # that ✕'s line weight · - · str · editor.rs:757's flat 1.5
 proxy.label_role = caption          # type role of a proxy's name tag · - · role · editor.rs:725/:846 set two sizes for one object; one role ends that
-proxy.label_pad_x = 1.2x @type.caption.size   # left/right padding of the plate behind that tag · - · rat of @type.caption.size · editor.rs:729
+proxy.label_pad_x = 0.6x @type.caption.size   # left/right padding of the plate behind that tag, ON EACH SIDE as @button.pad_x is · - · rat of @type.caption.size · 5.7 px a side, which is the same plate editor.rs:729 drew: the key was written as 1.2x when its one reader spent it on BOTH sides together, so the file promised a theme twice the breathing room it got. Halved here rather than doubled in the code, because the number was calibrated against the drawn tag and the wording was what was wrong
 proxy.label_h = 1.7x @type.caption.size       # that plate's height · - · rat of @type.caption.size · editor.rs:729
 hint.role = tooltip                 # type role of the editor's hint text · - · role · type.tooltip
 hint.inset_x = @space.6             # horizontal inset of that hint · - · len (u) · today w*0.012, a WIDTH-relative inset in a height-scaled interface

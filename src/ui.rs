@@ -887,6 +887,7 @@ pub fn gauge_grid(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
     static GAP: OnceLock<TokenId> = OnceLock::new();
     static VALUE_ROLE: OnceLock<TokenId> = OnceLock::new();
     static MIN_H: OnceLock<TokenId> = OnceLock::new();
+    static BODY_H: OnceLock<TokenId> = OnceLock::new();
     static BORDER: OnceLock<TokenId> = OnceLock::new();
     static CLEARANCE: OnceLock<TokenId> = OnceLock::new();
     static INSET: OnceLock<TokenId> = OnceLock::new();
@@ -915,7 +916,25 @@ pub fn gauge_grid(ctx: &mut Ctx, r: Rect, values: &[f32], st: &GaugeStyle) {
     let fig = value_role.figures(ctx.fonts, face, px);
     // min_h_for_value is baked from the readout's resting size, so it
     // follows the same container-query factor the drawn px does.
-    let min_h = t.px(tok(&MIN_H, "gauge.min_h_for_value")) * ctx.panel_scale;
+    //
+    // Held at `gauge.h`, the height the master declares a gauge body to
+    // be. The threshold is a ratio of the READING and the body height is
+    // a length, so nothing kept the two in step: the master's own numbers
+    // ask to drop the reading below 4.55u out of a body declared 4u tall,
+    // which says a gauge drawn at its own declared size must throw its
+    // number away. Two keys of one section contradicting each other is a
+    // defect whatever the right size turns out to be — and `gauge.h`,
+    // which until now no line of this program read, is what says which of
+    // them is the ceiling.
+    //
+    // Taking the smaller of the two changes no drawn text: the reading's
+    // SIZE stays `gauge.value_role`'s, which is the theme's to set and
+    // (at 3.25u today against the 1.77u it was set at before the type
+    // ladder was unified) the owner's to settle.
+    let min_h = t
+        .px(tok(&MIN_H, "gauge.min_h_for_value"))
+        .min(t.px(tok(&BODY_H, "gauge.h")))
+        * ctx.panel_scale;
     let bw = t.px(tok(&BORDER, "gauge.border"));
     let clearance = t.px(tok(&CLEARANCE, "gauge.value_clearance"));
     let inset = t.px(tok(&INSET, "gauge.value_inset"));
