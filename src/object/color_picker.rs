@@ -41,7 +41,12 @@
 //! as a broken control. OKLCh is on the list of NOTATIONS, where it
 //! belongs and where it is mandatory: the theme file writes `oklch(...)`,
 //! so an author who cannot type one cannot move a value between the
-//! editor and their own file.
+//! editor and their own file. "Mandatory" is a claim about the SCREEN as
+//! well as about the list, and it was false for a day: the readout sat
+//! in the column beside the field, which leaves it 215 px on a
+//! 1080-line screen, and the notation needs 224 — so the one notation
+//! this file calls compulsory was the one it cut off, at every size.
+//! [`Layout`] carries the measurements and where the readout went.
 //!
 //! THE TRAP THIS FILE IS WRITTEN AROUND. The colour a picker holds is
 //! **sRGB-ENCODED** — that is what a bake hands back, what hex spells and
@@ -207,6 +212,16 @@ fn q8(v: f32) -> u8 {
 /// `oklch(... / a)` means in the theme language this program already
 /// parses. A picker that wrote `0.50` in one place and `128` in another
 /// for the same channel would be teaching two dialects.
+///
+/// TWO DECIMALS ON THE ANGLES AND THE PERCENTAGES, AND THAT IS A
+/// CORRECTNESS DECISION AND NOT A TASTE ONE. Whole numbers cost more
+/// than they look: one degree of hue moves a channel by up to 255/60 ≈
+/// 4.3, and one percent of value moves it by 2.55, so `hsv(166, 78, 89)`
+/// read back is a VISIBLY different colour to the one it was written
+/// from — measured at 0.042 in OKLCh lightness, against 0.000 for the
+/// hex notations. Two decimals put the same trip under 1e-4, which is
+/// past what eight-bit output can hold. The three hex-and-byte notations
+/// need no such choice: a byte IS their resolution.
 pub fn write(c: Color, f: Format) -> String {
     let (r, g, b, a) = (q8(c.r), q8(c.g), q8(c.b), q8(c.a));
     match f {
@@ -217,11 +232,11 @@ pub fn write(c: Color, f: Format) -> String {
         Format::Oklch => theme::edit::oklch_literal(c.to_linear().to_oklch()),
         Format::Hsv => {
             let (h, s, v) = rgb_to_hsv(c.r, c.g, c.b);
-            with_alpha(format!("hsv({:.0}, {:.0}, {:.0}", h, s * 100.0, v * 100.0), c.a)
+            with_alpha(format!("hsv({:.2}, {:.2}, {:.2}", h, s * 100.0, v * 100.0), c.a)
         }
         Format::Hsl => {
             let (h, s, l) = rgb_to_hsl(c.r, c.g, c.b);
-            with_alpha(format!("hsl({:.0}, {:.0}, {:.0}", h, s * 100.0, l * 100.0), c.a)
+            with_alpha(format!("hsl({:.2}, {:.2}, {:.2}", h, s * 100.0, l * 100.0), c.a)
         }
         Format::Dec => format!("{r}, {g}, {b}, {a}"),
     }
@@ -381,6 +396,23 @@ impl Picker {
         p
     }
 
+    /// A picker opened on nothing in particular — `component.picker.rest`,
+    /// the colour a theme says its picker holds before anything seeds it.
+    ///
+    /// A CONSTRUCTOR AND NOT A CONSTANT, and the difference is the whole
+    /// rule this toolkit is built on. A picker is built long before its
+    /// owner knows what colour to point it at, and whatever it holds in
+    /// the meantime is ON THE SCREEN for as long as it takes somebody to
+    /// reach the control. That is a look, and a look is a token. The
+    /// settings window opened its picker on a grey written into Rust
+    /// until 2026-08-18, defended as neutrality — but a neutral is a
+    /// choice too, and the master already had a name for the one it
+    /// wanted (`@palette.neutral`).
+    pub fn at_rest() -> Picker {
+        static REST: OnceLock<TokenId> = OnceLock::new();
+        Picker::of(col(theme::resolved().color(tok(&REST, "component.picker.rest"))))
+    }
+
     /// The chosen colour, sRGB-encoded, alpha included.
     pub fn colour(&self) -> Color {
         let (r, g, b) = hsv_to_rgb(self.hsv[0], self.hsv[1], self.hsv[2]);
@@ -464,6 +496,20 @@ impl Picker {
 // -------------------------------------------------------------- geometry
 
 /// Where every part of the control stands, in the caller's coordinates.
+///
+/// THE READOUT IS A STRIP UNDER THE WHOLE CONTROL, and that is arithmetic
+/// rather than taste. The longest thing this control ever writes is
+/// `oklch(0.8200, 0.1531, 166.22 / 0.502)`, which measures 224 px at
+/// `type.data`. It used to sit in the column beside the field, and that
+/// column is narrower than the value at every size the settings window
+/// has: the picker's band measures 730 px on a 1080-line screen, 596 on
+/// a 900 and 497 on a 768, which left the readout 215, 158 and 117 px.
+/// So the ONE notation this file calls mandatory — the one a `.theme`
+/// file is written in — was cut off on every screen there is. Across the
+/// full band the same three sizes give it 662, 528 and 429 px.
+///
+/// It costs no height: the strip is exactly the row the right-hand
+/// column no longer carries, and the control is as tall as it was.
 #[derive(Clone, Debug)]
 pub struct Layout {
     /// Hue across, saturation down.
@@ -472,9 +518,10 @@ pub struct Layout {
     pub value: Rect,
     /// The chosen colour over the transparency checker.
     pub patch: Rect,
-    /// The plate that names the notation and steps to the next.
+    /// The plate that names the notation and steps to the next, at the
+    /// head of the readout strip.
     pub format: Rect,
-    /// The colour written out.
+    /// The colour written out, across the rest of that strip.
     pub text: Rect,
     /// The theme's own ready-made colours.
     pub base: Vec<Rect>,
@@ -500,6 +547,7 @@ pub enum Part {
 /// be able to disagree because the theme was re-baked between them.
 struct Metrics {
     gap: f32,
+    pad_x: f32,
     field_h: f32,
     value_w: f32,
     field_w_frac: f32,
@@ -525,9 +573,11 @@ impl Metrics {
         static SWATCH_GAP: OnceLock<TokenId> = OnceLock::new();
         static COLS: OnceLock<TokenId> = OnceLock::new();
         static BASE_N: OnceLock<TokenId> = OnceLock::new();
+        static PAD_X: OnceLock<TokenId> = OnceLock::new();
         let t = theme::resolved();
         Metrics {
             gap: t.px(tok(&GAP, "picker.gap")),
+            pad_x: t.px(tok(&PAD_X, "picker.pad_x")),
             field_h: t.px(tok(&FIELD_H, "picker.field_h")),
             value_w: t.px(tok(&VALUE_W, "picker.value_w")),
             field_w_frac: t.px(tok(&FRAC, "picker.field_w_frac")).clamp(0.1, 0.9),
@@ -539,17 +589,47 @@ impl Metrics {
             // Counts, floored at one: a grid nought cells wide is a
             // division by zero, and a theme is a file a person edits.
             cols: (t.px(tok(&COLS, "picker.swatch_cols")).round() as usize).max(1),
-            base_count: (t.px(tok(&BASE_N, "picker.base_count")).round() as usize).min(BASE_MAX),
+            base_count: offered(t.px(tok(&BASE_N, "picker.base_count"))),
         }
     }
 }
 
-/// The ceiling on the ready-made grid, and the reason it is a ceiling and
-/// not a length: the tokens are `picker.base.1 ..` and a numbered series
-/// is a promise about numbering that only a reader can keep (`[glow]`'s
-/// own warning). The reader stops here whatever `base_count` says, so a
-/// theme cannot ask for a colour this build has no token id for.
-const BASE_MAX: usize = 24;
+/// How far the reader LOOKS for `picker.base.N`, and the reason it is a
+/// search bound and not an answer: the tokens are a numbered series, and
+/// a numbered series is a promise about numbering that only a reader can
+/// keep (`[glow]`'s own warning). What the grid offers is [`base_ids`] —
+/// however many of these the build actually declares — and never this.
+const BASE_SEARCH: usize = 24;
+
+/// The ids of the ready-made colours, in numbering order, stopping at the
+/// first number this build does not declare.
+///
+/// STOPPING AND NOT SKIPPING. Skipping a hole would renumber every cell
+/// behind it, so `base.5` would answer to a press aimed at `base.4` and
+/// the grid a theme wrote would not be the grid it saw.
+fn base_ids() -> &'static [TokenId] {
+    static IDS: OnceLock<Vec<TokenId>> = OnceLock::new();
+    IDS.get_or_init(|| {
+        (1..=BASE_SEARCH).map_while(|i| theme::id(&format!("picker.base.{i}"))).collect()
+    })
+}
+
+/// How many ready-made cells the grid really offers: what the theme
+/// asked for, floored by what this build has colours for.
+///
+/// THE FLOOR IS THE FIX FOR A GHOST CELL. `base_count` used to be clamped
+/// to [`BASE_SEARCH`] and the colours were gathered with a `filter_map`
+/// over the same range, so a theme writing `base_count = 24` against a
+/// master declaring sixteen laid TWENTY-FOUR rectangles and produced
+/// SIXTEEN colours. The eight over the end went into [`parts`], and so
+/// into [`hit`] and into the focus chain, and were never drawn: eight
+/// cells you could Tab to and press, which looked like nothing at all and
+/// answered nothing at all. [`parts`]'s own rule — "a part that is drawn
+/// is a part that can be reached" — has to hold in the other direction
+/// too, and this is where it does.
+fn offered(wish: f32) -> usize {
+    (wish.round().max(0.0) as usize).min(base_ids().len())
+}
 
 /// How tall the control stands in a band `w` wide, offering `custom`
 /// colours of the caller's own.
@@ -571,49 +651,68 @@ pub fn layout(area: Rect, custom: usize) -> Layout {
 }
 
 fn layout_with(m: &Metrics, area: Rect, custom: usize) -> (Layout, f32) {
-    let left_w = (area.w * m.field_w_frac).max(m.value_w + m.gap);
-    let field_w = (left_w - m.gap - m.value_w).max(0.0);
+    // NOTHING MAY LEAVE THE BAND, AND THE BAND IS THE ONLY NUMBER HERE
+    // THAT IS NOT THE THEME'S. Every width below is the theme's wish
+    // clamped by the room there is, in that order, because the two are
+    // answers to different questions: a theme says how wide a value bar
+    // ought to be, and only the caller knows how wide the row it stands
+    // in turned out. Where they disagree the room wins — a part laid past
+    // the band is drawn and PRESSED over whatever is beside it, which is
+    // not a look but a fault. Measured before this clamping existed: at
+    // a 200 px band the readout began 7.8 px past the right edge, and at
+    // 30 px the first ready-made cell stood 29.4 px outside.
+    let band = area.w.max(0.0);
+    let value_w = m.value_w.min(band);
+    let left_w = (band * m.field_w_frac).max(value_w + m.gap).min(band);
+    let field_w = (left_w - m.gap - value_w).max(0.0);
     let field = Rect::new(area.x, area.y, field_w, m.field_h);
-    let value = Rect::new(field.right() + m.gap, area.y, m.value_w, m.field_h);
-    let rx = area.x + left_w + m.gap;
-    let rw = (area.w - left_w - m.gap).max(0.0);
+    // The bar is hung from the RIGHT of the left column rather than from
+    // the field's edge. With room the two are the same point to the last
+    // bit; without it, this one is still inside the band.
+    let value = Rect::new(area.x + left_w - value_w, area.y, value_w, m.field_h);
+    let rw = (band - left_w - m.gap).max(0.0);
+    let rx = (area.x + left_w + m.gap).min(area.x + band);
     let patch = Rect::new(rx, area.y, rw, m.patch_h);
     let mut y = patch.bottom() + m.gap;
-    let format = Rect::new(rx, y, m.format_w.min(rw), m.row_h);
-    let text = Rect::new(
-        format.right() + m.gap,
-        y,
-        (rw - format.w - m.gap).max(0.0),
-        m.row_h,
-    );
-    y += m.row_h + m.gap;
     // HOW MANY CELLS THE THEME ASKS FOR, AND HOW MANY THERE IS ROOM FOR.
     // `picker.swatch_cols` is the theme's wish and this is the band's
     // answer: a grid wider than the column it stands in would lay cells
-    // past the window's own edge, where they would be drawn and pressed
-    // over whatever is beside them. Which of the two wins is not a look
-    // — it is arithmetic about a width nobody knew when the theme was
-    // written — so the cells wrap sooner and none of them leaves the
-    // band.
-    let pitch = m.swatch + m.swatch_gap;
+    // past the window's own edge. Which of the two wins is not a look —
+    // it is arithmetic about a width nobody knew when the theme was
+    // written — so the cells wrap sooner, and in a column too narrow for
+    // even one they are squeezed rather than allowed out.
+    let swatch = m.swatch.min(rw);
+    let pitch = swatch + m.swatch_gap;
     let fits = ((rw + m.swatch_gap) / pitch.max(f32::MIN_POSITIVE)).floor();
     let cols = m.cols.min((fits.max(1.0)) as usize).max(1);
     let cell = |i: usize, y0: f32| {
         let (c, r) = (i % cols, i / cols);
-        Rect::new(rx + c as f32 * pitch, y0 + r as f32 * pitch, m.swatch, m.swatch)
+        Rect::new(rx + c as f32 * pitch, y0 + r as f32 * pitch, swatch, swatch)
     };
     let base: Vec<Rect> = (0..m.base_count).map(|i| cell(i, y)).collect();
     let base_rows = m.base_count.div_ceil(cols).max(1);
-    y += base_rows as f32 * (m.swatch + m.swatch_gap) - m.swatch_gap + m.gap;
+    y += base_rows as f32 * pitch - m.swatch_gap + m.gap;
     // The caller's own colours, and the cell that banks the current one
     // AFTER them: a grid that put the bank first would move every custom
     // colour one place along the moment a new one was added.
     let custom_rects: Vec<Rect> = (0..custom).map(|i| cell(i, y)).collect();
     let add = cell(custom, y);
     let right_h = add.bottom() - area.y;
+    // ---- the readout strip, under both columns and across the band.
+    // Why it is here and not beside the patch is [`Layout`]'s own note:
+    // the mandatory notation does not fit in that column and never could.
+    let strip_y = area.y + m.field_h.max(right_h) + m.gap;
+    let fmt_w = m.format_w.min(band);
+    let format = Rect::new(area.x, strip_y, fmt_w, m.row_h);
+    let text = Rect::new(
+        (area.x + fmt_w + m.gap).min(area.x + band),
+        strip_y,
+        (band - fmt_w - m.gap).max(0.0),
+        m.row_h,
+    );
     (
         Layout { field, value, patch, format, text, base, custom: custom_rects, add },
-        m.field_h.max(right_h),
+        text.bottom() - area.y,
     )
 }
 
@@ -625,19 +724,20 @@ fn layout_with(m: &Metrics, area: Rect, custom: usize) -> (Layout, f32) {
 /// rect and no place in the Tab order, which is invisible until somebody
 /// tries to use the window without a mouse.
 ///
-/// The order is the reading order: the two areas a hand lands in first,
-/// then the two plates, then the cells. Nothing overlaps, so it is a
-/// statement about reading and not about precedence.
+/// The order is the reading order — the two areas a hand lands in first,
+/// then the cells beside them, then the readout strip that runs under
+/// both. It FOLLOWS the geometry rather than leading it: the strip moved
+/// to the bottom of the control and its two plates moved to the end of
+/// this list on the same day, because a Tab order that disagreed with
+/// where things stand is a second layout nobody drew. Nothing overlaps,
+/// so it is a statement about reading and not about precedence.
 pub fn parts(l: &Layout) -> Vec<(Part, Rect)> {
-    let mut out = vec![
-        (Part::Field, l.field),
-        (Part::Value, l.value),
-        (Part::Format, l.format),
-        (Part::Text, l.text),
-    ];
+    let mut out = vec![(Part::Field, l.field), (Part::Value, l.value)];
     out.extend(l.base.iter().enumerate().map(|(i, r)| (Part::Base(i), *r)));
     out.extend(l.custom.iter().enumerate().map(|(i, r)| (Part::Custom(i), *r)));
     out.push((Part::Add, l.add));
+    out.push((Part::Format, l.format));
+    out.push((Part::Text, l.text));
     out
 }
 
@@ -656,14 +756,15 @@ pub fn hit(l: &Layout, x: f32, y: f32) -> Option<Part> {
 /// a look lives in the theme. The master points them at its own palette
 /// and severity roles, so the grid of a theme is that theme's own
 /// vocabulary rather than a wheel of primaries nobody chose.
+///
+/// EXACTLY AS MANY AS THE GRID LAYS. The count is [`Metrics`]'s, which is
+/// [`offered`]'s, which is floored by [`base_ids`] — so this can never be
+/// shorter than the row of rectangles [`layout`] made, and the zip in
+/// [`draw`] can never run out.
 pub fn base_colours() -> Vec<Color> {
-    static IDS: OnceLock<Vec<Option<TokenId>>> = OnceLock::new();
-    let m = Metrics::read();
-    let ids = IDS.get_or_init(|| {
-        (1..=BASE_MAX).map(|i| theme::id(&format!("picker.base.{i}"))).collect()
-    });
+    let n = Metrics::read().base_count;
     let t = theme::resolved();
-    ids.iter().take(m.base_count).filter_map(|i| i.map(|i| col(t.color(i)))).collect()
+    base_ids().iter().take(n).map(|i| col(t.color(*i))).collect()
 }
 
 // -------------------------------------------------------------- the drawing
@@ -804,16 +905,27 @@ pub fn draw(ctx: &mut Ctx, l: &Layout, p: &Picker, custom: &[Color]) {
     let fig = role.figures(ctx.fonts, font, px);
     let ink = col(t.color(tok(&TEXT_INK, "component.picker.text")));
     let baseline = |r: &Rect| r.y + (r.h - px * role.leading()) / 2.0;
-    // BOTH PLATES CLIP THEIR OWN INK. `oklch(0.8200, 0.1531, 166.22)` is
-    // the longest thing this control ever writes and there is no width
-    // this file may give it: what a notation spells is the notation's,
-    // and how wide the plate is, is `picker.format_w` and whatever the
-    // band leaves over. So the text is cut at the plate's edge rather
-    // than running across the swatches beside it.
+    // BOTH PLATES INSET THEIR OWN INK BY `picker.pad_x` AND CLIP IT
+    // THERE. The inset is the theme's, like every other control's
+    // (`[field] pad_x`, `[cell] pad_x`, `[button] pad_x`): text laid on
+    // the coordinate the ring is drawn at touches the ring, and "touches"
+    // is a look — the look of nought padding, chosen in Rust, which is
+    // the one thing this toolkit does not do.
+    //
+    // The clip stays even though the strip is now wide enough for the
+    // longest notation ([`Layout`]'s note): the width comes from the
+    // caller's band and a caller may hand this control any band at all,
+    // and ink cut at a plate's edge is a readout that is hard to read,
+    // while ink running out of it is a readout drawn over the row below.
+    // Asked of [`Metrics`] and not of a reader of this function's own:
+    // one statement of what `[picker]` says, so the drawing and the
+    // layout cannot come apart over a re-bake between them.
+    let pad = Metrics::read().pad_x;
     for (r, s) in [(l.format, role.cased(p.format.word())), (l.text, p.text().into())] {
         frame(ctx, r);
-        ctx.dl.push_clip(r.x, r.y, r.w, r.h);
-        ctx.dl.text_fig(ctx.fonts, font, px, r.x, baseline(&r), &s, ink, track, &fig);
+        let inner = (r.w - pad * 2.0).max(0.0);
+        ctx.dl.push_clip(r.x + pad, r.y, inner, r.h);
+        ctx.dl.text_fig(ctx.fonts, font, px, r.x + pad, baseline(&r), &s, ink, track, &fig);
         ctx.dl.pop_clip();
     }
 
@@ -889,9 +1001,48 @@ mod tests {
     //! which every test in this crate may do — the master is compiled in.
 
     use super::*;
+    use crate::draw::{DrawCmd, DrawList};
+    use crate::font::FontSystem;
+    use crate::pointer::Pointer;
 
     fn approx(a: f32, b: f32, eps: f32, what: &str) {
         assert!((a - b).abs() <= eps, "{what}: {a} vs {b} (eps {eps})");
+    }
+
+    /// A window to draw into. No GPU and no surface: the questions below
+    /// are about what was ASKED for, which is all a draw list holds.
+    fn probe<'a>(dl: &'a mut DrawList, fonts: &'a mut FontSystem) -> Ctx<'a> {
+        Ctx {
+            dl,
+            fonts,
+            w: 1920.0,
+            h: 1080.0,
+            t: 0.0,
+            mouse: Pointer::new(-1.0, -1.0),
+            term_font_scale: 1.0,
+            ui_font_scale: 1.0,
+            panel_scale: 1.0,
+            focus: None,
+            tips: None,
+        }
+    }
+
+    /// How wide a string is on the readout, in the role and at the size
+    /// the control actually draws it — figure box included, because the
+    /// data role steps its digits and a measurement without that is a
+    /// measurement of a different string.
+    fn readout_px(fonts: &mut FontSystem, s: &str) -> f32 {
+        static ROLE: OnceLock<TokenId> = OnceLock::new();
+        let role = ui::bound_role(&ROLE, "picker.role");
+        let mut dl = DrawList::new();
+        let px = {
+            let ctx = probe(&mut dl, fonts);
+            role.px(&ctx, 1.0)
+        };
+        let font = role.font();
+        let track = role.tracking_px(px);
+        let fig = role.figures(fonts, font, px);
+        fonts.measure_fig(font, px, s, track, &fig)
     }
 
     #[test]
@@ -955,9 +1106,19 @@ mod tests {
                 );
             }
         }
-        // And every one of them READS BACK as the colour it wrote, to
-        // within the notation's own resolution.
+        // And every one of them READS BACK as the colour it wrote, TO ITS
+        // OWN RESOLUTION AND NOT TO A TOLERANCE THAT COVERS FOR IT. The
+        // three byte notations quantise by definition, so half a step of
+        // 1/255 is exactly what they may lose; the three functional ones
+        // write decimals and have no such excuse. A blanket 0.02 used to
+        // stand here, and it hid `{:.0}` degrees and whole percents in
+        // HSV and HSL — a colour shown in those notations and read back
+        // was 0.042 away in OKLCh lightness, which is visible.
         for f in Format::ALL {
+            let eps = match f {
+                Format::Argb | Format::Rgba | Format::Dec => 0.5 / 255.0,
+                Format::Oklch | Format::Hsv | Format::Hsl => 1e-3,
+            };
             let s = write(before, f);
             let back = parse(&s, f).unwrap_or_else(|| panic!("{f:?} cannot read {s}"));
             for (a, b, ch) in [
@@ -966,7 +1127,7 @@ mod tests {
                 (back.b, before.b, 'b'),
                 (back.a, before.a, 'a'),
             ] {
-                approx(a, b, 0.02, &format!("{f:?} channel {ch}"));
+                approx(a, b, eps, &format!("{f:?} channel {ch}"));
             }
         }
     }
@@ -1075,26 +1236,223 @@ mod tests {
                 .chain([l.field, l.value, l.patch, l.format, l.text, l.add].iter())
                 .fold(area.y, |acc, r| acc.max(r.bottom()));
             approx(h, low - area.y, 0.51, "the reported height covers every part");
-            // NOTHING IS LAID OUTSIDE THE BAND IT WAS GIVEN, and the
-            // swatches are the ones that would: their count comes from
-            // the theme and the room comes from the window, so a narrow
-            // band has to wrap them sooner rather than run them off the
-            // edge. Asked at a width that cannot hold the theme's eight.
-            for area in [area, Rect::new(30.0, 40.0, 260.0, 0.0)] {
+        }
+    }
+
+    #[test]
+    fn nothing_is_laid_outside_the_band_it_was_given() {
+        //! THE WIDTHS GO DOWN TO ABSURD ON PURPOSE. The old sweep asked
+        //! at 520 and 260 and the comment above `layout_with` promised
+        //! "none of them leaves the band" for every width there is — and
+        //! at 200 the readout began 7.8 px past the right edge, at 150
+        //! and 100 it was 8.1, and at 30 the first ready-made cell stood
+        //! 29.4 px outside. Two widths on the safe side of a threshold do
+        //! not measure a threshold. A part outside the band is not merely
+        //! ugly: `parts` hands it to `hit` and to the focus chain, so it
+        //! is pressed and Tabbed to over whatever it is lying on.
+        for custom in [0usize, 1, 7, 8, 17] {
+            for w in [520.0f32, 400.0, 300.0, 260.0, 200.0, 150.0, 100.0, 60.0, 30.0, 20.0, 0.0] {
+                let area = Rect::new(30.0, 40.0, w, 0.0);
                 let l = layout(area, custom);
-                assert!(l.field.x >= area.x && l.value.right() <= area.x + area.w);
-                assert!(l.text.right() <= area.x + area.w + 0.51);
                 for (part, r) in parts(&l) {
                     assert!(
-                        r.right() <= area.x + area.w + 0.51 && r.x >= area.x - 0.51,
-                        "{part:?} runs past the band at width {}",
-                        area.w
+                        r.x >= area.x - 0.01 && r.right() <= area.x + area.w + 0.01,
+                        "{part:?} runs past the band at width {w}: \
+                         {} .. {} against {} .. {}",
+                        r.x,
+                        r.right(),
+                        area.x,
+                        area.x + area.w
                     );
+                    assert!(r.w >= 0.0 && r.h >= 0.0, "{part:?} has a negative side at {w}");
                 }
-                approx(height(area.w, custom), {
-                    let low = parts(&l).iter().fold(area.y, |a, (_, r)| a.max(r.bottom()));
-                    low - area.y
-                }, 0.51, "the reported height covers every part");
+                // The patch is drawn and not pressed, so it is not in
+                // `parts` — and it is inside the band all the same.
+                assert!(
+                    l.patch.x >= area.x - 0.01 && l.patch.right() <= area.x + area.w + 0.01,
+                    "the patch runs past the band at width {w}"
+                );
+                approx(
+                    height(w, custom),
+                    parts(&l).iter().fold(area.y, |a, (_, r)| a.max(r.bottom())) - area.y,
+                    0.51,
+                    &format!("the reported height covers every part at width {w}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_readout_holds_the_notation_this_file_calls_mandatory() {
+        //! OKLCh is not one notation of six here: it is the one a
+        //! `.theme` file is written in, and the head of this module calls
+        //! typing it the only way a value moves between the editor and an
+        //! author's own file. That claim is about the SCREEN, and it was
+        //! false while the readout lived in the column beside the field —
+        //! `oklch(0.8200, 0.1531, 166.22 / 0.502)` measures 224 px at
+        //! `type.data` and that column is 210 px wide in the window this
+        //! control was built for, so the mandatory notation was the one
+        //! that got cut off. Measured here rather than reasoned about,
+        //! because the answer is a font's and not arithmetic's.
+        let mut fonts = FontSystem::new();
+        let longest: Vec<String> = Format::ALL
+            .iter()
+            .map(|f| {
+                // The widest a notation ever gets: every digit at its
+                // fattest, and an alpha, which adds the slash clause.
+                write(Color { r: 0.7333, g: 0.2667, b: 0.9333, a: 0.502 }, *f)
+            })
+            .collect();
+        let need = longest
+            .iter()
+            .map(|s| readout_px(&mut fonts, s))
+            .fold(0.0f32, f32::max);
+        let pad = Metrics::read().pad_x;
+        // The band the settings window gives it, and comfortably below.
+        for w in [520.0f32, 460.0, 400.0] {
+            let l = layout(Rect::new(0.0, 0.0, w, 0.0), 3);
+            assert!(
+                l.text.w - pad * 2.0 >= need,
+                "the readout is {} px wide inside its padding at band {w}, \
+                 and the longest value this control writes is {need} px: {longest:?}",
+                l.text.w - pad * 2.0
+            );
+        }
+        // And the plate that names the notation holds the longest word.
+        let word = Format::ALL
+            .iter()
+            .map(|f| readout_px(&mut fonts, f.word()))
+            .fold(0.0f32, f32::max);
+        let l = layout(Rect::new(0.0, 0.0, 520.0, 0.0), 3);
+        assert!(
+            l.format.w - pad * 2.0 >= word,
+            "the notation's plate is {} px inside its padding, the longest word {word} px",
+            l.format.w - pad * 2.0
+        );
+    }
+
+    #[test]
+    fn the_plates_hold_their_ink_off_their_own_ring() {
+        //! An inset is a look and every comparable object in this toolkit
+        //! takes one from the theme (`[field] pad_x`, `[cell] pad_x`,
+        //! `[button] pad_x`). This control drew both its plates' text at
+        //! the plate's own x — the coordinate `frame` puts the ring on —
+        //! which is nought padding, and nought is a value like any other.
+        let pad = Metrics::read().pad_x;
+        assert!(pad > 0.0, "the master gives the plates an inset");
+        let mut fonts = FontSystem::new();
+        let mut dl = DrawList::recording();
+        let l = layout(Rect::new(30.0, 40.0, 520.0, 0.0), 2);
+        let p = Picker::of(Color::rgba8(0x3F, 0xE3, 0xAE, 0xCC));
+        draw(&mut probe(&mut dl, &mut fonts), &l, &p, &[Color::WHITE, Color::BLACK]);
+        let runs: Vec<[f32; 2]> = dl
+            .cmds()
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text { at, .. } => Some(*at),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(runs.len(), 2, "the two plates write one run each");
+        for (at, plate) in runs.iter().zip([l.format, l.text]) {
+            approx(at[0], plate.x + pad, 1e-4, "the ink starts a padding in");
+        }
+    }
+
+    #[test]
+    fn the_grid_lays_no_cell_it_has_no_colour_for() {
+        //! `picker.base_count` is a wish and `picker.base.N` is what the
+        //! build can honour. They were clamped to different numbers — the
+        //! count to a round 24 in Rust, the colours to whichever ids
+        //! resolved — so a theme writing `base_count = 24` against a
+        //! master declaring sixteen got twenty-four rectangles and
+        //! sixteen colours. The eight over the end were in `parts`, so in
+        //! `hit` and in the focus chain, and were never drawn: cells you
+        //! could Tab to and press that showed nothing and did nothing.
+        let asked = offered(BASE_SEARCH as f32);
+        assert_eq!(asked, base_ids().len(), "the wish is floored by what exists");
+        assert!(asked > 0, "the master declares a grid");
+        let mut m = Metrics::read();
+        m.base_count = asked;
+        let (l, _) = layout_with(&m, Rect::new(0.0, 0.0, 520.0, 0.0), 0);
+        assert_eq!(
+            l.base.len(),
+            base_colours().len(),
+            "the grid lays exactly as many cells as it has colours"
+        );
+        // The reader stops at a hole rather than closing it up: a skipped
+        // number would renumber every cell behind it, and `Base(i)` is
+        // the number a press is answered by.
+        for (i, id) in base_ids().iter().enumerate() {
+            assert_eq!(
+                Some(*id),
+                theme::id(&format!("picker.base.{}", i + 1)),
+                "cell {i} is base.{}",
+                i + 1
+            );
+        }
+    }
+
+    #[test]
+    fn the_field_the_two_gradients_emit_is_the_field_the_reference_states() {
+        //! `the_field_is_what_the_two_gradients_draw` above checks the
+        //! ARITHMETIC of the saturation line; this checks the CALLS. The
+        //! drawing does not use `field_colour`, so nothing tied the two
+        //! together: a hue ramp emitted at the wrong value, or an overlay
+        //! whose alpha ran the wrong way, would have left every test
+        //! above green.
+        //!
+        //! WHAT THIS STILL DOES NOT REACH, said plainly. Compositing the
+        //! two stops here is arithmetic on the values that were HANDED
+        //! OUT; that the compositor blends straight alpha over ENCODED
+        //! values — and not in linear light — is the renderer's promise,
+        //! it lives in another repository, and no test in this one can
+        //! stand in for it. If that promise breaks, the field is wrong on
+        //! screen with every assertion in this file passing.
+        let mut fonts = FontSystem::new();
+        let mut dl = DrawList::recording();
+        let l = layout(Rect::new(30.0, 40.0, 520.0, 0.0), 0);
+        let p = Picker::of(Color::rgb8(0x3F, 0xE3, 0xAE));
+        let v = 1.0 - p.value_at();
+        draw(&mut probe(&mut dl, &mut fonts), &l, &p, &[]);
+        let grads: Vec<(Vec<(f32, Color)>, f32)> = dl
+            .cmds()
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::RectGrad { r, stops, angle }
+                    if (r[0] - l.field.x).abs() < 1e-3 && (r[1] - l.field.y).abs() < 1e-3 =>
+                {
+                    Some((stops.clone(), *angle))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(grads.len(), 2, "the field is a hue ramp and one overlay");
+        let (hue, hue_angle) = &grads[0];
+        let (over, over_angle) = &grads[1];
+        approx(*hue_angle, 0.0, 1e-6, "the hue runs across");
+        approx(*over_angle, std::f32::consts::FRAC_PI_2, 1e-6, "the overlay runs down");
+        assert_eq!(over.len(), 2, "the overlay is two stops and not a dice of cells");
+        approx(over[0].1.a, 0.0, 1e-6, "the top of the field is fully saturated");
+        approx(over[1].1.a, 1.0, 1e-6, "the bottom of it is grey");
+        // At a stop the ramp IS its stop, so the composite can be put
+        // against the reference with no interpolation in between.
+        for (fx, base) in hue.iter() {
+            for &fy in &[0.0f32, 0.25, 0.5, 0.75, 1.0] {
+                let grey = Color {
+                    r: over[0].1.r + (over[1].1.r - over[0].1.r) * fy,
+                    g: over[0].1.g + (over[1].1.g - over[0].1.g) * fy,
+                    b: over[0].1.b + (over[1].1.b - over[0].1.b) * fy,
+                    a: over[0].1.a + (over[1].1.a - over[0].1.a) * fy,
+                };
+                let (wr, wg, wb) = field_colour(*fx, fy, v);
+                for (got, want, ch) in [
+                    (base.r * (1.0 - grey.a) + grey.r * grey.a, wr, 'r'),
+                    (base.g * (1.0 - grey.a) + grey.g * grey.a, wg, 'g'),
+                    (base.b * (1.0 - grey.a) + grey.b * grey.a, wb, 'b'),
+                ] {
+                    approx(got, want, 1e-5, &format!("the field at ({fx}, {fy}) channel {ch}"));
+                }
             }
         }
     }
