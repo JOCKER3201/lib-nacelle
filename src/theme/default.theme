@@ -1048,6 +1048,16 @@ follow_density = false
 # lit glass tube is not a spread of the same light but a different spend of it
 # — a core driven past what the display can show, a saturated band against the
 # glass, and light that stops instead of fading. See panel_edge.falloff below.
+#
+# `boost` IS NOT ONE KEY WITH ONE MEANING, and every class below says so in
+# one line where it should say so in this paragraph. Fifteen classes declare
+# it; ONE of them is read — `panel_edge`, and only under falloff = tube, where
+# it drives the tube's CORE and is clipped per channel on the CPU. The other
+# fourteen have no reader at all, so their line ("HDR overdrive ... survives
+# only on the HDR path with no LUT") states an INTENT for a path that is not
+# built: nothing carries a channel above 1 out of this toolkit today. Read
+# panel_edge.boost for what the one live reader does; read the rest as a
+# reservation of the name.
 # =========================================================================
 [glow]
 
@@ -1068,7 +1078,7 @@ panel_edge.falloff = gauss # enum: linear | quad | gauss | halo | tube
                     # `tube` is the LIT GLASS TUBE of a neon sign: the same
                     # soft disk with its distance re-mapped by tube_decay so
                     # the light stops instead of fading, its core burned by
-                    # `boost` and its colour carried by tube_aura. The three
+                    # `boost` and its colour carried by tube_aura. The four
                     # `tube_*` keys below are read only under this word.
                     # THE `enum:` DECLARATION IS LOAD-BEARING. Without it a
                     # token's vocabulary grows from use, `gauss` is the only
@@ -1086,15 +1096,22 @@ panel_edge.alpha = 0.0
                     # frac, 0.0 .. 1.0; state channel is glow_alpha
 panel_edge.boost = 2.6
                     # how hard the edge's light is DRIVEN, as a multiple of
-                    # what the display can show; -; f, >= 1.0. In the R16F
-                    # swapchain with no LUT loaded the overdrive survives as
-                    # overdrive. Everywhere else the display CLIPS it, and
-                    # the clip is the picture: a channel driven past 1 shows
-                    # as 1, so a saturated colour loses its strongest
-                    # channel first and its weakest last, and the core of a
-                    # tube goes pale and then white while the light around
-                    # it keeps the hue. That is why a photograph of a neon
-                    # sign has a white core whatever colour the sign is.
+                    # what the display can show; -; f, >= 1.0. THE CLIP IS
+                    # THE PICTURE: a channel driven past 1 shows as 1, so a
+                    # saturated colour loses its strongest channel first and
+                    # its weakest last, and the core of a tube goes pale and
+                    # then white while the light around it keeps the hue.
+                    # That is why a photograph of a neon sign has a white
+                    # core whatever colour the sign is.
+                    # THE CLIP HAPPENS HERE, ON THE CPU, per channel, before
+                    # the colour leaves the toolkit — one picture on every
+                    # display, and nothing downstream has to be asked. So the
+                    # overdrive does NOT reach an HDR swapchain as overdrive,
+                    # whatever the older wording on the other fourteen glow
+                    # classes says; a tube that stays bright on an R16F
+                    # target is a real request and an unanswered one (it
+                    # needs the clip lifted here AND a `grade()` that takes a
+                    # sample above 1, which is the renderer's repository).
                     # Read ONLY under falloff = tube: a `gauss` halo is
                     # spill, and spill is not driven — which is also what
                     # keeps every theme written before this key had a reader
@@ -1132,6 +1149,25 @@ panel_edge.tube_aura_reach = 0.25
                     # light inside the first quarter of the radius, so the
                     # aura colours the light that IS there instead of
                     # lifting a tail that is not. 0.0 is no aura at all.
+                    # The number is EXACT on screen whatever tube_bands
+                    # says: the reach is always one of the rings the light
+                    # is cut at, or the picture would let go wherever the
+                    # even cut happened to have one.
+panel_edge.tube_bands = 5
+                    # how many rings the reach is cut into — the resolution
+                    # of tube_decay's re-map; -; n, 1 .. 16; read only under
+                    # falloff = tube. IT LOOKS LIKE A QUALITY KNOB AND IT IS
+                    # NOT ONE. The mask is sampled continuously inside a
+                    # ring, but the ring BOUNDARIES are where the re-map is
+                    # applied and the picture is a straight line between
+                    # them, so a coarser cut is not a rougher drawing of the
+                    # same curve — it is a different curve. At 1 the re-map
+                    # has nowhere to land and the tube IS the gauss halo,
+                    # whatever tube_decay says. 5 puts a ring every fifth of
+                    # the reach: at decay 3 that is enough to bend the first
+                    # fifth down onto the glass, and it keeps a sprite ring
+                    # cheaper than the maskless shell it replaces. Raise it
+                    # for a steeper decay, at one ring stroke each.
 
 # ---- focus_ring — the keyboard focus ring -------------------------------
 focus_ring.enabled = false

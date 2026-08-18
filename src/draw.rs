@@ -729,9 +729,10 @@ impl Corner {
 /// amount. Reach is `radius`, amount is the caller's alpha; this is the
 /// only thing left to decide once those two are known.
 ///
-/// Three numbers because the owner's brief for a neon tube is three
+/// Four numbers because the owner's brief for a neon tube is three
 /// statements about light and one of them (the burned-white core) is not
-/// light at all but the EDGE, drawn by the caller. What is here:
+/// light at all but the EDGE, drawn by the caller; the fourth is how
+/// finely the first three are laid down. What is here:
 ///
 /// * `decay` — the distance re-map. 1.0 is the soft disk laid flat
 ///   across the reach, which is what every glow in this toolkit drew
@@ -744,6 +745,15 @@ impl Corner {
 ///   right against the glass, and the reason a tube reads as coloured at
 ///   all once its core has been driven white.
 /// * `aura_reach` — how far that band goes, as a fraction of `radius`.
+/// * `bands` — how many rings the reach is cut into, which is how closely
+///   the emitted geometry follows the re-map. IT LOOKED LIKE A QUALITY
+///   NUMBER AND IT IS NOT, which is why it is a token like the rest: the
+///   rasteriser interpolates between the rings it is given, so a coarse
+///   cut is not a rougher drawing of the same curve but a DIFFERENT
+///   curve, and at one band the decay disappears entirely. A rule in Rust
+///   that grew the count with the radius also meant one theme drew two
+///   different tubes — a steeper one around a button than around a panel
+///   — with nothing in the file saying so.
 ///
 /// Every one of them arrives from a theme token. Nothing in this file
 /// chooses a value; [`GlowProfile::HALO`] is not a design default but the
@@ -754,6 +764,7 @@ pub struct GlowProfile {
     pub decay: f32,
     pub aura: f32,
     pub aura_reach: f32,
+    pub bands: u32,
 }
 
 impl GlowProfile {
@@ -761,12 +772,25 @@ impl GlowProfile {
     /// profile could be asked for, and the one `glow_ring` still asks
     /// for. Not a default anybody chose — the numbers at which every
     /// arithmetic step in [`DrawList::glow_ring_with`] is an identity.
-    pub const HALO: Self = Self { decay: 1.0, aura: 1.0, aura_reach: 0.0 };
+    pub const HALO: Self = Self { decay: 1.0, aura: 1.0, aura_reach: 0.0, bands: 1 };
+
+    /// The most rings a reach is ever cut into. A GUARD ON A USER FILE,
+    /// in the same family as the `3..=16` on [`ring_points`]'s segments:
+    /// the token's declared range said in code, so a theme that writes a
+    /// million cannot ask this process for a million ring strokes. It
+    /// picks no picture — every count the master declares is inside it.
+    pub const MAX_BANDS: u32 = 16;
 
     /// Whether this profile asks for nothing the halo did not already do.
     /// A theme is free to name a shaped profile and then flatten every
     /// knob of it; the answer here is about the NUMBERS, so such a theme
     /// gets the halo's own vertices rather than a subdivided copy of them.
+    ///
+    /// `bands` is not among them ON PURPOSE. It says how finely a shape
+    /// is followed, and there is no shape here to follow: subdividing the
+    /// identity re-map lands every extra ring on the line the single band
+    /// already drew, so honouring a count would spend vertices to emit
+    /// the same picture and break the bit-for-bit rename proof.
     pub fn is_halo(&self) -> bool {
         self.decay == 1.0 && !self.lifts()
     }
@@ -775,22 +799,50 @@ impl GlowProfile {
         self.aura > 1.0 && self.aura_reach > 0.0
     }
 
-    /// How many rings the reach is cut into.
+    /// The distance fractions this profile lays a ring of vertices at, in
+    /// rising order, written into `out`; the count is the return.
     ///
-    /// A QUALITY number, not a design one: it decides how closely the
-    /// emitted geometry follows the re-map, and the picture converges as
-    /// it rises. The halo needs exactly one — its re-map is the identity,
-    /// and one band is the vertex-for-vertex picture this file drew
-    /// before profiles existed. A shaped profile borrows
-    /// [`DrawList::glow_shell`]'s own rule and its reasoning: bands
-    /// thinner than about 2 px stop reading as steps of anything, and
-    /// five is where the vertex count of a sprite ring is still a
-    /// fraction of the shell fallback's.
-    fn bands(&self, radius: f32) -> u32 {
+    /// The theme's even cut of the reach, PLUS ONE BOUNDARY THE THEME
+    /// ASKS FOR BY NAME: `aura_reach`. Without it the aura can only let
+    /// go where the even grid happens to have a ring, and the rasteriser
+    /// interpolates across the gap — a reach of 0.25 on a five-band grid
+    /// still lifts every pixel out to 0.4, and a reach under `1/bands`
+    /// cannot be drawn at all. The theme states a distance; this is what
+    /// makes that distance the one the picture shows. It costs one ring
+    /// and only on a profile that lifts.
+    ///
+    /// The halo takes exactly one stop whatever it asked for — see
+    /// [`GlowProfile::is_halo`].
+    fn stops(&self, out: &mut [f32; Self::MAX_BANDS as usize + 1]) -> usize {
         if self.is_halo() {
+            out[0] = 1.0;
             return 1;
         }
-        (radius * 0.5).ceil().clamp(3.0, 5.0) as u32
+        let n = self.bands.clamp(1, Self::MAX_BANDS);
+        let aura = if self.lifts() { Some(self.aura_reach) } else { None };
+        let mut m = 0usize;
+        for k in 1..=n {
+            let f = k as f32 / n as f32;
+            // The reach joins the cut wherever it falls strictly between
+            // two of the cut's own stops. `a > prev` is what makes that
+            // happen exactly once and is the whole condition: after the
+            // insert every later stop is above the reach, so no second
+            // one can pass, and a reach the cut already lands on never
+            // passes at all — a ring emitted there would be a band of
+            // zero width, a quad that draws nothing. A reach at or past
+            // the rim satisfies no `a < f` and so never arrives, which is
+            // right; there is no light out there for it to let go over.
+            if let Some(a) = aura {
+                let prev = if m == 0 { 0.0 } else { out[m - 1] };
+                if a < f && a > prev {
+                    out[m] = a;
+                    m += 1;
+                }
+            }
+            out[m] = f;
+            m += 1;
+        }
+        m
     }
 
     /// The mask's v at distance fraction `f` of the reach, between the
@@ -1049,9 +1101,11 @@ pub enum DrawCmd {
     Blur { r: [f32; 4], tint: Color },
     MaskQuad { p: [[f32; 2]; 4], uv: [[f32; 2]; 4], color: Color, additive: bool },
     /// [`DrawList::glow_ring_with`] — `profile` is INTENT (a theme named
-    /// a shape for the light) and belongs here; the band count the
-    /// emitter cuts the reach into is tessellation and does not, by the
-    /// same rule that keeps `segments` out of [`DrawCmd::Ring`].
+    /// a shape for the light) and belongs here whole, band count
+    /// included: the count is a token like the other three, and the
+    /// picture is a different curve at a different one. What stays out is
+    /// `segments`, which is tessellation of the PATH and answers to
+    /// [`DrawCmd::Ring`]'s own rule.
     GlowRing {
         r: [f32; 4],
         corners: [Corner; 4],
@@ -3453,20 +3507,34 @@ impl DrawList {
     /// — light that stops instead of fading, which is what a lit tube
     /// does and a Gaussian blur cannot. Inside a band the mask is still
     /// sampled continuously, so the picture is smooth however few bands
-    /// there are; the count only decides how closely the re-map is
-    /// followed.
+    /// there are; the count decides how closely the re-map is followed,
+    /// and the theme owns it ([`GlowProfile`]).
     ///
-    /// THE AURA is a per-vertex alpha and nothing else: the band
-    /// boundaries inside `aura_reach` carry `aura` times the caller's
-    /// alpha, ramped to one at the reach. Clipped at 1.0 whatever the
-    /// product, because a blend factor outside 0..1 is not a brighter
-    /// pixel — it is the undefined output the master's own note on
-    /// negative alpha warns about.
+    /// THE AURA is a per-vertex alpha and nothing else: the boundaries
+    /// inside `aura_reach` carry `aura` times the caller's alpha, ramped
+    /// to one at the reach. WHICH IS WHY THE REACH IS ITS OWN BOUNDARY
+    /// ([`GlowProfile::stops`]): between two rings the rasteriser
+    /// interpolates, so an aura whose ramp ends between them goes on
+    /// lifting pixels out to the next one, and the picture stops where
+    /// the grid says instead of where the theme does. Clipped at 1.0
+    /// whatever the product, because a blend factor outside 0..1 is not a
+    /// brighter pixel — it is the undefined output the master's own note
+    /// on negative alpha warns about.
     ///
     /// Bands never overlap (each one's inner rim is the last one's
     /// outer), so additive blending cannot double-brighten a seam —
     /// [`DrawList::glow_shell`]'s invariant, relied on for the same
     /// reason.
+    ///
+    /// WITHOUT A MASK BAND there is no soft disk to re-map and this falls
+    /// to [`DrawList::glow_shell`], which draws the halo's own shape:
+    /// the profile is DROPPED, and a tube asked for that way comes back
+    /// an unshaped glow with no aura and no decay. It is unreachable from
+    /// [`crate::object::window::panel_edge_glow`] — `FontSystem`'s soft
+    /// band is a compile-time rectangle — but this is `pub`, the recipe
+    /// for the next consumer sends callers here, and a silent degradation
+    /// nobody wrote down is one somebody rediscovers. Pinned by
+    /// `a_maskless_tube_falls_back_to_the_unshaped_shell`.
     pub fn glow_ring_with(
         &mut self,
         r: Rect,
@@ -3489,6 +3557,11 @@ impl DrawList {
         }
         let (u0, v0, u1, v1) = mask_uv;
         if u1 <= u0 || v1 <= v0 {
+            // No disk to re-map, so THE PROFILE IS DROPPED and the shell
+            // draws the halo's shape — stated in the doc above and
+            // pinned by a test, because a caller who asked for a tube
+            // and got a glow deserves to find out from the file rather
+            // than from the screen.
             self.glow_shell(r, c, segments, radius, color);
             return;
         }
@@ -3500,7 +3573,8 @@ impl DrawList {
         // corner STYLE, which inset() preserves (glow_shell's invariant).
         let su = u0 + (u1 - u0) * (32.0 / 64.0);
         let vi = v0 + (v1 - v0) * (31.0 / 64.0);
-        let bands = profile.bands(radius);
+        let mut stops = [0.0f32; GlowProfile::MAX_BANDS as usize + 1];
+        let n_stops = profile.stops(&mut stops);
         let mut inner = std::mem::take(&mut self.scratch_a);
         let mut outer = std::mem::take(&mut self.scratch_b);
         ring_points(r, c, segments, &mut inner);
@@ -3510,8 +3584,7 @@ impl DrawList {
         // for it to drift.
         let (mut v_in, mut a_in) =
             (profile.v_at(0.0, vi, v0), profile.alpha_at(0.0, color.a));
-        for k in 1..=bands {
-            let f = k as f32 / bands as f32;
+        for &f in &stops[..n_stops] {
             let d = radius * f;
             let grown = Rect::new(r.x - d, r.y - d, r.w + 2.0 * d, r.h + 2.0 * d);
             let ck = [c[0].inset(-d), c[1].inset(-d), c[2].inset(-d), c[3].inset(-d)];
@@ -4478,8 +4551,12 @@ mod tests {
         let mut halo = DrawList::new();
         halo.glow_ring(r, &c, 6, 20.0, col, uv);
         for flat in [
-            GlowProfile { decay: 1.0, aura: 1.0, aura_reach: 0.25 },
-            GlowProfile { decay: 1.0, aura: 2.0, aura_reach: 0.0 },
+            GlowProfile { decay: 1.0, aura: 1.0, aura_reach: 0.25, bands: 5 },
+            GlowProfile { decay: 1.0, aura: 2.0, aura_reach: 0.0, bands: 5 },
+            // A band count on its own shapes nothing: there is no
+            // re-map for the extra rings to follow, so they would land
+            // on the line the single band already draws.
+            GlowProfile { decay: 1.0, aura: 1.0, aura_reach: 0.0, bands: 16 },
         ] {
             let mut dl = DrawList::new();
             dl.glow_ring_with(r, &c, 6, 20.0, col, uv, flat);
@@ -4513,7 +4590,7 @@ mod tests {
         let r = Rect::new(40.0, 40.0, 200.0, 120.0);
         let c = [Corner { style: CornerStyle::Square, size: 0.0 }; 4];
         let radius = 24.0;
-        let tube = GlowProfile { decay: 3.0, aura: 1.0, aura_reach: 0.0 };
+        let tube = GlowProfile { decay: 3.0, aura: 1.0, aura_reach: 0.0, bands: 5 };
         let mut dl = DrawList::new();
         dl.glow_ring_with(r, &c, 6, radius, col, uv, tube);
         // The distance a vertex stands at, off the geometry: the glow is
@@ -4556,54 +4633,262 @@ mod tests {
         let _ = u0;
     }
 
-    /// THE AURA IS BRIGHTER THAN THE LIGHT IT SITS IN, and it is bounded.
+    /// The alpha a PIXEL is drawn with at distance fraction `f` of the
+    /// reach, reconstructed from an emitted glow the way the rasteriser
+    /// reconstructs it: the rings carry alpha at their own distances and
+    /// everything between two rings is the straight line joining them.
     ///
-    /// A relation again: the alpha at the glass is above the alpha the
-    /// caller asked for, the alpha past the reach is exactly it, and
-    /// nothing anywhere leaves 0..1 — a blend factor outside that range
-    /// is the undefined output the master warns about at
-    /// `glow.panel_edge.color`.
+    /// Reading the vertices alone is not the same claim and the
+    /// difference is not academic — it is the shape of the bug the first
+    /// version of `the_aura_lifts_...` failed to see. A ring at 0.2 and a
+    /// ring at 0.4 hide a lit strip between them: every vertex "past the
+    /// reach" of 0.25 that the test could see was the one at 0.4, where
+    /// the ramp is over by construction, so the assertion passed on a
+    /// picture that went on lifting pixels 60 % beyond the theme's own
+    /// number.
+    ///
+    /// Distance comes off the geometry: the glow is emitted strictly
+    /// outside `r`, so the gap to the nearest edge IS the distance along
+    /// the extrusion.
+    fn alpha_ramp(dl: &DrawList, r: Rect, radius: f32) -> impl Fn(f32) -> f32 {
+        let mut rings: Vec<(f32, f32)> = Vec::new();
+        for v in &dl.verts {
+            let dx = (r.x - v.pos[0]).max(v.pos[0] - r.right()).max(0.0);
+            let dy = (r.y - v.pos[1]).max(v.pos[1] - r.bottom()).max(0.0);
+            let f = (dx.max(dy) / radius).clamp(0.0, 1.0);
+            match rings.iter().find(|(g, _)| (g - f).abs() < 1e-4) {
+                Some((_, a)) => assert!(
+                    (a - v.color[3]).abs() < 1e-6,
+                    "two alphas at the same distance {f}: {a} and {}",
+                    v.color[3]
+                ),
+                None => rings.push((f, v.color[3])),
+            }
+        }
+        rings.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        assert!(rings.len() >= 2, "one ring cannot describe a ramp");
+        move |f: f32| {
+            let i = rings.partition_point(|(g, _)| *g <= f);
+            if i == 0 {
+                return rings[0].1;
+            }
+            if i == rings.len() {
+                return rings[rings.len() - 1].1;
+            }
+            let ((f0, a0), (f1, a1)) = (rings[i - 1], rings[i]);
+            a0 + (a1 - a0) * ((f - f0) / (f1 - f0))
+        }
+    }
+
+    /// THE AURA IS BRIGHTER THAN THE LIGHT IT SITS IN, AND IT LETS GO
+    /// WHERE THE THEME SAYS — measured on the picture, not on the rings.
+    ///
+    /// A relation, as everywhere here: the alpha at the glass is above
+    /// the alpha the caller asked for, the alpha anywhere past the reach
+    /// is exactly it, and nothing anywhere leaves 0..1 — a blend factor
+    /// outside that range is the undefined output the master warns about
+    /// at `glow.panel_edge.color`.
+    ///
+    /// What makes it a claim about the REACH and not about the rings is
+    /// [`alpha_ramp`]: it walks fractions the emitter never put a vertex
+    /// at and asks what a fragment there would be blended with. Run at
+    /// three band counts and three reaches, INCLUDING a reach finer than
+    /// one band, because a reach under `1/bands` is the case an even cut
+    /// cannot express at all; and at two amounts, the second of which the
+    /// aura drives past 1 so the clip is exercised rather than assumed.
     #[test]
     fn the_aura_lifts_the_light_at_the_glass_and_lets_go_at_its_reach() {
+        let uv = FontSystem::mask_soft_uv();
+        let r = Rect::new(40.0, 40.0, 200.0, 120.0);
+        let c = [Corner { style: CornerStyle::Square, size: 0.0 }; 4];
+        let radius = 24.0;
+        // 0.4 doubled is still a legal blend factor; 0.8 doubled is not,
+        // and what the theme gets for asking is the clip, never 1.6.
+        for amount in [0.4f32, 0.8] {
+            for bands in [3u32, 5, 8] {
+                for reach in [0.25f32, 0.5, 0.05] {
+                    let col = Color { r: 0.6, g: 0.2, b: 0.95, a: amount };
+                    let p = GlowProfile { decay: 3.0, aura: 2.0, aura_reach: reach, bands };
+                    let mut dl = DrawList::new();
+                    dl.glow_ring_with(r, &c, 6, radius, col, uv, p);
+                    for v in &dl.verts {
+                        let a = v.color[3];
+                        assert!((0.0..=1.0).contains(&a), "alpha {a} left 0..1 at {p:?}");
+                    }
+                    let at = alpha_ramp(&dl, r, radius);
+                    assert!(
+                        at(0.0) > col.a,
+                        "the aura at the glass is {}, no stronger than the {} asked for, \
+                         at {p:?}",
+                        at(0.0),
+                        col.a
+                    );
+                    // 401 samples across the whole reach, so the strip
+                    // between any two rings is walked whatever the cut.
+                    let mut last = at(0.0);
+                    for i in 0..=400 {
+                        let f = i as f32 / 400.0;
+                        let a = at(f);
+                        assert!((0.0..=1.0).contains(&a), "alpha {a} left 0..1 at f={f}, {p:?}");
+                        // "Ramps from tube_aura at the glass to 1.0 here
+                        // and stays there" — a ramp that ever turns back
+                        // up is a second, brighter band nobody named.
+                        assert!(
+                            a <= last + 1e-6,
+                            "the aura brightened again at {:.1}% of the radius: {a} after \
+                             {last}, at {p:?}",
+                            f * 100.0
+                        );
+                        last = a;
+                        if f > reach + 1e-3 {
+                            assert!(
+                                (a - col.a).abs() < 1e-6,
+                                "the aura was still lifting at {:.1}% of the radius, {:.1}% \
+                                 past its own reach: {a} vs {}, at {p:?}",
+                                f * 100.0,
+                                (f - reach) * 100.0,
+                                col.a
+                            );
+                        } else if f < reach - 1e-3 {
+                            assert!(
+                                a > col.a + 1e-6,
+                                "the aura had already let go at {:.1}% of the radius, inside \
+                                 its own reach of {:.0}%: {a} vs {}, at {p:?}",
+                                f * 100.0,
+                                reach * 100.0,
+                                col.a
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// HOW FINELY THE LIGHT IS CUT IS THE THEME'S, NOT THIS FILE'S.
+    ///
+    /// It read like tessellation and it is not: the re-map is applied at
+    /// the ring boundaries and the picture is a straight line between
+    /// them, so the count IS the curve. Two claims, both about a number
+    /// that used to be `(radius * 0.5).ceil().clamp(3.0, 5.0)` in Rust:
+    ///
+    /// * the rings land exactly where the theme's cut says, `k/n` of the
+    ///   reach, with the aura's own boundary added and no others —
+    ///   nothing here rounds the count to a grid of its own;
+    /// * ONE radius, two counts, two different pictures. That is what
+    ///   makes it a design number, and it is also what the old rule got
+    ///   wrong from the other side: it grew the count with the radius, so
+    ///   one theme drew a steeper tube around a button than around a
+    ///   panel with nothing in the file saying so.
+    #[test]
+    fn the_theme_owns_how_finely_the_light_is_cut() {
         let uv = FontSystem::mask_soft_uv();
         let col = Color { r: 0.6, g: 0.2, b: 0.95, a: 0.4 };
         let r = Rect::new(40.0, 40.0, 200.0, 120.0);
         let c = [Corner { style: CornerStyle::Square, size: 0.0 }; 4];
         let radius = 24.0;
-        let p = GlowProfile { decay: 3.0, aura: 2.0, aura_reach: 0.25 };
-        let mut dl = DrawList::new();
-        dl.glow_ring_with(r, &c, 6, radius, col, uv, p);
-        let dist = |q: [f32; 2]| {
-            let dx = (r.x - q[0]).max(q[0] - r.right()).max(0.0);
-            let dy = (r.y - q[1]).max(q[1] - r.bottom()).max(0.0);
-            dx.max(dy)
+        // The distinct distances a profile lays vertices at, AND how many
+        // vertices it spent: a ring emitted twice at the same distance is
+        // a zero-width band that draws nothing and costs a quad, and the
+        // distances alone cannot tell it from a ring emitted once.
+        let rings = |p: GlowProfile| -> (Vec<f32>, usize) {
+            let mut dl = DrawList::new();
+            dl.glow_ring_with(r, &c, 6, radius, col, uv, p);
+            let mut out: Vec<f32> = Vec::new();
+            for v in &dl.verts {
+                let dx = (r.x - v.pos[0]).max(v.pos[0] - r.right()).max(0.0);
+                let dy = (r.y - v.pos[1]).max(v.pos[1] - r.bottom()).max(0.0);
+                let f = (dx.max(dy) / radius).clamp(0.0, 1.0);
+                if !out.iter().any(|g| (g - f).abs() < 1e-4) {
+                    out.push(f);
+                }
+            }
+            out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            (out, dl.verts.len())
         };
-        let mut at_glass = None;
-        let mut past_reach = 0;
-        for v in &dl.verts {
-            let a = v.color[3];
-            assert!((0.0..=1.0).contains(&a), "alpha {a} left 0..1");
-            let f = dist(v.pos) / radius;
-            if f < 1e-4 {
-                at_glass = Some(a);
+        // Four points per band on a square corner, twice over: a quad is
+        // six vertices for four corners.
+        let per_band = 24;
+        for bands in [1u32, 2, 3, 5, 8, 16] {
+            // No aura, so the cut is the theme's and nothing else's.
+            let (got, verts) =
+                rings(GlowProfile { decay: 3.0, aura: 1.0, aura_reach: 0.0, bands });
+            let mut want: Vec<f32> = vec![0.0];
+            want.extend((1..=bands).map(|k| k as f32 / bands as f32));
+            assert_eq!(got.len(), want.len(), "asked for {bands} bands, got rings at {got:?}");
+            for (g, w) in got.iter().zip(&want) {
+                assert!((g - w).abs() < 1e-4, "at {bands} bands the rings are {got:?}, not {want:?}");
             }
-            if f > p.aura_reach + 1e-4 {
-                past_reach += 1;
-                assert!(
-                    (a - col.a).abs() < 1e-6,
-                    "the aura was still lifting at {:.0}% of the reach: {a} vs {}",
-                    f * 100.0,
-                    col.a
-                );
-            }
+            assert_eq!(
+                verts,
+                bands as usize * per_band,
+                "{bands} bands cost {verts} vertices, not {}",
+                bands as usize * per_band
+            );
         }
-        let at_glass = at_glass.expect("no band started at the glass");
-        assert!(
-            at_glass > col.a,
-            "the aura at the glass is {at_glass}, no stronger than the {} asked for",
-            col.a
+        // The aura's own boundary is the ONE extra, and only when it
+        // falls between two of the cut's.
+        let (got, verts) = rings(GlowProfile { decay: 3.0, aura: 2.0, aura_reach: 0.25, bands: 5 });
+        assert_eq!(got.len(), 7, "the aura's boundary did not join the cut once: {got:?}");
+        assert!(got.iter().any(|f| (f - 0.25).abs() < 1e-4), "no ring at the reach: {got:?}");
+        assert_eq!(verts, 6 * per_band, "the reach's own boundary cost more than one band");
+        let (got, verts) = rings(GlowProfile { decay: 3.0, aura: 2.0, aura_reach: 0.2, bands: 5 });
+        assert_eq!(got.len(), 6, "a reach the cut already lands on was cut twice: {got:?}");
+        assert_eq!(
+            verts,
+            5 * per_band,
+            "a reach the cut already lands on was emitted twice — {verts} vertices for five \
+             bands, so one of them is a ring of zero width"
         );
-        assert!(past_reach > 0, "no band landed past the aura's reach");
+        // Same radius, same everything else: a different count is a
+        // different picture, which is what a design number means.
+        let coarse = rings(GlowProfile { decay: 3.0, aura: 1.0, aura_reach: 0.0, bands: 3 });
+        let fine = rings(GlowProfile { decay: 3.0, aura: 1.0, aura_reach: 0.0, bands: 8 });
+        assert_ne!(coarse, fine, "the count reached nothing at radius {radius}");
+        // The emitter's own guard, not the reader's: this is `pub`, so a
+        // count nobody clamped on the way in still has to land inside the
+        // stop buffer rather than off the end of it.
+        let (got, _) =
+            rings(GlowProfile { decay: 3.0, aura: 2.0, aura_reach: 0.25, bands: u32::MAX });
+        assert!(
+            got.len() <= GlowProfile::MAX_BANDS as usize + 2,
+            "an unclamped count emitted {} rings",
+            got.len()
+        );
+    }
+
+    /// A TUBE WITH NO MASK BAND COMES BACK AN UNSHAPED GLOW, and that is
+    /// written down rather than discovered.
+    ///
+    /// `glow_ring_with` re-maps the soft disk's own profile, so with no
+    /// disk to sample it falls to `glow_shell` and the profile is
+    /// dropped whole — no aura, no decay. Unreachable from
+    /// `panel_edge_glow` today (`FontSystem::mask_soft_uv()` is a
+    /// compile-time rectangle), but the call is `pub` and the recipe on
+    /// `TubeKeys` sends the next consumer here, so the degradation is
+    /// pinned: the shaped call and the unshaped one must agree vertex for
+    /// vertex, which is what "the profile is dropped" MEANS.
+    #[test]
+    fn a_maskless_tube_falls_back_to_the_unshaped_shell() {
+        let col = Color { r: 0.6, g: 0.2, b: 0.95, a: 0.4 };
+        let r = Rect::new(40.0, 40.0, 200.0, 120.0);
+        let c = [Corner::round(9.0); 4];
+        let none = (0.0, 0.0, 0.0, 0.0);
+        let tube = GlowProfile { decay: 3.0, aura: 2.0, aura_reach: 0.25, bands: 5 };
+        let mut shaped = DrawList::new();
+        shaped.glow_ring_with(r, &c, 6, 24.0, col, none, tube);
+        let mut plain = DrawList::new();
+        plain.glow_ring(r, &c, 6, 24.0, col, none);
+        assert!(!shaped.verts.is_empty(), "the fallback drew nothing to compare");
+        let dump = |dl: &DrawList| {
+            dl.verts.iter().map(|v| (v.pos, v.uv, v.color)).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            dump(&shaped),
+            dump(&plain),
+            "the maskless fallback shaped its light, so the note on glow_ring_with \
+             that says it does not is now the wrong warning"
+        );
     }
 
     /// The sprite costs r1 §4.4 stands on: the glow is 8 quads = 48 verts

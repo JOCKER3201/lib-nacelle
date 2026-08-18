@@ -90,7 +90,7 @@ pub(crate) fn corner_segments(
     ring_segments(size, 0.25, t.px(tok(cell, "corner.segments")) as u8)
 }
 
-/// The five token ids one `[glow]` class needs before its light can be a
+/// The six token ids one `[glow]` class needs before its light can be a
 /// LIT TUBE rather than a soft halo.
 ///
 /// Ids and not names, so a class memoises its own and calls the same
@@ -101,10 +101,10 @@ pub(crate) fn corner_segments(
 /// rediscovery:
 ///
 /// 1. in the master, add `tube` to that class's `falloff` `enum:` list
-///    and declare `<class>.tube_decay`, `<class>.tube_aura` and
-///    `<class>.tube_aura_reach` beside it. The class already declares
-///    `boost` — all fifteen do.
-/// 2. build a `TubeKeys` from the five ids in a `OnceLock` of its own,
+///    and declare `<class>.tube_decay`, `<class>.tube_aura`,
+///    `<class>.tube_aura_reach` and `<class>.tube_bands` beside it. The
+///    class already declares `boost` — all fifteen do.
+/// 2. build a `TubeKeys` from the six ids in a `OnceLock` of its own,
 ///    beside the ids that class already memoises.
 /// 3. where the class strokes its ring, ask [`tube_dress`]; on `Some`,
 ///    stroke [`Tube::core`] over the ring at the ring's own width and
@@ -113,15 +113,23 @@ pub(crate) fn corner_segments(
 ///
 /// That is the whole of it: no drawing code moves, because there is none
 /// outside this file and `draw.rs`'s one emitter. What a consumer must
-/// bring is a WIDTH — a tube's core is the stroke it is made of, so a
-/// glow whose caller has no stroke (a text bloom, say) has no core to
-/// burn and should keep asking for a halo.
+/// bring is two things:
+///
+/// * a WIDTH — a tube's core is the stroke it is made of, so a glow whose
+///   caller has no stroke (a text bloom, say) has no core to burn and
+///   should keep asking for a halo;
+/// * a MASK BAND. `glow_ring_with` re-maps the soft disk's own profile,
+///   and with no band to sample it falls back to the maskless shell,
+///   which draws the halo's shape and DROPS the profile silently. Every
+///   consumer that passes `FontSystem::mask_soft_uv()` is safe by
+///   construction; one that computes a band of its own must check it.
 pub(crate) struct TubeKeys {
     falloff: TokenId,
     boost: TokenId,
     decay: TokenId,
     aura: TokenId,
     aura_reach: TokenId,
+    bands: TokenId,
 }
 
 /// One class's tube, dressed — the light's shape and the drive on its core.
@@ -133,14 +141,24 @@ pub(crate) struct Tube {
 impl Tube {
     /// The core of the tube, given the colour of the glass.
     ///
-    /// A pixel driven at `boost` times what the display can show is
-    /// CLIPPED by the display, and the clip is the whole effect: the
-    /// strongest channel of a saturated colour reaches 1 first, the
-    /// others follow as the drive rises, and the core goes pale and then
-    /// white while the light around it — never driven — keeps the hue.
-    /// So there is no "how much white" arithmetic here and no number
-    /// chosen in Rust: the amount of white is what clipping the theme's
-    /// own colour at the theme's own drive comes to.
+    /// A pixel driven at `boost` times what a display can show is
+    /// CLIPPED, and the clip is the whole effect: the strongest channel
+    /// of a saturated colour reaches 1 first, the others follow as the
+    /// drive rises, and the core goes pale and then white while the light
+    /// around it — never driven — keeps the hue. So there is no "how much
+    /// white" arithmetic here and no number chosen in Rust: the amount of
+    /// white is what clipping the theme's own colour at the theme's own
+    /// drive comes to.
+    ///
+    /// THE CLIP IS TAKEN HERE, not left to a display, and the difference
+    /// matters enough to say: `.min(1.0)` per channel means the picture
+    /// is the same on every target this toolkit can be drawn to, and no
+    /// stage downstream has to be taught what a colour above 1 means. It
+    /// also means an HDR swapchain gets the clipped colour like everybody
+    /// else — a tube that stays bright on R16F needs this clamp lifted
+    /// AND a `grade()` that can take a sample above 1, and that second
+    /// half lives in the renderer's repository. The master says so at
+    /// `glow.panel_edge.boost`; nothing here claims otherwise.
     ///
     /// Alpha is the edge's, untouched. A drive is on the LIGHT; coverage
     /// is a different question and the tube covers exactly what the
@@ -178,11 +196,16 @@ pub(crate) fn tube_dress(
         // clamps are the token's declared range and no more: a decay
         // below 1 would spread the light WIDER than the halo it is a
         // sharpening of, an aura below 1 would dim the glass it is a
-        // saturation of, and a reach outside 0..1 is not a fraction.
+        // saturation of, a reach outside 0..1 is not a fraction, and a
+        // band count is a number of ring strokes this process has to
+        // emit — the one clamp of the five that is about the machine
+        // rather than the picture, which is why its ceiling is
+        // `GlowProfile::MAX_BANDS` and not a number spelt here.
         profile: crate::draw::GlowProfile {
             decay: t.px(k.decay).max(1.0),
             aura: t.px(k.aura).max(1.0),
             aura_reach: t.px(k.aura_reach).clamp(0.0, 1.0),
+            bands: t.px(k.bands).clamp(1.0, crate::draw::GlowProfile::MAX_BANDS as f32) as u32,
         },
         boost: t.px(k.boost).max(1.0),
     })
@@ -301,6 +324,7 @@ pub(crate) fn panel_edge_glow(
         decay: theme::id("glow.panel_edge.tube_decay").unwrap_or(TokenId::MISSING),
         aura: theme::id("glow.panel_edge.tube_aura").unwrap_or(TokenId::MISSING),
         aura_reach: theme::id("glow.panel_edge.tube_aura_reach").unwrap_or(TokenId::MISSING),
+        bands: theme::id("glow.panel_edge.tube_bands").unwrap_or(TokenId::MISSING),
     });
     let profile = match tube_dress(t, keys, &TUBE_WORD) {
         // The core FIRST, then the light over it: the burned stroke is
@@ -800,6 +824,7 @@ mod tests {
             decay: id("glow.panel_edge.tube_decay"),
             aura: id("glow.panel_edge.tube_aura"),
             aura_reach: id("glow.panel_edge.tube_aura_reach"),
+            bands: id("glow.panel_edge.tube_bands"),
         };
         let t = a_tube_theme();
         let tube = tube_dress(&t, &keys, &WORD)
@@ -824,7 +849,111 @@ mod tests {
             "the master's aura reaches {}, so it lifts nothing",
             tube.profile.aura_reach
         );
+        // The fifth claim, and the one that used to be a constant in
+        // draw.rs: at one band the decay has nowhere to land and the
+        // tube IS the halo, whatever the other four numbers say.
+        assert!(
+            tube.profile.bands > 1,
+            "the master cuts the light into {} band(s), so its decay reaches nothing",
+            tube.profile.bands
+        );
         assert!(!tube.profile.is_halo(), "the master's tube {:?} is a halo", tube.profile);
+    }
+
+    /// EVERY NUMBER OF A TUBE COMES FROM THE THEME THAT ASKED FOR IT, and
+    /// an impossible one is stopped without becoming a design decision.
+    ///
+    /// `the_master_carries_the_tubes_whole_dress` above proves the master
+    /// DECLARES the dress; it cannot prove anything READS it. A reader
+    /// that ignored a token and answered the master's own number from
+    /// Rust passes it, and passes every other proof in this file — which
+    /// is exactly how the band count came to be a constant in `draw.rs`
+    /// in the first place. So every number asked for here is deliberately
+    /// NOT the master's, and the test says so rather than trusting it.
+    ///
+    /// The clamps are guards on a USER FILE, not looks: a decay below 1
+    /// would spread the light wider than the halo it sharpens, an aura
+    /// below 1 would dim the glass it saturates, a reach outside 0..1 is
+    /// not a fraction, and a band count is how many ring strokes this
+    /// process is asked to emit. A theme inside every declared range
+    /// meets none of them.
+    #[test]
+    fn every_number_of_a_tube_comes_from_the_theme_that_asked() {
+        static WORD: OnceLock<Option<u16>> = OnceLock::new();
+        let id = |n: &str| theme::id(n).unwrap_or(TokenId::MISSING);
+        let keys = TubeKeys {
+            falloff: id("glow.panel_edge.falloff"),
+            boost: id("glow.panel_edge.boost"),
+            decay: id("glow.panel_edge.tube_decay"),
+            aura: id("glow.panel_edge.tube_aura"),
+            aura_reach: id("glow.panel_edge.tube_aura_reach"),
+            bands: id("glow.panel_edge.tube_bands"),
+        };
+        // One key overridden at a time, so a reader that answered the
+        // right number for the wrong key is caught too.
+        let dressed = |key: &str, value: &str| -> Tube {
+            let t = theme::bake_over_master(&format!(
+                "[glow]\n\
+                 panel_edge.falloff = tube # enum: linear | quad | gauss | halo | tube\n\
+                 panel_edge.{key} = {value}\n"
+            ));
+            tube_dress(&t, &keys, &WORD).expect("the theme names `tube` and got no tube")
+        };
+        let master = {
+            let t = a_tube_theme();
+            tube_dress(&t, &keys, &WORD).expect("the master names `tube` and got no tube")
+        };
+        // Read out of the profile, so the assertions below compare a
+        // theme's number against the reader's answer and nothing else.
+        let seen: [(&str, fn(&Tube) -> f32, f32, [f32; 3]); 5] = [
+            ("boost", |t| t.boost, master.boost, [1.0, 1.9, 4.0]),
+            ("tube_decay", |t| t.profile.decay, master.profile.decay, [1.0, 2.25, 6.0]),
+            ("tube_aura", |t| t.profile.aura, master.profile.aura, [1.0, 1.4, 3.5]),
+            (
+                "tube_aura_reach",
+                |t| t.profile.aura_reach,
+                master.profile.aura_reach,
+                [0.0, 0.6, 1.0],
+            ),
+            ("tube_bands", |t| t.profile.bands as f32, master.profile.bands as f32, [
+                1.0, 3.0, 9.0,
+            ]),
+        ];
+        for (key, read, mine, asked) in seen {
+            for want in asked {
+                assert_ne!(
+                    want, mine,
+                    "{key}: this proof needs a number the master does not already say"
+                );
+                let got = read(&dressed(key, &format!("{want}")));
+                assert!(
+                    (got - want).abs() < 1e-6,
+                    "a theme asked for {key} = {want} and the reader answered {got}"
+                );
+            }
+        }
+        // And the guards, each at both ends where the token has two.
+        for (key, value, want) in [
+            ("boost", "0.4", 1.0),
+            ("tube_decay", "0.5", 1.0),
+            ("tube_aura", "0.25", 1.0),
+            ("tube_aura_reach", "2.0", 1.0),
+            ("tube_bands", "0", 1.0),
+            ("tube_bands", "1000", crate::draw::GlowProfile::MAX_BANDS as f32),
+        ] {
+            let t = dressed(key, value);
+            let got = match key {
+                "boost" => t.boost,
+                "tube_decay" => t.profile.decay,
+                "tube_aura" => t.profile.aura,
+                "tube_aura_reach" => t.profile.aura_reach,
+                _ => t.profile.bands as f32,
+            };
+            assert!(
+                (got - want).abs() < 1e-6,
+                "{key} = {value} left this function as {got}, not the guarded {want}"
+            );
+        }
     }
 
     /// THE TUBE'S CORE IS BRIGHTER THAN ITS GLASS, AND PALER.
