@@ -8,6 +8,8 @@
 use fontdue::{Font, FontSettings};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub const ATLAS_W: usize = 2048;
 pub const ATLAS_H: usize = 2048;
@@ -707,26 +709,137 @@ impl FontSystem {
 }
 
 fn try_load(path: &Path) -> Option<Font> {
+    SCAN_PARSES.fetch_add(1, Ordering::Relaxed);
     let data = std::fs::read(path).ok()?;
     Font::from_bytes(data, FontSettings::default()).ok()
 }
 
-/// Recursive search for a font file whose name (case-insensitive,
-/// separators stripped) contains one of the patterns.
-fn find_font(dirs: &[PathBuf], patterns: &[&str]) -> Option<PathBuf> {
-    fn walk(dir: &Path, patterns: &[&str], depth: u32, out: &mut Option<PathBuf>) {
-        if depth > 4 || out.is_some() {
-            return;
-        }
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
-        for entry in rd.flatten() {
-            if out.is_some() {
+// --------------------------------------------------------- the scan meter
+//
+// What loading a face COSTS, counted where it is spent rather than
+// asserted in a comment. A face is answered from a list of file names, and
+// the only honest way to say whether that list is read once or once per
+// slot is to count the reads: `walks` is a traversal of the directory
+// list, `dirs` is an `openat(..., O_DIRECTORY)`, `stats` is a `statx` and
+// `parses` is a font file read whole and decoded. Three of the four are
+// what a system trace of this program shows, so a measurement here and a
+// measurement out there are largely the same measurement.
+//
+// LARGELY, and the exception is worth naming where the numbers are, not
+// only at the field: `stats` counts the stats this file ASKS for. On a
+// filesystem that does not carry an entry's kind in the directory entry
+// itself — NFS, some overlays — the standard library asks for us, once per
+// entry, and that call is invisible from here. So `stats` is a true count
+// of syscalls on a machine whose font directories carry the kind (which is
+// every local filesystem this program has been traced on), and a floor
+// rather than a count on one that does not. `walks`, `dirs` and `parses`
+// are exact everywhere, and the defect this meter was written for shows in
+// all four.
+//
+// Always compiled, never behind a test flag: a counter that only exists
+// under `cfg(test)` measures a different program than the one that ships,
+// and this file's whole defect was that nobody was counting.
+
+static SCAN_WALKS: AtomicU64 = AtomicU64::new(0);
+static SCAN_DIRS: AtomicU64 = AtomicU64::new(0);
+static SCAN_STATS: AtomicU64 = AtomicU64::new(0);
+static SCAN_PARSES: AtomicU64 = AtomicU64::new(0);
+
+/// The font loading's cost so far, in this process.
+///
+/// Monotonic, so a caller measures an OPERATION by the difference across
+/// it. That is deliberate: the index below is process-wide, so "what did
+/// this theme load cost" is a question about a delta, never about a total.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScanCount {
+    /// Traversals of the whole font directory list.
+    pub walks: u64,
+    /// Directories opened.
+    pub dirs: u64,
+    /// Entries stat-ed to learn whether they are a directory. Only the
+    /// stats this file ASKS for: a filesystem that does not carry the kind
+    /// in the directory entry makes the standard library ask for us, and
+    /// that one is not visible from here.
+    pub stats: u64,
+    /// Font files read off the disk and parsed into a glyph table. The
+    /// other half of the startup cost, and the one that is not syscalls.
+    pub parses: u64,
+}
+
+/// Reads [`ScanCount`]. See its documentation for why the numbers only
+/// mean something as a difference.
+pub fn scan_count() -> ScanCount {
+    ScanCount {
+        walks: SCAN_WALKS.load(Ordering::Relaxed),
+        dirs: SCAN_DIRS.load(Ordering::Relaxed),
+        stats: SCAN_STATS.load(Ordering::Relaxed),
+        parses: SCAN_PARSES.load(Ordering::Relaxed),
+    }
+}
+
+/// How deep under a font directory the search looks. Not a theme value —
+/// it bounds a walk of the FILESYSTEM, which no theme owns — and the same
+/// bound the recursive search has always carried.
+const SCAN_DEPTH: u32 = 4;
+
+/// One candidate file: the name it is compared under, and where it is.
+///
+/// The name is normalised exactly the way the patterns are written —
+/// lowercased, everything but letters and digits dropped — so `matches`
+/// below is a plain substring test and the normalisation is paid once per
+/// file instead of once per file per question.
+struct FontFile {
+    name: String,
+    path: PathBuf,
+}
+
+/// Every font file the directory list holds, in the order the recursive
+/// search used to reach them in.
+///
+/// The ORDER is the load-bearing part. The old search answered with the
+/// first file it walked into that matched, so "which file does this
+/// pattern get" is a question about traversal order and nothing else. This
+/// list is built by that same traversal — directories in the list's order,
+/// depth-first, entries in the order the filesystem hands them back — so
+/// answering from it and answering from a fresh walk are the same answer.
+/// The only thing that changes is how many times the disk is asked.
+struct FontIndex {
+    /// The list this index was built for. The one thing that invalidates
+    /// it: a different set of directories is a different question, where a
+    /// different THEME is not — a theme changes which family a slot asks
+    /// for, never which files exist.
+    dirs: Vec<PathBuf>,
+    files: Vec<FontFile>,
+}
+
+impl FontIndex {
+    fn build(dirs: &[PathBuf]) -> FontIndex {
+        fn walk(dir: &Path, depth: u32, out: &mut Vec<FontFile>) {
+            if depth > SCAN_DEPTH {
                 return;
             }
-            let p = entry.path();
-            if p.is_dir() {
-                walk(&p, patterns, depth + 1, out);
-            } else {
+            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            SCAN_DIRS.fetch_add(1, Ordering::Relaxed);
+            for entry in rd.flatten() {
+                let p = entry.path();
+                // `readdir` already said whether this is a directory on
+                // every filesystem that carries the kind in the directory
+                // entry, so asking the kernel again is a syscall for an
+                // answer already in hand. A SYMLINK is the exception: its
+                // own kind says nothing about what it points at, and this
+                // search has always followed them, so that is the one
+                // entry still worth a stat.
+                let is_dir = match entry.file_type() {
+                    Ok(t) if !t.is_symlink() => t.is_dir(),
+                    _ => {
+                        SCAN_STATS.fetch_add(1, Ordering::Relaxed);
+                        p.is_dir()
+                    }
+                };
+                if is_dir {
+                    walk(&p, depth + 1, out);
+                    continue;
+                }
                 let name: String = p
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -738,32 +851,105 @@ fn find_font(dirs: &[PathBuf], patterns: &[&str]) -> Option<PathBuf> {
                 if !(name.ends_with("ttf") || name.ends_with("otf")) {
                     continue;
                 }
-                // Avoid italic variants; bold only when explicitly requested.
+                // Avoid italic variants; bold only when explicitly
+                // requested. Italics are dropped here rather than at the
+                // question, because a file no pattern may ever answer with
+                // is not a candidate at all — the index holds what the
+                // search is allowed to return.
                 if name.contains("italic") || name.contains("oblique") {
                     continue;
                 }
-                for pat in patterns {
-                    if name.contains(pat) {
-                        if name.contains("bold") && !pat.contains("bold") {
-                            continue;
-                        }
-                        *out = Some(p.clone());
-                        break;
-                    }
-                }
+                out.push(FontFile { name, path: p });
             }
         }
-    }
-    for &pat in patterns {
-        let mut found = None;
+        SCAN_WALKS.fetch_add(1, Ordering::Relaxed);
+        let mut files = Vec::new();
         for d in dirs {
-            walk(d, &[pat], 0, &mut found);
-            if found.is_some() {
-                return found;
-            }
+            walk(d, 0, &mut files);
+        }
+        FontIndex { dirs: dirs.to_vec(), files }
+    }
+
+    /// The first file this pattern names, in traversal order.
+    fn find(&self, pat: &str) -> Option<PathBuf> {
+        self.files
+            .iter()
+            .find(|f| matches(&f.name, pat))
+            .map(|f| f.path.clone())
+    }
+}
+
+/// Whether a normalised file name answers a pattern. Bold is only ever
+/// handed to a pattern that asked for it: the weight words live in the
+/// file name, so a bare family pattern would otherwise settle on whichever
+/// weight the directory happened to list first.
+fn matches(name: &str, pat: &str) -> bool {
+    name.contains(pat) && !(name.contains("bold") && !pat.contains("bold"))
+}
+
+/// The index, built once and kept.
+///
+/// A `Mutex` and not a `OnceLock` because the directory list can change
+/// under a running program — `HOME` is read for two of the five entries —
+/// and because a rescan has to be possible at all (see
+/// [`forget_font_index`]).
+static INDEX: Mutex<Option<Arc<FontIndex>>> = Mutex::new(None);
+
+/// The index for this directory list, building it if the list is new.
+fn font_index(dirs: &[PathBuf]) -> Arc<FontIndex> {
+    let mut slot = INDEX.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ix) = slot.as_ref() {
+        if ix.dirs.as_slice() == dirs {
+            return Arc::clone(ix);
         }
     }
-    None
+    let ix = Arc::new(FontIndex::build(dirs));
+    *slot = Some(Arc::clone(&ix));
+    ix
+}
+
+/// Drops the index, so the next question reads the directories again.
+///
+/// For the one thing the index cannot see: a font INSTALLED while the
+/// program runs. [`fresh_index`] below is the toolkit's own caller — the
+/// family lists a settings page shows — and this stays public for a host
+/// that offers a "look again" somewhere else. A theme swap is not such a
+/// moment and must never call this: re-reading the tree on every theme
+/// swap is the defect this index exists to remove.
+pub fn forget_font_index() {
+    *INDEX.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// The index built again from the disk, whatever the old one held.
+///
+/// The one question that has to see the directories again is "what does
+/// this machine have RIGHT NOW", and there is exactly one asker: a person
+/// who installed a font and opened the settings page to pick it. Every
+/// other question — a theme swap, a weight change, a face slot resolving —
+/// asks which of the files that EXIST answers a pattern, and that cannot
+/// have changed without somebody putting a file on the disk.
+///
+/// So the family lists cost ONE traversal each, where before the index
+/// they cost one per curated name: twelve for the monospace list and
+/// nineteen for the interface one, thirty-one for the page. Two rather
+/// than one for the page as a whole, because the toolkit is asked two
+/// questions and cannot see that they are one moment — the host would have
+/// to say so, and no host API here says it.
+fn fresh_index() -> Arc<FontIndex> {
+    forget_font_index();
+    font_index(&font_dirs())
+}
+
+/// The file a pattern names, from the index of the font directories.
+///
+/// The patterns are tried in order and the first that names a file wins,
+/// which is what the caller's ordering means: a candidate list is written
+/// best-first. Every pattern is answered from the SAME reading of the
+/// directories — the search used to walk the whole tree once per pattern,
+/// and the eight face slots between them spell out sixty-odd patterns.
+fn find_font(dirs: &[PathBuf], patterns: &[&str]) -> Option<PathBuf> {
+    let index = font_index(dirs);
+    patterns.iter().find_map(|pat| index.find(pat))
 }
 
 fn font_dirs() -> Vec<PathBuf> {
@@ -813,24 +999,33 @@ fn pattern_for(display: &str) -> Option<&'static str> {
         .map(|(_, pat)| *pat)
 }
 
-fn available_from(table: &[(&str, &str)]) -> Vec<String> {
-    let dirs = font_dirs();
+/// The curated names of `table` that this reading of the directories has a
+/// file for. Takes the index rather than fetching one, so that a caller
+/// asking two tables asks them of the SAME reading.
+fn available_from(index: &FontIndex, table: &[(&str, &str)]) -> Vec<String> {
     table
         .iter()
-        .filter(|(_, pat)| find_font(&dirs, &[pat]).is_some())
+        .filter(|(_, pat)| index.find(pat).is_some())
         .map(|(name, _)| name.to_string())
         .collect()
 }
 
 /// Monospace families actually available on this system (terminal font).
+///
+/// Reads the directories again — see [`fresh_index`]. This is the settings
+/// page's list, and a list of what is installed that cannot see a font
+/// installed since the program started is a list of the wrong thing.
 pub fn available_mono_families() -> Vec<String> {
-    available_from(&MONO_FAMILIES)
+    available_from(&fresh_index(), &MONO_FAMILIES)
 }
 
 /// Interface families available on this system (UI list first, then mono).
+///
+/// Reads the directories again, once, for both tables — see [`fresh_index`].
 pub fn available_ui_families() -> Vec<String> {
-    let mut out = available_from(&UI_FAMILIES);
-    out.extend(available_from(&MONO_FAMILIES));
+    let index = fresh_index();
+    let mut out = available_from(&index, &UI_FAMILIES);
+    out.extend(available_from(&index, &MONO_FAMILIES));
     out
 }
 
@@ -1178,22 +1373,31 @@ fn load_faces_with(ov: &FaceChoice) -> ([Font; FONT_COUNT as usize], [f32; FONT_
     for (i, id) in FACE_IDS.iter().enumerate() {
         paths[i] = resolve_face(id, &dirs, ov, 0);
     }
+    // One parse per FILE, not per slot: six of the eight slots commonly
+    // resolve onto two or three files, and a `Font` is a parsed table.
+    //
+    // The two ENGINE slots go through the same map as the other six, and
+    // that is the whole of the change here. They used to be parsed above
+    // it, so the file they landed on was parsed once for the slot and
+    // again for the first of the six that fell back onto it — and falling
+    // back onto them is what §5.16's step 5 makes every chain END in. On
+    // the owner's machine `display -> ui_bold -> ui_medium -> ui` is one
+    // file resolved four times, and the parse is the expensive half of
+    // loading a face.
+    let mut by_path: HashMap<PathBuf, Font> = HashMap::new();
     // The two ends of every chain, per §5.16's step 5. `load_default_*`
     // carries the environment override and the historical search order, so
     // a slot that found nothing lands exactly where the two-slot engine
     // put every one of them — which is the behaviour this replaces, kept
     // as the floor under it rather than as the rule above it.
-    let ui = match &paths[FONT_UI as usize] {
-        Some(r) => try_load(&r.path).unwrap_or_else(load_default_ui),
-        None => load_default_ui(),
-    };
-    let mono = match &paths[FONT_MONO as usize] {
-        Some(r) => try_load(&r.path).unwrap_or_else(load_default_mono),
-        None => load_default_mono(),
-    };
-    // One parse per FILE, not per slot: six of the eight slots commonly
-    // resolve onto two or three files, and a `Font` is a parsed table.
-    let mut by_path: HashMap<PathBuf, Font> = HashMap::new();
+    let ui = paths[FONT_UI as usize]
+        .as_ref()
+        .and_then(|r| load_into(&r.path, &mut by_path))
+        .unwrap_or_else(load_default_ui);
+    let mono = paths[FONT_MONO as usize]
+        .as_ref()
+        .and_then(|r| load_into(&r.path, &mut by_path))
+        .unwrap_or_else(load_default_mono);
     let fonts: [Font; FONT_COUNT as usize] = std::array::from_fn(|i| {
         // The two engine slots are already loaded above, because every
         // other slot's last resort is one of them.
@@ -1204,21 +1408,28 @@ fn load_faces_with(ov: &FaceChoice) -> ([Font; FONT_COUNT as usize], [f32; FONT_
             return mono.clone();
         }
         match &paths[i] {
-            Some(r) => match by_path.get(&r.path) {
-                Some(f) => f.clone(),
-                None => match try_load(&r.path) {
-                    Some(f) => {
-                        by_path.insert(r.path.clone(), f.clone());
-                        f
-                    }
-                    None => alias_of(FACE_IDS[i], &ui, &mono),
-                },
-            },
+            Some(r) => load_into(&r.path, &mut by_path)
+                .unwrap_or_else(|| alias_of(FACE_IDS[i], &ui, &mono)),
             None => alias_of(FACE_IDS[i], &ui, &mono),
         }
     });
     let synthetic = std::array::from_fn(|i| paths[i].as_ref().map_or(0.0, |r| r.synthetic));
     (fonts, synthetic)
+}
+
+/// This file's glyph table, parsed at most once per load.
+///
+/// The second slot to ask for a file gets a clone, which copies the tables
+/// `fontdue` built but does not read the file or decode its outlines
+/// again. That is the trade this map has always made for six of the eight
+/// slots; the two engine slots simply were not in it.
+fn load_into(path: &Path, by_path: &mut HashMap<PathBuf, Font>) -> Option<Font> {
+    if let Some(f) = by_path.get(path) {
+        return Some(f.clone());
+    }
+    let f = try_load(path)?;
+    by_path.insert(path.to_path_buf(), f.clone());
+    Some(f)
 }
 
 /// Where a slot with no file of its own lands: the monospace slot when its
@@ -1230,5 +1441,195 @@ fn alias_of(id: &str, ui: &Font, mono: &Font) -> Font {
         mono.clone()
     } else {
         ui.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The search as it was before the index: a fresh recursive walk per
+    /// pattern, answering with the first file it reaches that matches.
+    ///
+    /// Written out in full, and deliberately not sharing a line with the
+    /// code above. The index's whole claim is that reading the tree once
+    /// and answering from a list gives the SAME file as reading it again
+    /// for every question — a claim only a second, independent
+    /// implementation can check. Sharing the matching rule with the thing
+    /// under test would make this a test of nothing.
+    fn reference(dirs: &[PathBuf], pat: &str) -> Option<PathBuf> {
+        fn walk(dir: &Path, pat: &str, depth: u32, out: &mut Option<PathBuf>) {
+            if depth > 4 || out.is_some() {
+                return;
+            }
+            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            for entry in rd.flatten() {
+                if out.is_some() {
+                    return;
+                }
+                let p = entry.path();
+                if p.is_dir() {
+                    walk(&p, pat, depth + 1, out);
+                } else {
+                    let name: String = p
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .chars()
+                        .filter(|c| c.is_ascii_alphanumeric())
+                        .collect();
+                    if !(name.ends_with("ttf") || name.ends_with("otf")) {
+                        continue;
+                    }
+                    if name.contains("italic") || name.contains("oblique") {
+                        continue;
+                    }
+                    if name.contains(pat) {
+                        if name.contains("bold") && !pat.contains("bold") {
+                            continue;
+                        }
+                        *out = Some(p.clone());
+                    }
+                }
+            }
+        }
+        for d in dirs {
+            let mut found = None;
+            walk(d, pat, 0, &mut found);
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    }
+
+    /// Every pattern this file can put to the search: the curated families,
+    /// the default chains, and the weight spellings a `[face.*]` block
+    /// produces. A pattern nothing on this machine answers is as much a
+    /// case as one that hits — "found nothing" has to agree too.
+    fn every_pattern() -> Vec<String> {
+        let mut pats: Vec<String> = MONO_FAMILIES
+            .iter()
+            .chain(UI_FAMILIES.iter())
+            .map(|(_, p)| p.to_string())
+            .chain(DEFAULT_MONO_PATTERNS.iter().map(|p| p.to_string()))
+            .chain(DEFAULT_UI_PATTERNS.iter().map(|p| p.to_string()))
+            .collect();
+        // What `try_families` spells: the family, and the family with each
+        // weight word the master may write, in the same lowercase form.
+        let words: Vec<String> = (1..=9)
+            .map(|w| weight_word(w * 100).to_lowercase())
+            .collect();
+        for fam in ["firamono", "jetbrainsmono", "rajdhani", "orbitron", "notosansmono"] {
+            for w in &words {
+                pats.push(format!("{fam}{w}"));
+            }
+        }
+        // And a family this machine certainly does not have, so the
+        // "nothing" answer is measured rather than assumed.
+        pats.push("nosuchfamilyanywhere".into());
+        pats
+    }
+
+    #[test]
+    fn the_index_answers_what_a_fresh_walk_answers() {
+        let dirs = font_dirs();
+        let index = font_index(&dirs);
+        let mut hits = 0;
+        for pat in every_pattern() {
+            let from_index = index.find(&pat);
+            let from_disk = reference(&dirs, &pat);
+            assert_eq!(
+                from_index, from_disk,
+                "pattern {pat:?} resolves to {from_index:?} out of the index \
+                 and to {from_disk:?} out of a fresh walk — the index is not \
+                 in traversal order, or its filters are not the search's"
+            );
+            hits += usize::from(from_index.is_some());
+        }
+        // Fail closed: on a machine where every pattern answers None the
+        // loop above compares nothing to nothing.
+        assert!(
+            hits > 0,
+            "no pattern found a file at all — this machine's font \
+             directories hold nothing the search can answer with, so the \
+             agreement above is agreement about an empty tree"
+        );
+    }
+
+    /// The DISK-READING three of the meter's four numbers.
+    ///
+    /// `parses` is dropped on purpose, and the reason is that the counters
+    /// are PROCESS-wide. Sixteen tests in this binary build a `FontSystem`
+    /// and every one of them parses a face, on whatever thread the harness
+    /// runs it on, so a `parses` read here is partly somebody else's work.
+    /// The other three cannot move under this test's feet: they only move
+    /// when the index is BUILT, a build happens under the index's own
+    /// mutex, and the only thing in the whole crate that discards a built
+    /// index is this test (`fresh_index` is reached from the family lists,
+    /// which nothing in this binary calls).
+    ///
+    /// Named for what it keeps rather than what it drops, because the
+    /// question the test asks is "were the directories read again".
+    fn scan_only(c: ScanCount) -> ScanCount {
+        ScanCount { parses: 0, ..c }
+    }
+
+    /// The index is per DIRECTORY LIST, and only per directory list. A
+    /// second question about the same list must not go back to the disk;
+    /// a different list must.
+    #[test]
+    fn a_new_directory_list_is_the_one_thing_that_rebuilds() {
+        let dirs = font_dirs();
+        let first = font_index(&dirs);
+
+        let before = scan_count();
+        for _ in 0..20 {
+            // Two assertions about the same call, and both are wanted. The
+            // pointer says a rebuild did not happen at all — a build puts a
+            // NEW allocation in the slot, so sameness here is not evidence
+            // about a counter but about identity. The counter below says it
+            // in the audit's own units.
+            assert!(
+                Arc::ptr_eq(&first, &font_index(&dirs)),
+                "the same directory list was answered with a different \
+                 index — the list is being read afresh per question"
+            );
+        }
+        assert_eq!(
+            scan_only(scan_count()), scan_only(before),
+            "twenty questions about the same directory list read the disk \
+             again — the index is keyed on something that moves"
+        );
+
+        // A list this process has not seen. It need not exist: what is
+        // being measured is that the index NOTICED, not what it found.
+        let mut other = dirs.clone();
+        other.push(std::env::temp_dir().join("nacelle-no-such-font-dir"));
+        let before = scan_count();
+        let rebuilt = font_index(&other);
+        // What the index is FOR the new list, not merely that a walk
+        // happened somewhere: an index that kept the old list's files and
+        // answered anyway is exactly the failure being guarded, and only
+        // the key it carries can tell the two apart.
+        assert_eq!(
+            rebuilt.dirs.as_slice(), other.as_slice(),
+            "a directory list this process had never seen was answered out \
+             of the index built for another one — a font directory added at \
+             runtime would stay invisible"
+        );
+        assert!(
+            scan_count().walks > before.walks,
+            "the index carries the new directory list but no traversal was \
+             counted for it — the meter and the index disagree, and the \
+             audit's numbers come from the meter"
+        );
+
+        // ...and the original list is a new list again now, which is the
+        // honest cost of keeping one index rather than one per list. Left
+        // built so the file is put back the way the rest of the suite
+        // expects to find it.
+        let _ = font_index(&dirs);
     }
 }
