@@ -3908,7 +3908,7 @@ gesture_frac = 60%                    # hand travel for a full quarter turn or a
 rubber_gain = 0.15                    # the rubbery give past the end of the row; -; f, 0.0 .. 1.0; main.rs:687 — the give is a visible material property, not a bound
 rubber_max  = 10%                     # how far that give may stretch at most; -; % of the viewport; main.rs:687's clamp, companion of rubber_gain
 epsilon     = 0.05                    # below this progress the ride is not drawn at all; -; f, 0.0 .. 0.5; main.rs:1676 — a rendering guard with a visible threshold
-void        = @surface.void           # the space the cube turns in: painted under the whole turn, and what a wall turning away settles toward; -; colour; @surface.void — the swapchain clear, so the ride happens in the dark the frame already stands on
+void        = @backdrop.solid         # the space the cube turns in: painted under the whole turn, and what a wall turning away settles toward; -; colour; @backdrop.solid — THE GROUND A STANDING BOARD LAYS (deco::board_ground's first level), so the turn opens and closes on the colour that was already there and a ride is a turn rather than a flash. It read @surface.void until 2026-08-18, which said the same thing while a standing frame painted nothing but the swapchain clear; the moment the frame laid its ground the two parted by a rung of the ladder (measured: 0.0096,0.0240,0.0171 against 0.0418,0.0758,0.0613) and every sideways ride dimmed the screen fourfold for its duration
 
 # ---- widget_grow · editor tear-off growth --------------------------------
 [motion.widget_grow]
