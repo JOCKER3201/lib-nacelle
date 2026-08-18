@@ -4781,6 +4781,69 @@ preedit_underline = @stroke.thin    # underline beneath IME composing text · - 
 mask_glyph = bullet                 # what a masked char draws as · - · enum: bullet | asterisk | block · bullet is the unknown-word fallback in code
 
 # =========================================================================
+# picker — the colour picker (object/color_picker.rs): a field of hue by
+# saturation, a value bar beside it, the chosen colour as a patch, that
+# colour written out in one of six notations, and two grids of
+# ready-made colours. Everything the control is MADE of is here; what it
+# is made of in COLOUR is in [component] under `picker.*`.
+#
+# It replaced three sliders per colour in the theme editor on 2026-08-18
+# (owner's wish, after a picker he showed from another desktop). Nothing
+# about its proportions is in Rust: the split between the field and the
+# text side, how finely the hue circle is sampled, how many cells a grid
+# is wide and which colours the first grid offers are all decisions a
+# theme makes.
+# =========================================================================
+[picker]
+gap = @space.3                      # between the field, the bar and the column beside them · - · len (u) · @space.3 = 1.5u = 8.1 px
+pad_x = @space.3                    # inside the two plates, between the ring and the ink · - · len (u) · @space.3 = 1.5u = 8.1 px; the dense-readout inset, as [cell] uses, not the roomier @space.4 a text field wears
+field_h = 26u                       # the hue-by-saturation field's height · - · len (u) · 140.4 px; tall enough to aim inside, short enough for a settings row
+field_w_frac = 0.58                 # how much of the band the field and its bar take, the rest being the patch and the grids · - · frac, 0.1 .. 0.9 · a little over half: the field is the control, everything beside it is a shortcut to a colour
+value_w = 4u                        # the value bar's width · - · len (u) · 21.6 px
+patch_h = 6u                        # the chosen colour's patch · - · len (u) · 32.4 px
+row_h = @size.md                    # the readout strip carrying the notation's name and the value · - · len (u) · @size.md
+format_w = 11u                      # the plate that names the notation and steps to the next · - · len (u) · 59.4 px; OKLCH is the longest word it wears and measures 30.3 px at type.data, so this is that word, two pad_x and room for a theme that tracks its data role wider
+swatch = 4u                         # one ready-made colour's cell · - · len (u) · 21.6 px
+swatch_gap = @space.2               # between those cells · - · len (u) · @space.2 = 1u = 5.4 px
+swatch_cols = 8                     # how many cells a grid row holds · - · n · eight is what fits the text side at field_w_frac without the cells shrinking under a fingertip
+hue_stops = 24                      # how finely the circle is sampled across the field · - · n, 2 .. 64 · rect_grad cuts one band per stop interval, so this is the trade between a smooth ramp and the vertex count; 24 is 15 degrees a band
+handle = 1.4u                       # half the marker that stands on a chosen point · - · len (u) · 7.6 px
+handle_stroke = @stroke.regular     # that marker's line weight · - · str · @stroke.regular; it is a RING, so the colour it points at stays visible through it
+checker = 1.6u                      # one square of the chequerboard a colour with alpha is shown against · - · len (u) · 8.6 px
+corner = @corner.sm                 # the corner radius of every part of this control · - · len (u) · @corner.sm = 0.8u = 4.3 px
+corner_style = @button.corner_style # which shape those corners take · - · enum: square | round | chamfer · follows the button, like every other control here: a picker rounded inside a chamfered interface is a second language
+border = @stroke.hair               # the ring around each part · - · str · @stroke.hair
+role = data                         # type role of the notation and the value · - · role · type.data — the monospace column role, because a hex value read digit by digit must not shift under the eye as it changes
+# The ready-made grid. TOKENS and not a table in Rust: which colours a
+# picker offers first is a look. The master points them at its own
+# palette and severity roles, so a theme's picker opens on that theme's
+# vocabulary instead of a wheel of primaries nobody chose. `base_count`
+# says how many of the numbered keys are read; a numbered series is a
+# promise about numbering that only a reader can keep ([glow] says the
+# same), so the CEILING is however many `base.N` keys this file declares
+# and not a round number written next to the count. Ask for more and you
+# get what is here: a cell with no colour would still be laid out, drawn
+# blank and pressed, which is what asking for 24 against these 16 used to
+# produce.
+base_count = 16                     # how many of the numbered cells below are offered · - · n, 0 .. 16 (as many as base.N below) · two rows of eight at swatch_cols = 8
+base.1 = @palette.accent            # the seed the whole interface is derived from · - · col · @palette.accent
+base.2 = @palette.accent_alt        # its secondary · - · col · @palette.accent_alt
+base.3 = @accent.warm               # the warm counterpart · - · col · @accent.warm
+base.4 = @palette.neutral           # the hue-free grey anchor · - · col · @palette.neutral
+base.5 = @palette.white             # the tint target · - · col · @palette.white
+base.6 = @palette.black             # the shade target · - · col · @palette.black
+base.7 = @severity.ok.text          # the seven severity authors, in the model's own order · - · col · @severity.ok.text
+base.8 = @severity.info.text        # · - · col · @severity.info.text
+base.9 = @severity.warning.text     # · - · col · @severity.warning.text
+base.10 = @severity.critical.text   # · - · col · @severity.critical.text
+base.11 = @severity.contained.text  # · - · col · @severity.contained.text
+base.12 = @severity.offline.text    # · - · col · @severity.offline.text
+base.13 = @severity.unknown.text    # · - · col · @severity.unknown.text
+base.14 = @surface.raised           # the three surfaces a theme is bedded on · - · col · @surface.raised
+base.15 = @surface.sunken           # · - · col · @surface.sunken
+base.16 = @text.primary             # the ink · - · col · @text.primary
+
+# =========================================================================
 # list — the task list, the notification list, the crew list.
 # =========================================================================
 [list]
@@ -5274,6 +5337,7 @@ note.role = caption                 # type role of a section note · - · role �
 row_label_role = body               # type role of every settings row label: COLUMNS, PADDING, VOLUME … · - · role · settings.rs:925 and four siblings, all font_px(1.0)
 section_role = label.section        # type role of a section header inside a page: the FONT view's TERMINAL and INTERFACE · - · role · type.label.section, the role settings.rs spelled out for these two headers before a binding existed
 section_gap = @space.6              # the break between the BACK row and the first setting · - · len (u) · @space.6 = 4u = 21.6 px; settings.rs:926's undeclared gap*2.0
+preview_pulse_ms = 100ms            # how often a control HELD in the theme editor re-bakes the desktop behind it · - · ms, 16ms .. 1000ms · how fast the picture follows the hand, which is something a person watches, so it is the theme's; the editor's sliders and the picker's field both hold this pulse and were two copies of 100 in settings.rs until 2026-08-18. NOT in [motion], though it is a time: that catalogue is closed at eighteen effects plus two globals and counted by a test, and this is not an effect — it is a rate limiter, and motion.scale = 0 would take a limiter to "every frame", which is 76 KB a bake and ~4.5 MB for a second of dragging. Reduced motion is a promise about movement, not about heat
 band_lift = 1.20                    # the navigation's bed against the window body it lies on, as a multiple of OKLab L · - · f, 0.5 .. 2.0 · read ONCE, by component.settings.rail_fill (5.26); there is ONE navigation column since 2026-08-18, so there is one bed and one lift — the second column this used to be shared with is gone and its token with it
 band_pad_x = @space.4               # air between a navigation column's bed and the buttons standing on it, left and right · - · len (u) · @space.4 = 2u = 10.8 px; a control flush with the bed under it reads as a slice OF the bed, not as a thing lying on it (owner, 2026-08-18); MUST STAY UNDER settings.col_gap (4u), the gutter to the next column — the rule is written out there
 band_pad_y = @space.4               # the same air at the top and the bottom of that bed · - · len (u) · @space.4 = 2u = 10.8 px; the same number as band_pad_x, because a plate with more air on one axis than the other reads as tilted
@@ -5549,6 +5613,14 @@ field.caret = @accent.primary       # the caret · image 7 · col · @accent.pri
 field.selection = alpha(@accent.primary, 0.28)   # wash behind selected text · - · col · mirrors term.selection
 field.selection_text = contrast_on(over(@component.field.selection, @component.field.fill), @surface.void, @text.primary)   # ink inside the wash · - · col · the term.selection_fg idiom, resolved over the composited wash
 field.preedit = @text.primary       # IME composing text ink · - · col · @text.primary; the underline is what marks it
+
+# ---------------------------------------------------------------- picker
+picker.edge = @border.subtle        # the ring around the field, the bar, the patch and every swatch · - · col · @border.subtle; one ring for the whole control, so its parts read as one object
+picker.text = @text.primary         # the notation's name and the value written in it · - · col · @text.primary
+picker.handle = @palette.white      # the ring marking the chosen point in the field and on the bar · - · col · @palette.white; a mark that took the accent would vanish the moment the accent was the colour being picked, which is the one moment it is needed
+picker.checker_a = @surface.raised  # the lighter square of the chequerboard behind a colour with alpha · - · col · @surface.raised
+picker.checker_b = @surface.sunken  # its darker neighbour · - · col · @surface.sunken; the PAIR is what makes transparency visible, so a theme that sets them equal turns the chequer off deliberately
+picker.rest = @palette.neutral      # what a picker holds before anything seeds it · - · col · @palette.neutral; a picker is built long before its owner knows what to point it at, and whatever it shows meanwhile is on the screen — so it is a look, and the neutral a theme nominates rather than a grey chosen in Rust
 
 # ---------------------------------------------------------------- chrome bits
 taskbar.fill = @surface.raised      # the dock's material · images 7,8,9 · col · @surface.raised

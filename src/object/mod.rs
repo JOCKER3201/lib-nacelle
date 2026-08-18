@@ -10,6 +10,7 @@
 
 pub mod button;
 pub mod checkbox;
+pub mod color_picker;
 pub mod dropdown;
 pub(crate) mod elev;
 pub mod focus_ring;
