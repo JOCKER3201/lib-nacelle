@@ -11,6 +11,13 @@
 //! current state), while a slider MOVES (to preview), and when SAVE writes.
 //! Three callers, one answer, or they drift.
 //!
+//! That question changed its answer on 2026-08-18, which is the best argument
+//! for the module there has been: `neon` used to mean a blurred copy of the
+//! border and now means a lit glass tube, the blurred copy is called `glow`,
+//! and a theme file saved under the old name has to keep opening on the thing
+//! it actually draws. All of that is [`Border`] and [`border_edits`] — three
+//! callers, one answer, and one place to change it.
+//!
 //! TWO PAGES, ONE MODEL. The sets above are the editor's ADVANCED page: one
 //! control per thing. The BASIC page at the bottom of this file is the same
 //! theme asked three questions — HUE, SATURATION, LIGHTNESS — and answers
@@ -50,18 +57,39 @@ pub enum Scope {
     Theme,
 }
 
-/// The two borders the editor offers.
+/// The three borders the editor offers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Border {
     /// A ring and nothing else.
     Line,
-    /// The same ring with a halo around it.
+    /// The same ring with a halo around it — a blurred copy of the edge
+    /// in the edge's own colour.
     ///
-    /// The halo has NO COLOUR OF ITS OWN. `object/window.rs:107` passes the
-    /// ring's colour into `glow_ring`, and `glow.panel_edge.color` is declared
-    /// in the master and read by nobody. So one colour drives both, which is
-    /// why the editor has one set of colour sliders for the border rather
-    /// than two.
+    /// CALLED `Neon` UNTIL 2026-08-18, and the name was wrong twice over:
+    /// it is not what a neon sign looks like, and it took the word the
+    /// owner wanted for the thing that is. The tokens it writes have not
+    /// moved and neither has the picture — the halo is drawn from the
+    /// same four keys it always was, so a theme file written under the
+    /// old name opens on this kind and looks the same to the bit.
+    ///
+    /// The halo has NO COLOUR OF ITS OWN. `object/window.rs` passes the
+    /// ring's colour into the emitter, and `glow.panel_edge.color` is
+    /// declared in the master and read by nobody. So one colour drives
+    /// both, which is why the editor has one set of colour sliders for
+    /// the border rather than two.
+    Glow,
+    /// A lit glass tube: a core burned toward white by the drive on it, a
+    /// saturated band of colour against the glass, and light that stops
+    /// instead of fading.
+    ///
+    /// THE KIND WRITES A PROFILE, NOT A LOOK. Every number the tube is
+    /// made of — how hard the core is driven, how strong the band is, how
+    /// far it reaches, how fast the light falls — is a token of the
+    /// theme's, and this module names none of them: the one word
+    /// `glow.panel_edge.falloff = tube` is what turns the four keys the
+    /// halo already used into a tube, and the master carries the tube's
+    /// own dress beside them. A theme that wants a different tube edits
+    /// the theme, not this list.
     Neon,
 }
 
@@ -155,19 +183,46 @@ pub fn border_edits(scope: Scope, kind: Border, colour: Oklch, halo_dressed: boo
     let mut out = vec![border_colour_edit(scope, colour)];
     match kind {
         // The theme's own radius and alpha are left standing: LINE only
-        // takes the halo away, and `enabled = false` is the whole of that
-        // (`window.rs:97` returns before either is read).
+        // takes the light away, and `enabled = false` is the whole of that
+        // (`panel_edge_glow` returns before either is read). The falloff
+        // is left standing for the same reason — a kind that draws no
+        // light has no opinion about its shape.
         Border::Line => out.push(Edit::new("glow.panel_edge.enabled", "false")),
-        // NEON dresses the halo ONLY where the theme has not: the default
-        // master ships `radius = 0u` and `alpha = 0.0` and `window.rs:104`
-        // returns at zero, so a bare switch was invisible there. A theme
-        // that has dressed its own halo keeps its dress — the shipped
-        // variants (removed 2026-08-16) each wore their own numbers, from
-        // azure's 0.6u/0.16 to cockpit's 1.6u/0.34, and writing the seeds
-        // over all five was the earlier shape's mistake, found in
-        // verification; a user's theme deserves the same respect.
-        Border::Neon => {
+        // The two lit kinds differ in ONE token, which is the point: a
+        // tube is the same light spent differently, so switching between
+        // them must not disturb the radius, the alpha or the colour the
+        // user chose for either.
+        //
+        // GLOW WRITES ITS WORD OUT LOUD rather than leaving the key
+        // alone. The kind is a promise about the profile, and the only
+        // way to keep it on a file that already says `tube` is to say
+        // `gauss` — the master's own word for the soft halo. The cost is
+        // that a theme which had written `halo` or `quad` there has that
+        // word replaced; those three words differ only in a reader that
+        // does not exist, so the picture is the same either way, and a
+        // key that silently disagreed with the list would be worse.
+        Border::Glow | Border::Neon => {
             out.push(Edit::new("glow.panel_edge.enabled", "true"));
+            out.push(Edit::new(
+                "glow.panel_edge.falloff",
+                if kind == Border::Neon { "tube" } else { "gauss" },
+            ));
+            // A lit kind dresses the light ONLY where the theme has not:
+            // the default master ships `radius = 0u` and `alpha = 0.0`
+            // and `panel_edge_glow` returns at zero, so a bare switch was
+            // invisible there. A theme that has dressed its own keeps its
+            // dress — the shipped variants (removed 2026-08-16) each wore
+            // their own numbers, from azure's 0.6u/0.16 to cockpit's
+            // 1.6u/0.34, and writing the seeds over all five was the
+            // earlier shape's mistake, found in verification; a user's
+            // theme deserves the same respect.
+            //
+            // The two seeds are the REACH and the AMOUNT of the light,
+            // which both kinds need and neither owns. Nothing seeds the
+            // tube's own dress — its drive, its band and its decay come
+            // from the master, which states them for exactly this reason:
+            // a kind picked in a list must not be a place where a look is
+            // decided in code.
             if !halo_dressed {
                 out.push(Edit::new("glow.panel_edge.radius", "1.6u"));
                 out.push(Edit::new("glow.panel_edge.alpha", "0.34"));
@@ -1091,38 +1146,82 @@ mod tests {
     }
 
     #[test]
-    fn neon_dresses_the_halo_and_line_does_not_touch_it() {
+    fn a_lit_kind_dresses_the_light_and_line_does_not_touch_it() {
         let colour = c(0.7, 0.15, 200.0, 1.0);
         let line = border_edits(Scope::Theme, Border::Line, colour, false);
-        let neon = border_edits(Scope::Theme, Border::Neon, colour, false);
-        let neon_dressed = border_edits(Scope::Theme, Border::Neon, colour, true);
-        // A theme that has dressed its own halo keeps it: a theme's own
-        // 0.70u must not become the seed's 1.6u because someone chose NEON.
-        for k in ["glow.panel_edge.radius", "glow.panel_edge.alpha"] {
-            assert!(
-                !neon_dressed.iter().any(|e| e.token == k),
-                "NEON overwrote {k} on a theme that had already dressed its halo"
-            );
-        }
-        // NEON must write a radius and an alpha, because the default master
-        // ships both at zero and the renderer draws nothing at zero — a
-        // switch alone was measured invisible on default and inert on
-        // Cockpit, which ships the halo already on.
-        for k in ["glow.panel_edge.radius", "glow.panel_edge.alpha"] {
-            assert!(
-                neon.iter().any(|e| e.token == k),
-                "NEON did not write {k}; on the default theme it is invisible"
-            );
-            // And LINE must NOT: the theme's own halo dress survives a trip
-            // through LINE, so switching back to NEON finds it as it was.
-            assert!(
-                !line.iter().any(|e| e.token == k),
-                "LINE wrote {k}, flattening the theme's own halo"
-            );
-        }
         let of = |v: &Vec<Edit>| v.iter().find(|e| e.token.ends_with("enabled")).unwrap().value.clone();
         assert_eq!(of(&line), "false");
-        assert_eq!(of(&neon), "true");
+        // Both lit kinds, because the seeding is the REACH and the AMOUNT
+        // of light and neither kind owns them: a claim proved on one of
+        // them says nothing about the other.
+        for kind in [Border::Glow, Border::Neon] {
+            let lit = border_edits(Scope::Theme, kind, colour, false);
+            let dressed = border_edits(Scope::Theme, kind, colour, true);
+            // A theme that has dressed its own keeps it: a theme's own
+            // 0.70u must not become the seed's 1.6u because someone
+            // picked a kind.
+            for k in ["glow.panel_edge.radius", "glow.panel_edge.alpha"] {
+                assert!(
+                    !dressed.iter().any(|e| e.token == k),
+                    "{kind:?} overwrote {k} on a theme that had already dressed its light"
+                );
+            }
+            // A lit kind must write a radius and an alpha, because the
+            // default master ships both at zero and the renderer draws
+            // nothing at zero — a switch alone was measured invisible on
+            // default and inert on Cockpit, which ships the halo on.
+            for k in ["glow.panel_edge.radius", "glow.panel_edge.alpha"] {
+                assert!(
+                    lit.iter().any(|e| e.token == k),
+                    "{kind:?} did not write {k}; on the default theme it is invisible"
+                );
+                // And LINE must NOT: the theme's own dress survives a trip
+                // through LINE, so switching back finds it as it was.
+                assert!(
+                    !line.iter().any(|e| e.token == k),
+                    "LINE wrote {k}, flattening the theme's own light"
+                );
+            }
+            assert_eq!(of(&lit), "true");
+        }
+    }
+
+    /// The two lit kinds differ in the FALLOFF and in nothing else.
+    ///
+    /// Both halves are load-bearing. That NEON says `tube` is what makes
+    /// it a tube at all — the word is the only thing `panel_edge_glow`
+    /// asks about. That GLOW says `gauss` is what makes the kind a
+    /// promise rather than a hope: without it, picking GLOW on a file
+    /// that already said `tube` would leave the tube standing under a
+    /// list that reads GLOW.
+    ///
+    /// And that the two sets are otherwise EQUAL is what makes switching
+    /// between them free: a radius, an alpha and a colour the user chose
+    /// under one kind are still there under the other.
+    #[test]
+    fn the_two_lit_kinds_differ_in_the_falloff_alone() {
+        let colour = c(0.7, 0.15, 200.0, 1.0);
+        for dressed in [false, true] {
+            let glow = border_edits(Scope::Theme, Border::Glow, colour, dressed);
+            let neon = border_edits(Scope::Theme, Border::Neon, colour, dressed);
+            let word = |v: &Vec<Edit>| {
+                v.iter()
+                    .find(|e| e.token == "glow.panel_edge.falloff")
+                    .unwrap_or_else(|| panic!("a lit kind named no falloff: {v:?}"))
+                    .value
+                    .clone()
+            };
+            assert_eq!(word(&glow), "gauss");
+            assert_eq!(word(&neon), "tube");
+            let rest = |v: &Vec<Edit>| -> Vec<Edit> {
+                v.iter().filter(|e| e.token != "glow.panel_edge.falloff").cloned().collect()
+            };
+            assert_eq!(
+                rest(&glow),
+                rest(&neon),
+                "the two lit kinds moved something other than the falloff"
+            );
+        }
     }
 
     #[test]
@@ -1147,7 +1246,7 @@ mod tests {
         // there is no baked stop list for any reader to ask for.
         let colour = c(0.7, 0.15, 200.0, 1.0);
         let mut all = Vec::new();
-        for kind in [Border::Line, Border::Neon] {
+        for kind in [Border::Line, Border::Glow, Border::Neon] {
             all.extend(border_edits(Scope::Theme, kind, colour, false));
             all.extend(border_edits(Scope::Theme, kind, colour, true));
         }

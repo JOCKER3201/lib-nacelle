@@ -725,6 +725,103 @@ impl Corner {
     }
 }
 
+/// HOW a glow spends its light across its reach — the shape, never the
+/// amount. Reach is `radius`, amount is the caller's alpha; this is the
+/// only thing left to decide once those two are known.
+///
+/// Three numbers because the owner's brief for a neon tube is three
+/// statements about light and one of them (the burned-white core) is not
+/// light at all but the EDGE, drawn by the caller. What is here:
+///
+/// * `decay` — the distance re-map. 1.0 is the soft disk laid flat
+///   across the reach, which is what every glow in this toolkit drew
+///   before there was a choice. Above 1.0 the profile is pulled in
+///   toward the path: what the disk showed at a third of the reach a
+///   `decay` of 3 shows at a twenty-seventh of it. Light that STOPS is
+///   the difference between a lit tube and a blurred copy of a line.
+/// * `aura` — a multiplier on the alpha at the path, ramped back to 1.0
+///   over `aura_reach`. The band of colour a photographed sign keeps
+///   right against the glass, and the reason a tube reads as coloured at
+///   all once its core has been driven white.
+/// * `aura_reach` — how far that band goes, as a fraction of `radius`.
+///
+/// Every one of them arrives from a theme token. Nothing in this file
+/// chooses a value; [`GlowProfile::HALO`] is not a design default but the
+/// identity element — the profile at which this whole struct disappears
+/// and the emitter draws exactly what it drew before it existed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlowProfile {
+    pub decay: f32,
+    pub aura: f32,
+    pub aura_reach: f32,
+}
+
+impl GlowProfile {
+    /// The soft disk, unshaped: the picture every caller got before a
+    /// profile could be asked for, and the one `glow_ring` still asks
+    /// for. Not a default anybody chose — the numbers at which every
+    /// arithmetic step in [`DrawList::glow_ring_with`] is an identity.
+    pub const HALO: Self = Self { decay: 1.0, aura: 1.0, aura_reach: 0.0 };
+
+    /// Whether this profile asks for nothing the halo did not already do.
+    /// A theme is free to name a shaped profile and then flatten every
+    /// knob of it; the answer here is about the NUMBERS, so such a theme
+    /// gets the halo's own vertices rather than a subdivided copy of them.
+    pub fn is_halo(&self) -> bool {
+        self.decay == 1.0 && !self.lifts()
+    }
+
+    fn lifts(&self) -> bool {
+        self.aura > 1.0 && self.aura_reach > 0.0
+    }
+
+    /// How many rings the reach is cut into.
+    ///
+    /// A QUALITY number, not a design one: it decides how closely the
+    /// emitted geometry follows the re-map, and the picture converges as
+    /// it rises. The halo needs exactly one — its re-map is the identity,
+    /// and one band is the vertex-for-vertex picture this file drew
+    /// before profiles existed. A shaped profile borrows
+    /// [`DrawList::glow_shell`]'s own rule and its reasoning: bands
+    /// thinner than about 2 px stop reading as steps of anything, and
+    /// five is where the vertex count of a sprite ring is still a
+    /// fraction of the shell fallback's.
+    fn bands(&self, radius: f32) -> u32 {
+        if self.is_halo() {
+            return 1;
+        }
+        (radius * 0.5).ceil().clamp(3.0, 5.0) as u32
+    }
+
+    /// The mask's v at distance fraction `f` of the reach, between the
+    /// disk's peak `vi` on the path and its zero `v0` at the rim.
+    ///
+    /// The two ENDS ARE EXACT and not the formula's answer at 0 and 1,
+    /// which is what lets a halo's band land on the same texel the
+    /// unshaped emitter used to hand it: `vi + (v0 - vi) * 1.0` is not
+    /// `v0` in binary floating point, and one texel of drift is a
+    /// different picture for a proof that compares vertices.
+    fn v_at(&self, f: f32, vi: f32, v0: f32) -> f32 {
+        if f <= 0.0 {
+            return vi;
+        }
+        if f >= 1.0 {
+            return v0;
+        }
+        let s = if self.decay == 1.0 { f } else { f.powf(1.0 / self.decay) };
+        vi + (v0 - vi) * s
+    }
+
+    /// The alpha at distance fraction `f`, given the caller's own.
+    fn alpha_at(&self, f: f32, alpha: f32) -> f32 {
+        if !self.lifts() {
+            return alpha;
+        }
+        let t = (f / self.aura_reach).clamp(0.0, 1.0);
+        (alpha * (1.0 + (self.aura - 1.0) * (1.0 - t))).min(1.0)
+    }
+}
+
 /// The smallest segment count whose chord error stays under `tol` px at
 /// radius `r`, capped by `ceiling` — the sagitta of a quarter-arc chord is
 /// `r·(1 − cos(45°/S))`. The caller passes the theme's `corner.segments`
@@ -951,7 +1048,17 @@ pub enum DrawCmd {
     ImageUv { r: [f32; 4], uv: [[f32; 2]; 4], id: ImageId, tint: Color },
     Blur { r: [f32; 4], tint: Color },
     MaskQuad { p: [[f32; 2]; 4], uv: [[f32; 2]; 4], color: Color, additive: bool },
-    GlowRing { r: [f32; 4], corners: [Corner; 4], radius: f32, color: Color },
+    /// [`DrawList::glow_ring_with`] — `profile` is INTENT (a theme named
+    /// a shape for the light) and belongs here; the band count the
+    /// emitter cuts the reach into is tessellation and does not, by the
+    /// same rule that keeps `segments` out of [`DrawCmd::Ring`].
+    GlowRing {
+        r: [f32; 4],
+        corners: [Corner; 4],
+        radius: f32,
+        color: Color,
+        profile: GlowProfile,
+    },
     SoftBox { r: [f32; 4], radius: f32, color: Color },
     Shadow { r: [f32; 4], offset: [f32; 2], radius: f32, color: Color },
     Text {
@@ -1294,12 +1401,22 @@ impl fmt::Display for DrawCmd {
                 rgba(f, *color)?;
                 f.write_str(if *additive { " add" } else { " cover" })
             }
-            DrawCmd::GlowRing { r, corners: c, radius, color } => {
+            DrawCmd::GlowRing { r, corners: c, radius, color, profile } => {
                 f.write_str("glow_ring at")?;
                 nums(f, r, PX)?;
                 corners(f, c)?;
                 field(f, "radius", *radius, PX)?;
-                rgba(f, *color)
+                rgba(f, *color)?;
+                // The unshaped disk prints nothing, so every line this
+                // register has ever written for a glow still reads the
+                // same. A profile only appears once a theme has asked
+                // for one, which is also the only time it is news.
+                if profile.is_halo() {
+                    return Ok(());
+                }
+                field(f, "decay", profile.decay, FINE)?;
+                field(f, "aura", profile.aura, FINE)?;
+                field(f, "aura_reach", profile.aura_reach, FINE)
             }
             DrawCmd::SoftBox { r, radius, color } => {
                 f.write_str("soft_box at")?;
@@ -3312,11 +3429,60 @@ impl DrawList {
         color: Color,
         mask_uv: (f32, f32, f32, f32),
     ) {
+        self.glow_ring_with(r, c, segments, radius, color, mask_uv, GlowProfile::HALO);
+    }
+
+    /// [`DrawList::glow_ring`] with the light SHAPED — the one emitter,
+    /// asked for a profile instead of assuming the soft disk's own.
+    ///
+    /// The halo above is this call at [`GlowProfile::HALO`], and the
+    /// equality is exact rather than approximate: at one band, a decay of
+    /// 1 and no aura every number below reduces to the statement the
+    /// halo used to make, vertex for vertex. That is deliberate and it is
+    /// the reason there is no second emitter — a neon tube is not
+    /// another way of drawing light, it is the same soft disk with its
+    /// DISTANCE re-mapped and its innermost band lifted.
+    ///
+    /// THE RE-MAP. One quad ring lays the mask's profile linearly across
+    /// the whole reach: at half the radius the fragment samples the disk
+    /// at half its own radius. Cut the reach into bands and the sample
+    /// point at each BOUNDARY is ours to choose, so band `k` of `n` puts
+    /// its outer rim at the disk's `(k/n)^(1/decay)` instead of its
+    /// `k/n`. A decay above 1 therefore spends the disk's profile in the
+    /// first fraction of the reach and leaves the rest of it in the tail
+    /// — light that stops instead of fading, which is what a lit tube
+    /// does and a Gaussian blur cannot. Inside a band the mask is still
+    /// sampled continuously, so the picture is smooth however few bands
+    /// there are; the count only decides how closely the re-map is
+    /// followed.
+    ///
+    /// THE AURA is a per-vertex alpha and nothing else: the band
+    /// boundaries inside `aura_reach` carry `aura` times the caller's
+    /// alpha, ramped to one at the reach. Clipped at 1.0 whatever the
+    /// product, because a blend factor outside 0..1 is not a brighter
+    /// pixel — it is the undefined output the master's own note on
+    /// negative alpha warns about.
+    ///
+    /// Bands never overlap (each one's inner rim is the last one's
+    /// outer), so additive blending cannot double-brighten a seam —
+    /// [`DrawList::glow_shell`]'s invariant, relied on for the same
+    /// reason.
+    pub fn glow_ring_with(
+        &mut self,
+        r: Rect,
+        c: &[Corner; 4],
+        segments: u8,
+        radius: f32,
+        color: Color,
+        mask_uv: (f32, f32, f32, f32),
+        profile: GlowProfile,
+    ) {
         self.cmd(|| DrawCmd::GlowRing {
             r: [r.x, r.y, r.w, r.h],
             corners: *c,
             radius,
             color,
+            profile,
         });
         if !(radius > 0.0) || color.a <= 0.0 || r.w <= 0.0 || r.h <= 0.0 {
             return;
@@ -3326,22 +3492,6 @@ impl DrawList {
             self.glow_shell(r, c, segments, radius, color);
             return;
         }
-        let mut inner = std::mem::take(&mut self.scratch_a);
-        let mut outer = std::mem::take(&mut self.scratch_b);
-        ring_points(r, c, segments, &mut inner);
-        let grown = Rect::new(
-            r.x - radius,
-            r.y - radius,
-            r.w + 2.0 * radius,
-            r.h + 2.0 * radius,
-        );
-        let ck = [
-            c[0].inset(-radius),
-            c[1].inset(-radius),
-            c[2].inset(-radius),
-            c[3].inset(-radius),
-        ];
-        ring_points(grown, &ck, segments, &mut outer);
         // The strip: u pinned to the centre of the stretchable band, v
         // running from the disk's peak on the path to the sprite's zero
         // at the outer rim — the same profile the nine-slice edges
@@ -3350,16 +3500,39 @@ impl DrawList {
         // corner STYLE, which inset() preserves (glow_shell's invariant).
         let su = u0 + (u1 - u0) * (32.0 / 64.0);
         let vi = v0 + (v1 - v0) * (31.0 / 64.0);
-        let col = color.to_array();
-        let n = inner.len().min(outer.len());
-        for i in 0..n {
-            let j = (i + 1) % n;
-            self.push_quad4(
-                Some(ADD_ATLAS),
-                [inner[i], inner[j], outer[j], outer[i]],
-                [[su, vi], [su, vi], [su, v0], [su, v0]],
-                [col; 4],
-            );
+        let bands = profile.bands(radius);
+        let mut inner = std::mem::take(&mut self.scratch_a);
+        let mut outer = std::mem::take(&mut self.scratch_b);
+        ring_points(r, c, segments, &mut inner);
+        // The path itself, asked of the profile like every other
+        // boundary rather than written out here: a distance of nothing is
+        // a distance, and a second spelling of the peak is a second place
+        // for it to drift.
+        let (mut v_in, mut a_in) =
+            (profile.v_at(0.0, vi, v0), profile.alpha_at(0.0, color.a));
+        for k in 1..=bands {
+            let f = k as f32 / bands as f32;
+            let d = radius * f;
+            let grown = Rect::new(r.x - d, r.y - d, r.w + 2.0 * d, r.h + 2.0 * d);
+            let ck = [c[0].inset(-d), c[1].inset(-d), c[2].inset(-d), c[3].inset(-d)];
+            ring_points(grown, &ck, segments, &mut outer);
+            let v_out = profile.v_at(f, vi, v0);
+            let a_out = profile.alpha_at(f, color.a);
+            let ci = Color { a: a_in, ..color }.to_array();
+            let co = Color { a: a_out, ..color }.to_array();
+            let n = inner.len().min(outer.len());
+            for i in 0..n {
+                let j = (i + 1) % n;
+                self.push_quad4(
+                    Some(ADD_ATLAS),
+                    [inner[i], inner[j], outer[j], outer[i]],
+                    [[su, v_in], [su, v_in], [su, v_out], [su, v_out]],
+                    [ci, ci, co, co],
+                );
+            }
+            std::mem::swap(&mut inner, &mut outer);
+            v_in = v_out;
+            a_in = a_out;
         }
         self.scratch_a = inner;
         self.scratch_b = outer;
@@ -4207,6 +4380,230 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The emitter's OWN transcript, from before it could be asked for a
+    /// profile: one quad ring, the mask laid flat across the reach, one
+    /// colour on all four corners of every quad.
+    ///
+    /// Transcribed statement for statement rather than shared with the
+    /// emitter, which is the whole point — a no-move proof written
+    /// against the code it is proving has not moved proves nothing.
+    fn the_single_band_emitter(
+        dl: &mut DrawList,
+        r: Rect,
+        c: &[Corner; 4],
+        segments: u8,
+        radius: f32,
+        color: Color,
+        mask_uv: (f32, f32, f32, f32),
+    ) {
+        let (u0, v0, u1, v1) = mask_uv;
+        let mut inner = Vec::new();
+        let mut outer = Vec::new();
+        ring_points(r, c, segments, &mut inner);
+        let grown =
+            Rect::new(r.x - radius, r.y - radius, r.w + 2.0 * radius, r.h + 2.0 * radius);
+        let ck = [
+            c[0].inset(-radius),
+            c[1].inset(-radius),
+            c[2].inset(-radius),
+            c[3].inset(-radius),
+        ];
+        ring_points(grown, &ck, segments, &mut outer);
+        let su = u0 + (u1 - u0) * (32.0 / 64.0);
+        let vi = v0 + (v1 - v0) * (31.0 / 64.0);
+        let col = color.to_array();
+        let n = inner.len().min(outer.len());
+        for i in 0..n {
+            let j = (i + 1) % n;
+            dl.push_quad4(
+                Some(ADD_ATLAS),
+                [inner[i], inner[j], outer[j], outer[i]],
+                [[su, vi], [su, vi], [su, v0], [su, v0]],
+                [col; 4],
+            );
+        }
+    }
+
+    /// THE RENAME'S FOUNDATION: an emitter that can shape its light still
+    /// draws the unshaped halo bit for bit.
+    ///
+    /// The theme editor's old NEON became GLOW on 2026-08-18 and the
+    /// owner's condition on the rename was that the picture not move. It
+    /// cannot move at the token level if it does not move here, because
+    /// every glow in this toolkit — panel edge, focus ring — reaches the
+    /// screen through this one call. Compared over the corner styles
+    /// separately: the profile's arithmetic runs per band boundary, and a
+    /// square corner, a chamfer and an arc take different numbers of them.
+    #[test]
+    fn the_shaped_emitter_still_draws_the_unshaped_halo() {
+        let uv = FontSystem::mask_soft_uv();
+        let col = Color { r: 0.2, g: 0.8, b: 0.9, a: 0.34 };
+        for c in [
+            [Corner { style: CornerStyle::Square, size: 0.0 }; 4],
+            [Corner::chamfer(8.0); 4],
+            [Corner::round(9.0); 4],
+        ] {
+            for radius in [1.0f32, 8.0, 27.0] {
+                for r in [Rect::new(50.0, 60.0, 200.0, 100.0), Rect::new(0.0, 0.0, 24.0, 24.0)] {
+                    let mut was = DrawList::new();
+                    the_single_band_emitter(&mut was, r, &c, 6, radius, col, uv);
+                    let mut now = DrawList::new();
+                    now.glow_ring(r, &c, 6, radius, col, uv);
+                    assert!(!was.verts.is_empty(), "the transcript drew nothing to compare");
+                    let dump = |dl: &DrawList| {
+                        dl.verts.iter().map(|v| (v.pos, v.uv, v.color)).collect::<Vec<_>>()
+                    };
+                    assert_eq!(
+                        dump(&was),
+                        dump(&now),
+                        "the halo moved at radius {radius} on {c:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A profile whose knobs are all at rest is the halo, not a
+    /// subdivided imitation of it — the identity [`GlowProfile::HALO`]
+    /// claims, asked of a profile a THEME could write by naming `tube`
+    /// and then flattening every number of it.
+    #[test]
+    fn a_flattened_profile_is_the_halo_itself() {
+        let uv = FontSystem::mask_soft_uv();
+        let col = Color { r: 0.9, g: 0.2, b: 0.7, a: 0.5 };
+        let r = Rect::new(12.0, 20.0, 180.0, 90.0);
+        let c = [Corner::round(9.0); 4];
+        let mut halo = DrawList::new();
+        halo.glow_ring(r, &c, 6, 20.0, col, uv);
+        for flat in [
+            GlowProfile { decay: 1.0, aura: 1.0, aura_reach: 0.25 },
+            GlowProfile { decay: 1.0, aura: 2.0, aura_reach: 0.0 },
+        ] {
+            let mut dl = DrawList::new();
+            dl.glow_ring_with(r, &c, 6, 20.0, col, uv, flat);
+            let dump = |dl: &DrawList| {
+                dl.verts.iter().map(|v| (v.pos, v.uv, v.color)).collect::<Vec<_>>()
+            };
+            assert_eq!(dump(&halo), dump(&dl), "{flat:?} was not the halo");
+        }
+    }
+
+    /// THE TUBE'S LIGHT STOPS WHERE THE HALO'S IS STILL FADING.
+    ///
+    /// Read off the emitted geometry rather than off a formula, and as a
+    /// RELATION rather than against a number: for every distance the tube
+    /// puts a band boundary at, the mask is sampled CLOSER TO ITS ZERO
+    /// than the halo samples it at that same distance. The mask's own
+    /// profile falls monotonically from `vi` to `v0`, so a smaller v at
+    /// the same place is less light at that place, whatever the disk is
+    /// shaped like — which is what makes this a claim about the tube and
+    /// not about the sprite it borrows.
+    ///
+    /// Both are drawn at the same radius on purpose: a glow that merely
+    /// reached less far would be a smaller halo, and the owner asked for
+    /// light that falls off abruptly, not for a shorter one.
+    #[test]
+    fn the_tube_spends_its_light_sooner_than_the_halo() {
+        let uv = FontSystem::mask_soft_uv();
+        let (u0, v0, _u1, v1) = uv;
+        let vi = v0 + (v1 - v0) * (31.0 / 64.0);
+        let col = Color { r: 0.6, g: 0.2, b: 0.95, a: 0.4 };
+        let r = Rect::new(40.0, 40.0, 200.0, 120.0);
+        let c = [Corner { style: CornerStyle::Square, size: 0.0 }; 4];
+        let radius = 24.0;
+        let tube = GlowProfile { decay: 3.0, aura: 1.0, aura_reach: 0.0 };
+        let mut dl = DrawList::new();
+        dl.glow_ring_with(r, &c, 6, radius, col, uv, tube);
+        // The distance a vertex stands at, off the geometry: the glow is
+        // emitted strictly outside `r`, so the gap to the nearest edge IS
+        // the distance along the extrusion.
+        let dist = |p: [f32; 2]| {
+            let dx = (r.x - p[0]).max(p[0] - r.right()).max(0.0);
+            let dy = (r.y - p[1]).max(p[1] - r.bottom()).max(0.0);
+            dx.max(dy)
+        };
+        let mut seen_interior = false;
+        for v in &dl.verts {
+            let d = dist(v.pos);
+            let f = (d / radius).clamp(0.0, 1.0);
+            // The halo's own sample at this distance: the flat lay.
+            let halo_v = vi + (v0 - vi) * f;
+            let got = v.uv[1];
+            if f > 0.001 && f < 0.999 {
+                seen_interior = true;
+                assert!(
+                    got < halo_v - 1e-6,
+                    "at {:.0}% of the reach the tube sampled {got} where the halo \
+                     samples {halo_v}; the tube is not falling faster",
+                    f * 100.0
+                );
+            }
+            assert!(
+                got >= v0 - 1e-6 && got <= vi + 1e-6,
+                "the tube sampled {got}, outside the disk's own band {v0}..{vi}"
+            );
+        }
+        assert!(
+            seen_interior,
+            "every band landed on an end of the reach, so nothing was compared"
+        );
+        // The ends are still the ends: light at the glass, none at the rim.
+        let uv1: Vec<f32> = dl.verts.iter().map(|v| v.uv[1]).collect();
+        assert!(uv1.iter().any(|&v| (v - vi).abs() < 1e-6), "no band starts at the glass");
+        assert!(uv1.iter().any(|&v| (v - v0).abs() < 1e-6), "no band ends at the rim");
+        let _ = u0;
+    }
+
+    /// THE AURA IS BRIGHTER THAN THE LIGHT IT SITS IN, and it is bounded.
+    ///
+    /// A relation again: the alpha at the glass is above the alpha the
+    /// caller asked for, the alpha past the reach is exactly it, and
+    /// nothing anywhere leaves 0..1 — a blend factor outside that range
+    /// is the undefined output the master warns about at
+    /// `glow.panel_edge.color`.
+    #[test]
+    fn the_aura_lifts_the_light_at_the_glass_and_lets_go_at_its_reach() {
+        let uv = FontSystem::mask_soft_uv();
+        let col = Color { r: 0.6, g: 0.2, b: 0.95, a: 0.4 };
+        let r = Rect::new(40.0, 40.0, 200.0, 120.0);
+        let c = [Corner { style: CornerStyle::Square, size: 0.0 }; 4];
+        let radius = 24.0;
+        let p = GlowProfile { decay: 3.0, aura: 2.0, aura_reach: 0.25 };
+        let mut dl = DrawList::new();
+        dl.glow_ring_with(r, &c, 6, radius, col, uv, p);
+        let dist = |q: [f32; 2]| {
+            let dx = (r.x - q[0]).max(q[0] - r.right()).max(0.0);
+            let dy = (r.y - q[1]).max(q[1] - r.bottom()).max(0.0);
+            dx.max(dy)
+        };
+        let mut at_glass = None;
+        let mut past_reach = 0;
+        for v in &dl.verts {
+            let a = v.color[3];
+            assert!((0.0..=1.0).contains(&a), "alpha {a} left 0..1");
+            let f = dist(v.pos) / radius;
+            if f < 1e-4 {
+                at_glass = Some(a);
+            }
+            if f > p.aura_reach + 1e-4 {
+                past_reach += 1;
+                assert!(
+                    (a - col.a).abs() < 1e-6,
+                    "the aura was still lifting at {:.0}% of the reach: {a} vs {}",
+                    f * 100.0,
+                    col.a
+                );
+            }
+        }
+        let at_glass = at_glass.expect("no band started at the glass");
+        assert!(
+            at_glass > col.a,
+            "the aura at the glass is {at_glass}, no stronger than the {} asked for",
+            col.a
+        );
+        assert!(past_reach > 0, "no band landed past the aura's reach");
     }
 
     /// The sprite costs r1 §4.4 stands on: the glow is 8 quads = 48 verts

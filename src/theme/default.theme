@@ -1042,6 +1042,12 @@ follow_density = false
 # stays readable, halo (a plateau core then a Gaussian shoulder) for icons and
 # node dots so the sprite core stays saturated, linear for separators and
 # leader lines.
+#
+# `tube` joins that list on panel_edge alone (2026-08-18). It is the only
+# falloff word with a reader, and the only one that brings keys of its own: a
+# lit glass tube is not a spread of the same light but a different spend of it
+# — a core driven past what the display can show, a saturated band against the
+# glass, and light that stops instead of fading. See panel_edge.falloff below.
 # =========================================================================
 [glow]
 
@@ -1055,18 +1061,77 @@ panel_edge.color = element
 panel_edge.radius = 0u
                     # how far the glow reaches past the edge; images 1-6;
                     # u, 0u .. 4u; 0u is the `none` sentinel — draw nothing
-panel_edge.falloff = gauss
-                    # the wide soft halo of images 7 and 10; images 1-6, 7-10;
-                    # one of linear | quad | gauss | halo
+panel_edge.falloff = gauss # enum: linear | quad | gauss | halo | tube
+                    # how the light is spent across the radius; images 1-6,
+                    # 7-10. `gauss` is the wide soft halo of images 7 and 10
+                    # and it is what this key has always meant.
+                    # `tube` is the LIT GLASS TUBE of a neon sign: the same
+                    # soft disk with its distance re-mapped by tube_decay so
+                    # the light stops instead of fading, its core burned by
+                    # `boost` and its colour carried by tube_aura. The three
+                    # `tube_*` keys below are read only under this word.
+                    # THE `enum:` DECLARATION IS LOAD-BEARING. Without it a
+                    # token's vocabulary grows from use, `gauss` is the only
+                    # word in it, and the one word a theme could never
+                    # deliver is the one this key now exists for — the same
+                    # trap `[elev.*] edge.mode = solid` records against
+                    # `gradient`. The other fourteen glow classes still grow
+                    # theirs from use: they have no reader, and a list is a
+                    # promise about numbering that only a reader can keep.
 panel_edge.mode = auto
                     # rendering technique; -; one of off | shell | sprite |
                     # text4 | auto; auto picks shell at radius <= 0.85u
 panel_edge.alpha = 0.0
                     # glow opacity — the ONLY 0..1 magnitude; images 1-6;
                     # frac, 0.0 .. 1.0; state channel is glow_alpha
-panel_edge.boost = 1.0
-                    # HDR overdrive; -; f, >= 1.0; survives only in the R16F
-                    # swapchain with no LUT loaded
+panel_edge.boost = 2.6
+                    # how hard the edge's light is DRIVEN, as a multiple of
+                    # what the display can show; -; f, >= 1.0. In the R16F
+                    # swapchain with no LUT loaded the overdrive survives as
+                    # overdrive. Everywhere else the display CLIPS it, and
+                    # the clip is the picture: a channel driven past 1 shows
+                    # as 1, so a saturated colour loses its strongest
+                    # channel first and its weakest last, and the core of a
+                    # tube goes pale and then white while the light around
+                    # it keeps the hue. That is why a photograph of a neon
+                    # sign has a white core whatever colour the sign is.
+                    # Read ONLY under falloff = tube: a `gauss` halo is
+                    # spill, and spill is not driven — which is also what
+                    # keeps every theme written before this key had a reader
+                    # drawing exactly the picture it drew.
+                    # 2.6 clips the two strong channels of a mid-lightness
+                    # saturated edge and leaves the weakest one short: a
+                    # pale core with the hue still in it, not a white line.
+                    # 1.0 is no drive and a core of the tube's own colour.
+panel_edge.tube_decay = 3.0
+                    # how much faster than the gauss halo the light falls,
+                    # as the exponent the distance is raised to; -; f,
+                    # >= 1.0; read only under falloff = tube. 1.0 IS the
+                    # gauss halo. 3.0 cubes it: what the halo shows at a
+                    # third of the radius the tube shows at a twenty-seventh
+                    # of it — near the glass everything, past it nothing,
+                    # which is the difference between a lit tube and a
+                    # blurred copy of a line.
+panel_edge.tube_aura = 2.0
+                    # how much stronger than `alpha` the colour is laid
+                    # immediately outside the tube; -; f, >= 1.0; read only
+                    # under falloff = tube. The core has given its colour up
+                    # to `boost`, so this band is where the sign's identity
+                    # lives and it has to out-shout the edge itself or the
+                    # tube reads as a white line with a smudge. 2.0 doubles
+                    # it; 1.0 is no aura and `alpha` all the way out. The
+                    # product is clipped at 1.0 whatever it comes to,
+                    # because a blend factor outside 0..1 is not a brighter
+                    # pixel — it is undefined output (5.0, 5.13).
+panel_edge.tube_aura_reach = 0.25
+                    # how far that stronger colour reaches, as a fraction of
+                    # `radius`; -; frac, 0.0 .. 1.0; read only under
+                    # falloff = tube. It ramps from tube_aura at the glass
+                    # to 1.0 here and stays there. 0.25 is derived from
+                    # tube_decay: a decay of 3 has spent nearly all the
+                    # light inside the first quarter of the radius, so the
+                    # aura colours the light that IS there instead of
+                    # lifting a tail that is not. 0.0 is no aura at all.
 
 # ---- focus_ring — the keyboard focus ring -------------------------------
 focus_ring.enabled = false
