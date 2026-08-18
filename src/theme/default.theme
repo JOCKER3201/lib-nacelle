@@ -5645,7 +5645,7 @@ launcher.active_border = @accent.warm    # that tile's ring · image 8 · col ·
 
 # ---------------------------------------------------------------- menu / control marks
 menu.fill = @surface.raised         # the opaque bed of a drop-down or window menu · images 1,7 · col · @surface.raised; [menu] carries geometry only, so a menu could not take a material distinct from the panel behind it
-menu.border = @border.default       # the menu's chamfered ring · images 1,7 · col · @border.default; [menu].border is a stroke WIDTH
+menu.border = @elev.panel.edge.color # the menu's chamfered ring · images 1,7 · col · reads the SAME edge colour the settings window frame wears, so BASIC's border-colour control (which writes elev.panel.edge.color) moves the menu ring with the rest; [menu].border is a stroke WIDTH
 menu.hint = @text.muted             # a row's shortcut hint ink · - · col · @text.muted; secondary to the row label by design
 checkbox.tick = @accent.primary     # the filled mark inside a checked box · - · col · @accent.primary; [checkbox] sets the mark's shape and inset and never its colour
 
