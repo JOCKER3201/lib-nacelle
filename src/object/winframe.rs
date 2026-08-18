@@ -42,7 +42,7 @@ use crate::theme::parse::State;
 use crate::theme::{self, Color, TokenId};
 use crate::ui;
 use crate::view::paint;
-use crate::view::surface::{CtxSurface, Surface};
+use crate::view::surface::CtxSurface;
 use crate::{Ctx, Rect};
 use std::sync::OnceLock;
 
@@ -672,16 +672,6 @@ impl Frame {
         // A frame is nobody's panel content, so the role's own arithmetic
         // is all there is: the container query multiplies by one.
         let role = ui::bound_role(&ROLE, "winframe.title.role");
-        // The case transform belongs to whichever role the binding lands
-        // on and `Role` does not carry it: the key hangs off the role's
-        // NAME. It is compared as a WORD because every role declares its
-        // own enum list, so one index means a different transform in each.
-        // The px floor used to be read here too and is `Role::px`'s now.
-        let case = {
-            let mut sf = CtxSurface::new(ctx);
-            let word = sf.word("winframe.title.role");
-            sf.word(&format!("type.{word}.case"))
-        };
         let px = role.px(ctx, 1.0);
         let spacing = role.tracking_px(px);
         let leading = role.leading();
@@ -694,12 +684,12 @@ impl Frame {
         let room_pad = t.px(tok(&ROOM_PAD, "winframe.title.room_pad")).max(0.0);
         let ink = col(t.color(tok(&TEXT, "component.titlebar.text")));
         let ink = ink.alpha(ink.a * dim);
-        // `smallcaps` is approximated as upper until FontSystem can set it.
-        let shown = match case.as_str() {
-            "none" => title.to_string(),
-            "lower" => title.to_lowercase(),
-            _ => title.to_uppercase(),
-        };
+        // The case belongs to whichever role the binding lands on, and
+        // `Role` carries it now: the key used to be re-spelled through a
+        // `Surface` beside a `Role` this function already held, and the
+        // `match` under it was one of five copies that all ended on
+        // capitals — including for a word no theme ever wrote.
+        let shown = role.cased(title).into_owned();
         let y = outer.y + m.border + (m.title_h - px * leading) / 2.0;
         let fig = role.figures(ctx.fonts, face, px);
         let align = tok(&ALIGN, "winframe.title.align");

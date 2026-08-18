@@ -17,6 +17,7 @@ use crate::theme::{self, Color, TokenId};
 use crate::view::paint;
 use crate::view::surface::{CtxSurface, Surface};
 use crate::{Ctx, Rect};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -71,9 +72,6 @@ pub(crate) fn theme_word(token: TokenId) -> String {
 /// is an allocation per control per frame; borrowing inside the map's own
 /// borrow costs nothing and cannot outlive it.
 pub(crate) fn with_theme_word<R>(token: TokenId, f: impl FnOnce(&str) -> R) -> R {
-    thread_local! {
-        static WORDS: RefCell<HashMap<(u32, usize, u16), String>> = RefCell::new(HashMap::new());
-    }
     let i = theme::resolved().enum_of(token);
     let epoch = theme::epoch();
     WORDS.with(|w| {
@@ -86,17 +84,28 @@ pub(crate) fn with_theme_word<R>(token: TokenId, f: impl FnOnce(&str) -> R) -> R
 }
 
 fn word_of(token: TokenId) -> String {
-    thread_local! {
-        static WORDS: RefCell<HashMap<(u32, usize, u16), String>> = RefCell::new(HashMap::new());
-    }
-    let i = theme::resolved().enum_of(token);
+    with_theme_word(token, str::to_string)
+}
+
+// The one word memo both readers above share. It was written out twice —
+// two maps holding the same triples, filled from the same engine call —
+// and a test that stated a word for one of them would have been telling
+// half the file.
+thread_local! {
+    static WORDS: RefCell<HashMap<(u32, usize, u16), String>> = RefCell::new(HashMap::new());
+}
+
+/// States an enum token's word for the CALLING THREAD only — the seam a
+/// test drives a theme's `case` through, and the twin of
+/// [`seed_theme_text`]. Same argument: the memo is a thread_local, one
+/// `#[test]` is one thread, and publishing a theme would decide what
+/// every test running beside it draws from.
+#[cfg(test)]
+pub(crate) fn seed_theme_word(name: &str, word: &str) {
+    let Some(id) = theme::id(name) else { return };
+    let i = theme::resolved().enum_of(id);
     let epoch = theme::epoch();
-    WORDS.with(|w| {
-        w.borrow_mut()
-            .entry((epoch, token.index(), i))
-            .or_insert_with(|| theme::enum_word_of(token).unwrap_or_default())
-            .clone()
-    })
+    WORDS.with(|w| w.borrow_mut().insert((epoch, id.index(), i), word.to_string()));
 }
 
 // ---------------------------------------------------------------- severity
@@ -178,6 +187,100 @@ pub fn sev_text(s: Sev) -> Color {
     theme::resolved().color(sev_tok(s))
 }
 
+// --------------------------------------------------------------------- case
+//
+// One enum and one applier, for the whole toolkit and for every widget on
+// the far side of the ABI. Before this there were five copies of
+//
+//     match word { "none" => …, "lower" => …, _ => s.to_uppercase() }
+//
+// — the panel band, the window title, the unit suffix and three AI widgets
+// — and every one of them ended on that same `_`. A theme that misspelt
+// `uper` therefore got SHOUTING, with nothing said about why, which is the
+// silent degradation this whole family of keys exists to make visible.
+
+/// The transform a `*.case` token names. The master declares three such
+/// keys and this enum is what every one of them means:
+///
+/// - `type.<role>.case`, read by [`Role::case`] — twenty-five of them,
+///   one per role.
+/// - `num.unit.case`, read where a unit run is dressed — the symbol
+///   beside a reading.
+/// - `type.suffix.case`, which has NO reader yet. It belongs to the
+///   `[type.suffix]` block — a status word in brackets — and none of
+///   that block is read: not `brackets`, not `paren_alpha`, not `gap`,
+///   not `face`. Wiring the case alone would honour a quarter of a
+///   sentence, so it waits for the object that draws the whole of it.
+///
+/// Resolved from the WORD and never from the enum index. Each key
+/// declares its own `enum:` list, so an index memoised across keys names
+/// a different transform in each — the trap `theme_word` was written for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Case {
+    /// The string as its author wrote it. Also what an unknown word
+    /// answers: a transform nobody named is no transform.
+    #[default]
+    None,
+    Upper,
+    Lower,
+    /// Approximated as [`Case::Upper`] until the font layer can set true
+    /// small caps — fontdue exposes no OpenType features, and the master
+    /// says so at `type.smallcaps_ratio`. The approximation lives HERE,
+    /// in one function, so the day the font layer grows it there is one
+    /// line to change rather than five.
+    SmallCaps,
+}
+
+impl Case {
+    /// The case a word names.
+    ///
+    /// An EMPTY word is a token that is not there at all — a missing key,
+    /// or a role binding that resolved to nothing — and the reader that
+    /// could not find it has already said so ([`bound_role`], [`role`]).
+    /// Saying it twice under a second name would send a reader looking
+    /// for a case key that is not the defect. A NON-EMPTY word the list
+    /// does not hold is the typo this warning is for.
+    pub fn from_word(word: &str) -> Case {
+        match word {
+            "none" | "" => Case::None,
+            "upper" => Case::Upper,
+            "lower" => Case::Lower,
+            "smallcaps" => Case::SmallCaps,
+            other => {
+                warn_once(
+                    &format!("case:{other}"),
+                    &format!(
+                        "\"{other}\" names no case transform — the list is \
+                         none | upper | lower | smallcaps; the text is drawn as written"
+                    ),
+                );
+                Case::None
+            }
+        }
+    }
+}
+
+/// The one place a case transform is applied.
+///
+/// Borrowed for [`Case::None`], which is what most roles ask for and what
+/// every unthemed and every mis-typed one now answers: the master's own
+/// note on `[type]` objects to a caller that "folds case on its own side
+/// [and] allocates a String per label per frame", and the borrow is how
+/// that objection is answered until the transform can move inside
+/// `FontSystem::text`.
+pub fn recase(case: Case, s: &str) -> Cow<'_, str> {
+    match case {
+        Case::None => Cow::Borrowed(s),
+        Case::Lower => Cow::Owned(s.to_lowercase()),
+        Case::Upper | Case::SmallCaps => Cow::Owned(s.to_uppercase()),
+    }
+}
+
+/// The case an enum token currently resolves to.
+pub(crate) fn case_of(token: TokenId) -> Case {
+    with_theme_word(token, Case::from_word)
+}
+
 // ---------------------------------------------------------------- type roles
 //
 // A role is named by a STRING — scripts name their own (`display.clock`) and
@@ -202,6 +305,16 @@ pub struct Role {
     min_px: TokenId,
     max_px: TokenId,
     tracking: TokenId,
+    /// `type.<role>.case` — WHETHER THIS ROLE SHOUTS.
+    ///
+    /// It hung off the role's NAME and not off the role until now, so the
+    /// two objects that honoured it — the panel band and the window title
+    /// — each re-spelled `type.{word}.case` through a `Surface` beside a
+    /// `Role` they already had, and everything else in the interface
+    /// settled the question by writing capitals into the source. Twelve
+    /// of the master's twenty-five roles ask for `upper` or `smallcaps`;
+    /// with the key on the role, asking is all a theme has to do.
+    case: TokenId,
     leading: TokenId,
     tabular: TokenId,
     fg: TokenId,
@@ -221,6 +334,7 @@ const NO_ROLE: Role = Role {
     min_px: TokenId::MISSING,
     max_px: TokenId::MISSING,
     tracking: TokenId::MISSING,
+    case: TokenId::MISSING,
     leading: TokenId::MISSING,
     tabular: TokenId::MISSING,
     fg: TokenId::MISSING,
@@ -247,6 +361,7 @@ pub fn role(name: &str) -> Role {
             min_px: theme::id(&format!("type.{name}.min_px")).unwrap_or(TokenId::MISSING),
             max_px: theme::id(&format!("type.{name}.max_px")).unwrap_or(TokenId::MISSING),
             tracking: theme::id(&format!("type.{name}.tracking")).unwrap_or(TokenId::MISSING),
+            case: theme::id(&format!("type.{name}.case")).unwrap_or(TokenId::MISSING),
             leading: theme::id(&format!("type.{name}.leading")).unwrap_or(TokenId::MISSING),
             tabular: theme::id(&format!("type.{name}.tabular")).unwrap_or(TokenId::MISSING),
             fg: theme::id(&format!("type.{name}.fg")).unwrap_or(TokenId::MISSING),
@@ -330,6 +445,26 @@ impl Role {
     /// are em — a fraction of the run's own size.
     pub fn tracking_px(&self, px: f32) -> f32 {
         px * theme::resolved().px(self.tracking)
+    }
+
+    /// The case transform this role asks for.
+    ///
+    /// A role the master does not declare asks for nothing, which is
+    /// [`Case::None`] and not capitals: shouting at a caller whose role
+    /// is missing would be this file choosing a look, and the look is
+    /// exactly what it may never choose.
+    pub fn case(&self) -> Case {
+        if self.absent() {
+            return Case::None;
+        }
+        case_of(self.case)
+    }
+
+    /// This role's own string, in the case the theme set it in — the whole
+    /// point of carrying [`Role::case`], and the call every object with a
+    /// label should be making instead of writing capitals in its source.
+    pub fn cased<'a>(&self, s: &'a str) -> Cow<'a, str> {
+        recase(self.case(), s)
     }
 
     /// Line height as a multiple of the resolved px. A role whose master
@@ -423,31 +558,91 @@ impl Role {
 /// is an allocation per label per frame behind a library whose stated rule
 /// is zero per-draw allocation. Cloning the handle is a refcount bump.
 fn tabular_set() -> Rc<str> {
-    thread_local! {
-        static SET: RefCell<Option<(u32, Rc<str>)>> = const { RefCell::new(None) };
+    // A master that declares no set has said nothing about which
+    // characters get the box, and inventing "0123456789" here would put a
+    // look in this file — the one thing it may never hold. An empty set
+    // answers `Figures::NONE`, so the defect shows.
+    let v = theme_text_named("num.tabular_set");
+    if v.is_empty() {
+        warn_once(
+            "num.tabular_set",
+            "num.tabular_set is empty or absent — no role sets tabular figures",
+        );
     }
+    v
+}
+
+/// `type.ellipsis` — the string a trimmed run ends on.
+///
+/// Every trimming function in this library used to append `"\u{2026}"`
+/// out of its own source: four of them here, two more in the widgets, all
+/// six ignoring a key the master has declared since it was written and
+/// whose comment names those very call sites ("a console theme may prefer
+/// `...` or `>`"). The token is the answer for all of them now, and this
+/// is where they get it.
+///
+/// An absent or empty key trims with NO marker rather than with a
+/// borrowed one — the same ruling `tabular_set` makes, and the same
+/// reason: the character a cut ends on is typography, so a literal here
+/// would be a look decided in Rust.
+pub fn ellipsis() -> Rc<str> {
+    let v = theme_text_named("type.ellipsis");
+    if v.is_empty() {
+        warn_once(
+            "type.ellipsis",
+            "type.ellipsis is empty or absent — trimmed text ends on nothing",
+        );
+    }
+    v
+}
+
+/// A TEXT token, memoised per theme epoch.
+///
+/// Text tokens live in the cold-path diagnostics and are found there by a
+/// linear scan of every text token the theme declares, so this must be
+/// read once per theme and never per draw. The WARNING for an unstated
+/// key is each reader's own, because the sentence that helps is the one
+/// that names what will not be drawn.
+///
+/// An `Rc<str>` rather than a `String` because the answer is handed out on
+/// a DRAW path — one text call per label per frame — and a `String` here
+/// is an allocation per label per frame behind a library whose stated rule
+/// is zero per-draw allocation. Cloning the handle is a refcount bump.
+///
+/// Keyed by name with the epoch stored BESIDE the value rather than
+/// inside the key: a lookup then borrows the caller's `&str` instead of
+/// building a `String` to ask a question whose answer is usually already
+/// there.
+pub(crate) fn theme_text_named(name: &str) -> Rc<str> {
     let epoch = theme::epoch();
-    SET.with(|s| {
-        let mut s = s.borrow_mut();
-        if let Some((e, v)) = s.as_ref() {
+    TEXTS.with(|c| {
+        if let Some((e, v)) = c.borrow().get(name) {
             if *e == epoch {
                 return v.clone();
             }
         }
-        // A master that declares no set has said nothing about which
-        // characters get the box, and inventing "0123456789" here would
-        // put a look in this file — the one thing it may never hold.
-        // An empty set answers `Figures::NONE`, so the defect shows.
-        let v: Rc<str> = theme::diagnostics().text("num.tabular_set").unwrap_or_default().into();
-        if v.is_empty() {
-            warn_once(
-                "num.tabular_set",
-                "num.tabular_set is empty or absent — no role sets tabular figures",
-            );
-        }
-        *s = Some((epoch, v.clone()));
+        let v: Rc<str> = theme::diagnostics().text(name).unwrap_or_default().into();
+        c.borrow_mut().insert(name.to_string(), (epoch, v.clone()));
         v
     })
+}
+
+thread_local! {
+    static TEXTS: RefCell<HashMap<String, (u32, Rc<str>)>> = RefCell::new(HashMap::new());
+}
+
+/// States a text token for the CALLING THREAD only — the seam the trim
+/// tests drive `type.ellipsis` through.
+///
+/// The memo is a thread_local and one `#[test]` is one thread, so a value
+/// seeded here reaches that test and no other. The alternative — publishing
+/// a theme — would decide what every test running beside it draws from,
+/// which is the reason `theme::bake_over_master` exists and does not
+/// publish either.
+#[cfg(test)]
+pub(crate) fn seed_theme_text(name: &str, v: &str) {
+    let epoch = theme::epoch();
+    TEXTS.with(|c| c.borrow_mut().insert(name.to_string(), (epoch, v.into())));
 }
 
 /// The figure box for a run at `px` in `font`, or [`Figures::NONE`] when
@@ -2251,6 +2446,55 @@ mod tests {
     use crate::font::FontSystem;
     use crate::pointer::Pointer;
 
+    // ------------------------------------------------------------- case
+
+    #[test]
+    fn a_word_the_list_does_not_hold_transforms_nothing() {
+        assert_eq!(Case::from_word("none"), Case::None);
+        assert_eq!(Case::from_word("upper"), Case::Upper);
+        assert_eq!(Case::from_word("lower"), Case::Lower);
+        assert_eq!(Case::from_word("smallcaps"), Case::SmallCaps);
+        // The finding this replaced: five copies of the transform, all
+        // of them ending on `_ => to_uppercase()`, so a theme with
+        // `uper` — or `Upper`, or a word from a future master — got
+        // capitals and no diagnostic. A transform nobody named is no
+        // transform.
+        assert_eq!(Case::from_word("uper"), Case::None);
+        assert_eq!(Case::from_word("Upper"), Case::None);
+        assert_eq!(recase(Case::from_word("uper"), "Save"), "Save");
+        // An EMPTY word is a missing token, which the reader that could
+        // not find it has already reported; it is not a typo in a case
+        // key and must not be reported as one.
+        assert_eq!(Case::from_word(""), Case::None);
+    }
+
+    #[test]
+    fn the_applier_borrows_when_it_has_nothing_to_do() {
+        // `Case::None` is what most roles ask for and what every typo now
+        // answers, so it is the path the master objects to allocating on:
+        // "a caller that folds case on its own side allocates a String
+        // per label per frame".
+        assert!(matches!(recase(Case::None, "Save"), Cow::Borrowed("Save")));
+        assert_eq!(recase(Case::Upper, "Save"), "SAVE");
+        assert_eq!(recase(Case::Lower, "Save"), "save");
+        // Smallcaps is drawn as capitals until the font layer can set
+        // true small caps — stated once, here, instead of in five files.
+        assert_eq!(recase(Case::SmallCaps, "Save"), "SAVE");
+    }
+
+    #[test]
+    fn a_role_carries_the_case_the_master_gives_it() {
+        // The master: `type.button.case = upper`, `type.body.case = none`.
+        assert_eq!(role("button").case(), Case::Upper);
+        assert_eq!(role("body").case(), Case::None);
+        assert_eq!(role("title.panel").case(), Case::SmallCaps);
+        assert_eq!(role("button").cased("Save"), "SAVE");
+        assert_eq!(role("body").cased("Save"), "Save");
+        // A role the master does not declare asks for nothing: shouting
+        // at an undesigned run would be this file choosing a look.
+        assert_eq!(role("no.such.role").case(), Case::None);
+    }
+
     /// A frame's worth of context, at the reference viewport and with no
     /// scaling of its own, so a measured px is the theme's alone.
     fn ctx<'a>(dl: &'a mut DrawList, fonts: &'a mut FontSystem) -> Ctx<'a> {
@@ -2360,6 +2604,11 @@ mod tests {
             assert_eq!(track, there.track, "{binding}");
             assert_eq!(leading, there.leading, "{binding}");
             assert_eq!(color.a, there.color.a, "{binding}");
+            // The CASE too, now that both sides carry it: two answers to
+            // "does this label shout" is exactly the drift the rest of
+            // this loop exists to catch.
+            assert_eq!(here.case(), there.case, "{binding}");
+            assert_eq!(here.cased("Save"), there.cased("Save"), "{binding}");
         }
 
         // And the hole is the same hole on both sides. Measured against

@@ -134,11 +134,27 @@ pub fn dress(ctx: &mut Ctx, r: Rect, st: ButtonState) -> StateStyle {
     style
 }
 
-/// Draws an opaque parallelogram button with a centered label.
-/// Nothing behind the button shows through it.
-pub fn draw(ctx: &mut Ctx, r: Rect, label: &str, st: ButtonState) {
+/// The type ladder a cap is set in, resolved once.
+///
+/// One struct because the ladder has to be resolved in TWO places that
+/// must not be allowed to disagree — [`draw`], which puts the run on
+/// screen, and [`cap_width`], which tells a caller how wide that run
+/// will be. Every member below was read inline in `draw` before there
+/// was a second reader, and every member of it is a thing the answer
+/// depends on: measure a cap in a different face, a different size, a
+/// different tracking, a different figure box or a different CASE than
+/// the one drawn and the plate is the wrong width.
+struct Ladder {
+    font: u8,
+    px: f32,
+    track: f32,
+    leading: f32,
+    fig: crate::font::Figures,
+    case: ui::Case,
+}
+
+fn ladder(ctx: &mut Ctx) -> Ladder {
     static ROLE: OnceLock<TokenId> = OnceLock::new();
-    let style = dress(ctx, r, st);
     // The cap is set in the role `button.role` NAMES, not in the role that
     // happens to share the object's name: repointing the binding moves the
     // label's whole ladder at once, which is the only reason the binding
@@ -152,29 +168,104 @@ pub fn draw(ctx: &mut Ctx, r: Rect, label: &str, st: ButtonState) {
     // No `ui_font_scale`: the viewport carries the user's scale into u,
     // and the role's size is written in u — applying it here too squares it.
     let px = role.px(ctx, 1.0);
-    let leading = role.leading();
     // The FACE is the role's too. `type.<role>.face` names one of the
     // master's eight slots and the master sends a cap to `ui_medium`;
     // naming FONT_UI here answered `ui` whatever the token said, so the
     // ladder the theme writes ended at this line — the size came down it
     // and the family did not.
     let font = role.font();
-    let track = role.tracking_px(px);
-    // MEASURED WITH WHAT IT DRAWS: `text_center_fig` measures the run to
-    // place it, so the box goes in with the face and the px rather than
-    // beside them. A role that asks for no figures answers `Figures::NONE`
-    // and this is the proportional run it has always been.
-    let fig = role.figures(ctx.fonts, font, px);
-    ctx.dl.text_center_fig(
-        ctx.fonts,
+    Ladder {
         font,
         px,
+        track: role.tracking_px(px),
+        leading: role.leading(),
+        // MEASURED WITH WHAT IT DRAWS: `text_center_fig` measures the run
+        // to place it, so the box goes in with the face and the px rather
+        // than beside them. A role that asks for no figures answers
+        // `Figures::NONE` and this is the proportional run it has always
+        // been.
+        fig: role.figures(ctx.fonts, font, px),
+        // WHETHER THIS CAP SHOUTS is the role's to say, like its size, its
+        // face and its tracking. It was the one member of that ladder the
+        // button could not read, so every caller in the program settled the
+        // question in its own source — `"SAVE"`, `"ADD WIDGET"`, two hundred
+        // and fifty-odd literals — and a theme setting `type.button.case`
+        // moved nothing at all. Asking here does not change a single one of
+        // those strings under the shipped master, which says `upper`; it
+        // makes a master that says `none` mean something.
+        case: role.case(),
+    }
+}
+
+/// The run a button DRAWS for `label` — the label under the case
+/// transform `button.role`'s role asks for.
+///
+/// Public because the case transform CUT A SEAM the moment it moved
+/// inside [`draw`]: anything that reserves room for a cap, or writes one
+/// beside a plate this file drew, was measuring and drawing a string the
+/// button no longer puts on screen. A caller that needs the width wants
+/// [`cap_width`] or [`plate_w`]; this is for the caller that needs the
+/// TEXT — the disabled inscription a host draws in the ladder's own ink
+/// rather than through [`draw`].
+///
+/// Borrowed under `case = none`, which is [`ui::recase`]'s own bargain:
+/// most roles ask for no transform and a label that is not transformed
+/// must not cost an allocation per frame to say so.
+pub fn cap_of(label: &str) -> std::borrow::Cow<'_, str> {
+    static ROLE: OnceLock<TokenId> = OnceLock::new();
+    ui::bound_role(&ROLE, "button.role").cased(label)
+}
+
+/// How wide the cap of `label` is DRAWN.
+///
+/// Measured on exactly the run [`draw`] puts on screen, in exactly the
+/// face, size, tracking and figure box it uses — which is the whole
+/// point of the function existing. Before it did, the one place in the
+/// program that sized a button to its label measured the label as its
+/// author spelled it, with `FontSystem::measure` and no figure box, and
+/// then handed the same string to `draw` to be recased and boxed. Both
+/// halves of that were free while the master said `upper` and every
+/// literal was already in capitals; a master saying `lower`, or one
+/// literal written in mixed case, made a plate that no longer fits what
+/// is on it. A width is a promise about a run, so the run has to be the
+/// one that is drawn.
+pub fn cap_width(ctx: &mut Ctx, label: &str) -> f32 {
+    let l = ladder(ctx);
+    ctx.fonts.measure_fig(l.font, l.px, &ui::recase(l.case, label), l.track, &l.fig)
+}
+
+/// The plate `label` needs: its [`cap_width`] with `button.pad_x` on
+/// each side, never narrower than `button.min_w`.
+///
+/// The padding and the floor are the BUTTON's own tokens, so a bar that
+/// sizes its plates asks the object how big it is rather than reading
+/// two of the object's keys itself and hoping it applied them the same
+/// way. No length in here belongs to the caller.
+pub fn plate_w(ctx: &mut Ctx, label: &str) -> f32 {
+    static PAD_X: OnceLock<TokenId> = OnceLock::new();
+    static MIN_W: OnceLock<TokenId> = OnceLock::new();
+    let t = theme::resolved();
+    let pad = t.px(tok(&PAD_X, "button.pad_x"));
+    let min_w = t.px(tok(&MIN_W, "button.min_w"));
+    (cap_width(ctx, label) + 2.0 * pad).max(min_w)
+}
+
+/// Draws an opaque parallelogram button with a centered label.
+/// Nothing behind the button shows through it.
+pub fn draw(ctx: &mut Ctx, r: Rect, label: &str, st: ButtonState) {
+    let style = dress(ctx, r, st);
+    let l = ladder(ctx);
+    let cap = ui::recase(l.case, label);
+    ctx.dl.text_center_fig(
+        ctx.fonts,
+        l.font,
+        l.px,
         r.cx(),
-        r.y + (r.h - px * leading) / 2.0,
-        label,
+        r.y + (r.h - l.px * l.leading) / 2.0,
+        &cap,
         col(style.text),
-        track,
-        &fig,
+        l.track,
+        &l.fig,
     );
 }
 
@@ -625,5 +716,145 @@ mod tests {
             width(&mut fonts, &eights, EIGHTS),
             "a boxed cap measured 1111 and 8888 at different widths"
         );
+    }
+
+    // ------------------------------------------------------------ case
+    //
+    // WHETHER A BUTTON SHOUTS is the theme's to say. Twelve of the
+    // master's twenty-five roles ask for `upper` or `smallcaps` and no
+    // control outside the two title bands honoured any of them, so the
+    // interface answered the question in its own source instead.
+
+    /// The one text run a cap made, as the register recorded it.
+    fn cap_text(label: &str) -> String {
+        let mut fonts = FontSystem::new();
+        let mut dl = DrawList::recording();
+        draw(&mut ctx(&mut dl, &mut fonts), BOX, label, ButtonState::default());
+        dl.cmds()
+            .iter()
+            .find_map(|c| match c {
+                DrawCmd::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .expect("a cap draws exactly one text run")
+    }
+
+    #[test]
+    fn a_theme_that_asks_for_no_case_gets_no_capitals_on_a_cap() {
+        crate::draw::arm_cmds();
+        // The shipped master says `type.button.case = upper`, so a cap
+        // written in mixed case reaches the screen shouting — which is
+        // the whole reason two hundred and fifty-seven labels in the
+        // desktop are spelled in capitals: until now the token could not
+        // do it for them.
+        assert_eq!(cap_text("Save"), "SAVE");
+        // A theme that asks for none gets none. Not "gets the string the
+        // caller happened to write" — the caller wrote the same string
+        // both times, and only the theme moved.
+        crate::ui::seed_theme_word("type.button.case", "none");
+        assert_eq!(cap_text("Save"), "Save");
+        // ...and a theme with a TYPO in that key gets no transform
+        // either, where the five hand-rolled `match`es this replaced all
+        // ended on `_ => to_uppercase()`.
+        crate::ui::seed_theme_word("type.button.case", "uper");
+        assert_eq!(cap_text("Save"), "Save");
+        crate::ui::seed_theme_word("type.button.case", "lower");
+        assert_eq!(cap_text("Save"), "save");
+    }
+
+    // -------------------------------------------- the measure/draw seam
+    //
+    // A transform applied INSIDE `draw` cut a seam the moment it landed:
+    // every caller that reserves room for a cap was sizing the string as
+    // its author spelled it and then handing that same string over to be
+    // recased. Under the shipped master the two agree by luck — `upper`
+    // applied to a literal already in capitals is the identity — and the
+    // luck runs out on the first label written in mixed case, which is
+    // exactly what the case token exists to allow. The three functions
+    // below are the seam closed: what is drawn, how wide it is, and how
+    // wide the plate under it has to be.
+
+    #[test]
+    fn the_cap_a_button_offers_is_the_cap_it_draws() {
+        crate::draw::arm_cmds();
+        // Under the master (`upper`) and under a theme that says none:
+        // both times the answer is what reached the register, never the
+        // string the caller passed in.
+        assert_eq!(cap_of("Save"), cap_text("Save"));
+        assert_eq!(cap_of("Save"), "SAVE");
+        crate::ui::seed_theme_word("type.button.case", "lower");
+        assert_eq!(cap_of("Save"), cap_text("Save"));
+        assert_eq!(cap_of("Save"), "save");
+    }
+
+    #[test]
+    fn a_cap_is_measured_on_the_run_that_reaches_the_screen() {
+        crate::draw::arm_cmds();
+        let mut fonts = FontSystem::new();
+        // A label whose case the master CHANGES: "Save" is four glyphs
+        // either way, but a capital is wider than its lower-case twin in
+        // every proportional face, so the two widths are tellable apart.
+        // That difference is the defect: the one caller that sized a
+        // plate measured the untransformed spelling.
+        // The width of a spelling, measured under the ladder the button
+        // itself resolves — the reading `text_center_fig` makes to place
+        // its pen, taken here for a string of the test's choosing.
+        let mut spelling = |s: &str| {
+            let mut dl = DrawList::new();
+            let mut c = ctx(&mut dl, &mut fonts);
+            let l = ladder(&mut c);
+            c.fonts.measure_fig(l.font, l.px, s, l.track, &l.fig)
+        };
+        let (mixed, shouted, lowered) = (spelling("Save"), spelling("SAVE"), spelling("save"));
+        assert!(
+            mixed != shouted && mixed != lowered,
+            "this face measures Save, SAVE and save identically, so the \
+             seam below cannot be witnessed on it"
+        );
+
+        let offered = |fonts: &mut FontSystem| {
+            let mut dl = DrawList::new();
+            cap_width(&mut ctx(&mut dl, fonts), "Save")
+        };
+        // Under the master (`upper`) the plate is sized for SAVE — the
+        // run that reaches the screen — and NOT for the spelling the
+        // caller wrote, which is the whole defect.
+        assert!(
+            (offered(&mut fonts) - shouted).abs() < 1e-3,
+            "a cap was measured on the caller's spelling, not on the drawn run"
+        );
+        // ...and it MOVES with the theme, in both directions, because
+        // the case is read at measuring time and not baked in.
+        crate::ui::seed_theme_word("type.button.case", "lower");
+        assert!(
+            (offered(&mut fonts) - lowered).abs() < 1e-3,
+            "the offered width did not follow type.button.case to lower"
+        );
+        crate::ui::seed_theme_word("type.button.case", "none");
+        assert!(
+            (offered(&mut fonts) - mixed).abs() < 1e-3,
+            "a role asking for no case measured something other than \"Save\""
+        );
+    }
+
+    #[test]
+    fn a_plate_is_its_cap_plus_the_buttons_own_padding() {
+        let mut fonts = FontSystem::new();
+        let mut dl = DrawList::new();
+        let mut c = ctx(&mut dl, &mut fonts);
+        let t = theme::resolved();
+        let pad = t.px(theme::id("button.pad_x").expect("the master declares it"));
+        let min_w = t.px(theme::id("button.min_w").expect("the master declares it"));
+        assert!(pad > 0.0 && min_w > 0.0, "the master states both lengths");
+        // A long label clears the floor, so the padding is what shows.
+        let long = "SAVE AS A NEW THEME FILE";
+        assert!(
+            (plate_w(&mut c, long) - (cap_width(&mut c, long) + 2.0 * pad)).abs() < 1e-3,
+            "a plate is not its cap plus button.pad_x on each side"
+        );
+        // A two-letter label does not clear it, which is what min_w says
+        // in the master's own words.
+        assert!(cap_width(&mut c, "OK") + 2.0 * pad < min_w);
+        assert!((plate_w(&mut c, "OK") - min_w).abs() < 1e-3, "a short cap fell under button.min_w");
     }
 }

@@ -71,6 +71,13 @@ impl Surface for Probe {
     fn word(&mut self, name: &str) -> String {
         theme::id(name).and_then(theme::enum_word_of).unwrap_or_default()
     }
+    /// The real theme's answer, like every other kind above. A probe that
+    /// answered nothing here would say "this theme states no trim
+    /// marker", which is a case worth its own test and not the state a
+    /// probe of the SHIPPED master should be in.
+    fn theme_text(&mut self, name: &str) -> String {
+        theme::diagnostics().text(name).unwrap_or_default().to_string()
+    }
     fn class_state(&mut self, class: &str, state: State) -> StateInk {
         match theme::class_id(class) {
             Some(c) => StateInk::from(theme::resolved().class_state(c, state)),

@@ -2207,7 +2207,7 @@ codepoints            = ""                    # name = U+XXXX map; meaningful ON
 min_px                        = 8px           # absolute floor under every role's resolved px · 9 · device px, 6px .. 24px · no derivation; the last defence against unreadable type
 smallcaps_ratio               = 0.78          # default px multiplier for source-lowercase glyphs · 1-10 · f, 0.5 .. 1.0 · at 1.0 a smallcaps role degrades to plain upper and the second atlas size is never rasterised
 snap_px                       = true          # round each role's px to a whole pixel before rasterisation · - · bool · collapses four atlas entries per visual size to one and stops 1px text jitter; the terminal is exempt
-ellipsis                      = "…"           # the character appended to trimmed text · 1-10 · text · draw.rs:328's "\u{2026}"; a console theme may prefer "..." or ">"
+ellipsis                      = "…"           # the character appended to trimmed text · 1-10 · text · read by every trim in the toolkit (ui::ellipsis for base.rs/draw.rs/panel.rs, view::paint::trim_marker for the Surface path) and across the ABI by HostApi::theme_text, which the launcher tile and the file browser call; empty or absent trims with NO marker, since the character a cut ends on is typography. A console theme may prefer "..." or ">"
 
 # ---------------------------------------------------------------- type.display.clock
 # the big clock, 21:57:30

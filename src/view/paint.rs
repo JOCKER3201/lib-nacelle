@@ -18,8 +18,9 @@ use super::surface::{StateInk, Surface};
 use crate::draw::{Corner, CornerStyle, ShapeKind};
 use crate::theme::parse::State;
 use crate::theme::Color;
-use crate::ui::{sev_of, Align, BadgeStyle, Sev, SEVERITY_ROLES};
+use crate::ui::{sev_of, Align, BadgeStyle, Case, Sev, SEVERITY_ROLES};
 use crate::Rect;
+use std::borrow::Cow;
 
 // ------------------------------------------------------------- severity
 
@@ -77,6 +78,15 @@ pub struct RoleLook {
     /// [`Surface::text_tab`], which measures the box from the face —
     /// this side of the library owns tokens, not faces.
     pub tabular: bool,
+    /// The transform `type.<role>.case` asks for.
+    ///
+    /// Carried resolved, like every other member: a look read once per
+    /// draw exists so the row loop asks the theme nothing, and the case
+    /// is the member the row loop needed most — the three AI widgets each
+    /// re-spelled `type.{role}.case` through the `Surface` beside a
+    /// `RoleLook` they already held, and every other label on this side
+    /// of the ABI settled the question by writing capitals in its source.
+    pub case: Case,
     /// The slot `type.<role>.face` names — the family AND the weight this
     /// role is set in, since the master declares both on the face block.
     ///
@@ -104,6 +114,10 @@ pub const NO_ROLE: RoleLook = RoleLook {
     track: 0.0,
     leading: 0.0,
     tabular: false,
+    // Not capitals: shouting at a caller whose role is missing would be
+    // this file choosing a look for an undesigned run, and nothing is
+    // drawn in this look anyway.
+    case: Case::None,
     // The interface slot, which is where an undesigned run has always
     // landed. Nothing is drawn in this look anyway — px is zero — so the
     // face is the one field here that cannot decide anything.
@@ -150,6 +164,10 @@ pub fn role_look(sf: &mut impl Surface, name: &str, shrink: f32) -> RoleLook {
     // §5.16's `tabular`, read here so that every view, every script table
     // and the whole ABI side gets it from ONE resolver.
     let tabular = sf.flag(&format!("type.{name}.tabular"));
+    // §5.16's `case`, resolved from the WORD by the toolkit's one applier
+    // — so a theme's typo warns here exactly as it warns on the object
+    // side, instead of turning into capitals nobody asked for.
+    let case = Case::from_word(&sf.word(&format!("type.{name}.case")));
     // §5.16's `face`, read through the same one resolver and by the same
     // word→slot rule `ui::Role::font` uses. Reading it here is what stops
     // a view and an object disagreeing about which family one role is in.
@@ -157,7 +175,18 @@ pub fn role_look(sf: &mut impl Surface, name: &str, shrink: f32) -> RoleLook {
     let mut color = sf.color(&format!("type.{name}.fg"));
     let alpha = sf.px(&format!("type.{name}.alpha"));
     color.a *= if alpha > 0.0 { alpha.min(1.0) } else { 1.0 };
-    RoleLook { px, track, leading, tabular, face, color }
+    RoleLook { px, track, leading, tabular, case, face, color }
+}
+
+impl RoleLook {
+    /// This role's own string, in the case the theme set it in.
+    ///
+    /// The twin of [`crate::ui::Role::cased`], and the same applier
+    /// underneath both: one answer to "does this label shout", whichever
+    /// side of the boundary asks.
+    pub fn cased<'a>(&self, s: &'a str) -> Cow<'a, str> {
+        crate::ui::recase(self.case, s)
+    }
 }
 
 /// The role a `*_role` binding token names — `script.table_head_role`,
@@ -458,16 +487,38 @@ pub fn fit_end_tab(
     if sf.measure_tab(face, px, text, track, tabular) <= max_w {
         return text.to_string();
     }
+    // Read AFTER the run is known not to fit: an untrimmed label must
+    // not pay for a key it will not use, and this is the one text-token
+    // read on any draw path.
+    let cut = trim_marker(sf);
     let chars: Vec<char> = text.chars().collect();
     let mut n = chars.len().saturating_sub(1);
     while n > 1 {
-        let cand: String = chars[..n].iter().collect::<String>() + "\u{2026}";
+        let cand: String = chars[..n].iter().collect::<String>() + cut.as_str();
         if sf.measure_tab(face, px, &cand, track, tabular) <= max_w {
             return cand;
         }
         n -= 1;
     }
-    "\u{2026}".to_string()
+    cut
+}
+
+/// `type.ellipsis` — what a trimmed run ends on, off a [`Surface`].
+///
+/// The master declares the key and its comment names the call sites that
+/// ignored it. An absent or empty key trims with NO marker: the character
+/// a cut ends on is typography, so a literal standing in for it here
+/// would be a look decided in Rust, which is the one thing this file may
+/// not hold.
+pub fn trim_marker(sf: &mut impl Surface) -> String {
+    let cut = sf.theme_text("type.ellipsis");
+    if cut.is_empty() {
+        crate::ui::warn_once(
+            "type.ellipsis",
+            "type.ellipsis is empty or absent — trimmed text ends on nothing",
+        );
+    }
+    cut
 }
 
 /// The tooltip a TRIMMED label files (F2 §8.1): `shown` is what reached
@@ -979,7 +1030,21 @@ pub(crate) mod tests {
     /// A surface that only measures: half an em a character, which is
     /// wrong about fonts and right about monotonicity — all the breaking
     /// arithmetic asks of it. Nothing here draws.
+    ///
+    /// It does state ONE token, `type.ellipsis`, because a trimming
+    /// routine reads the marker off the surface and a ruler answering
+    /// nothing would be a theme that declares no marker — a case worth
+    /// its own test, not the state every other test runs under.
     struct Ruler;
+
+    /// What this ruler's theme says `type.ellipsis` holds.
+    ///
+    /// A constant, because this ruler is the FIXTURE and not the subject:
+    /// the tests that vary the marker — a theme stating a comma, a theme
+    /// stating nothing — drive `FakeSurface::text_at`, which is the seam
+    /// built for exactly that. A ruler that could be restated would be a
+    /// second such seam with one shape of question fewer.
+    const RULER_CUT: &str = "\u{2026}";
 
     impl Surface for Ruler {
         fn rect(&mut self, _r: Rect, _c: Color) {}
@@ -1026,6 +1091,12 @@ pub(crate) mod tests {
         fn word(&mut self, _name: &str) -> String {
             String::new()
         }
+        fn theme_text(&mut self, name: &str) -> String {
+            match name {
+                "type.ellipsis" => RULER_CUT.to_string(),
+                _ => String::new(),
+            }
+        }
         fn class_state(&mut self, _class: &str, _state: State) -> StateInk {
             StateInk::raw()
         }
@@ -1041,6 +1112,51 @@ pub(crate) mod tests {
         fn scale(&self) -> f32 {
             1.0
         }
+    }
+
+    // ---- the trim marker, and the case, off a SURFACE ----
+    //
+    // The `Surface` half of both keys: this is the road every view, every
+    // script table and every compiled widget on the far side of the ABI
+    // takes, so a key honoured on the object side and ignored here would
+    // be honoured in half the interface.
+
+    #[test]
+    fn a_trim_off_a_surface_ends_on_the_character_the_theme_states() {
+        use crate::view::surface::tests::FakeSurface;
+        // A surface whose theme says a comma. Four characters at 10 px
+        // are 20 px wide under this ruler, so "SESSION" has to cut.
+        let mut sf = FakeSurface::new().text_at("type.ellipsis", ",");
+        assert_eq!(fit_end(&mut sf, FONT_UI, 10.0, "SESSION", 20.0, 0.0), "SES,");
+        // ...and a theme that states NOTHING trims with nothing rather
+        // than with a character this file chose. The cut still happens —
+        // the run is still made to fit — it simply goes unmarked, which
+        // is the honest reading of a key nobody wrote.
+        let mut bare = FakeSurface::new();
+        assert_eq!(fit_end(&mut bare, FONT_UI, 10.0, "SESSION", 20.0, 0.0), "SESS");
+    }
+
+    #[test]
+    fn a_look_off_a_surface_carries_the_case_its_role_asks_for() {
+        use crate::view::surface::tests::FakeSurface;
+        // A role exists for this resolver when it has a size; the rest of
+        // the ladder is what the surface states.
+        let sf = || {
+            FakeSurface::new()
+                .token("type.button.size", 14.0)
+                .token("type.button.alpha", 1.0)
+        };
+        let mut up = sf().word_at("type.button.case", "upper");
+        assert_eq!(role_look(&mut up, "button", 1.0).cased("Save"), "SAVE");
+        let mut none = sf().word_at("type.button.case", "none");
+        assert_eq!(role_look(&mut none, "button", 1.0).cased("Save"), "Save");
+        // A word the list does not hold transforms nothing — the same
+        // ruling `ui::Case::from_word` makes, because it IS that ruling.
+        let mut typo = sf().word_at("type.button.case", "uper");
+        assert_eq!(role_look(&mut typo, "button", 1.0).cased("Save"), "Save");
+        // And nothing is drawn in a role that does not exist, so it does
+        // not shout either.
+        assert_eq!(NO_ROLE.cased("Save"), "Save");
     }
 
     // ---- wrapping ----

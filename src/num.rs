@@ -183,19 +183,15 @@ pub fn value_compact(v: f64) -> String {
 
 /// `num.unit.case` applied to a unit suffix.
 ///
-/// The transform is compared as a WORD, for the reason every other case
-/// reader in the toolkit does: each key declares its own enum list and an
-/// index memoised across keys names a different transform in each.
-/// `smallcaps` is approximated as upper until the font layer can set true
-/// small caps — the same approximation, and the same debt, as
-/// `panel.rs`'s title band.
+/// Through the toolkit's one applier, so the unit reads by the same rule
+/// the panel band and the window title do — including the rule for a word
+/// the list does not hold, which used to be silent capitals here as
+/// everywhere else. The master's own note on this key says a theme that
+/// wants shouty units "still writes `upper` and gets it everywhere at
+/// once"; a typo now gets nothing at all, and says so.
 pub fn unit(s: &str) -> String {
     static ID: OnceLock<TokenId> = OnceLock::new();
-    crate::ui::with_theme_word(tok(&ID, "num.unit.case"), |w| match w {
-        "none" => s.to_string(),
-        "lower" => s.to_lowercase(),
-        _ => s.to_uppercase(),
-    })
+    crate::ui::recase(crate::ui::case_of(tok(&ID, "num.unit.case")), s).into_owned()
 }
 
 /// `num.unit.percent_attached` — whether the gap before a percent sign is

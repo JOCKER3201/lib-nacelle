@@ -779,14 +779,19 @@ pub fn fit_end(ctx: &mut Ctx, px: f32, text: &str, max_w: f32) -> String {
     if ctx.fonts.measure(FONT_UI, px, text, px * 0.06) <= max_w {
         return text.to_string();
     }
+    // `type.ellipsis`, read once the run is known not to fit. The
+    // character was written out here, and in three more trimmers beside
+    // it, while the master declared the key and its comment named these
+    // very call sites.
+    let cut = crate::ui::ellipsis();
     let chars: Vec<char> = text.chars().collect();
     let mut n = chars.len().saturating_sub(1);
     while n > 1 {
-        let cand: String = chars[..n].iter().collect::<String>() + "\u{2026}";
+        let cand: String = chars[..n].iter().collect::<String>() + cut.as_ref();
         if ctx.fonts.measure(FONT_UI, px, &cand, px * 0.06) <= max_w {
             return cand;
         }
         n -= 1;
     }
-    "\u{2026}".to_string()
+    cut.to_string()
 }

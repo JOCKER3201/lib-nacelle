@@ -450,6 +450,20 @@ pub fn enum_index(token: TokenId, word: &str) -> Option<u16> {
     g.schema.enum_index(token, word)
 }
 
+/// The NAME a token id stands for — [`id`] read backwards.
+///
+/// The one caller is the plugin boundary: a TEXT token is stored by name
+/// in [`diagnostics`] rather than in the baked table, so answering
+/// `theme_text` for an id means finding the name that id was interned
+/// under. Nothing on the host needs it — every host reader already holds
+/// the name it asked with.
+pub fn name_of(token: TokenId) -> Option<String> {
+    let e = ENGINE.get()?;
+    let g = e.lock().ok()?;
+    let name = g.schema.name(token);
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 /// The word an enum token currently resolves to. This is how OPEN word sets
 /// are read — a type-role binding (`script.rows_label_role = caption`) names a
 /// role, not a member of a closed enum, so the consumer wants the word itself
