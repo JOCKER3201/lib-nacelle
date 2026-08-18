@@ -5259,12 +5259,12 @@ grid_cols = 3                       # columns in the settings icon grid · - · 
 col_gap = @space.6                  # rynna między kolumnami pasa · - · len (u) · 4u = 21.6 px; settings.band_pad_x — the air INSIDE a column's bed — has to stay UNDER this number, or a button reads as no further from the next column than from its own bed's edge and the two columns fuse into one (2026-08-18)
 zone_gap = @space.6                 # odstęp pionowy między pasami · - · len (u) · = section_gap, jeden rytm
 col_min_w = 72u                     # próg: węższa kolumna = pas składa się do listy · - · len (u) · 388.8 px
-col_min_w_min_px = 360px            # podłoga companion (3.2) · - · device px · dobrana tak, by 500 px składało, 720p+ trzymało kolumny
+col_min_w_min_px = 360px            # podłoga companion (3.2) · - · device px · dobrana pod UKŁAD DWUKOLUMNOWY (500 px składało, 720p+ trzymało kolumny). Od 2026-08-18 nawigacja to JEDNA kolumna — 22 % pudełka treści zamiast 44 % — więc przy tej liczbie okno trzyma dwa panele na każdej wysokości, pod którą program jest pisany; składa się dopiero okno naprawdę wąskie. Czy 500 px ma znowu się składać, decyduje ta liczba i nikt inny: próg leży dziś między 481 px (co strona dostaje przy 500 px) a 710 px (co dostaje przy 720p)
 bar_gap = @space.4                  # odstęp przycisków paska akcji · - · len (u) · 2u = 10.8 px
 rail_w_frac = 22%                   # szyna sekcji edytora (krok 3) · - · % szerokości treści · wzorem back_w_frac
 rail_w_min = 13u                    # minimum szyny · - · len (u) · 70.2 px
 rail_w_min_min_px = 70px            # podłoga companion (3.2) · - · device px · -
-rail_row_gap = @space.2             # the break between two entries of the navigation rail · - · len (u) · @space.2 = 1u = 5.4 px, where modal.row_gap — the rhythm of a FORM — is 3u; a rail is a dense list of names and not a run of controls, and since 2026-08-18 it also carries the open section's own pages, so the rhythm it can afford and the rhythm a page can afford stopped being one question. The rail has no scroll: what does not fit is not clipped, it folds the whole window (settings.rs, Settings::panes), so this number decides at which screens the window keeps its columns at all
+rail_row_gap = @space.2             # the break between two entries of the navigation rail · - · len (u) · @space.2 = 1u = 5.4 px, where modal.row_gap — the rhythm of a FORM — is 3u; a rail is a dense list of names and not a run of controls, and since 2026-08-18 it also carries the open section's own pages, so the rhythm it can afford and the rhythm a page can afford stopped being one question. The rail SCROLLS (settings.rs, Settings::draw_nav, on view::scroll like the page), so a rail this number makes too long is a wheel away and not a window that folds; what it really decides is how much of the navigation a short screen shows without touching the wheel — 440 px of rail against 418 px of column at 720p on this file's numbers
 rail_indent = @space.5              # how far a section's OWN PAGES stand in from the section they belong to · - · len (u) · @space.5 = 3u = 16.2 px; the step is the whole of what the second navigation column used to say by standing somewhere else, so it has to be a step the eye reads as "these belong to the entry above" and not as a nudge (owner's mock-up, 2026-08-18)
 rail_guide_w = @stroke.hair         # the vertical line those indented pages are propped against · - · len (u), stroke-scaled · @stroke.hair = 0.2u, 1 px at 1080p; a bracket around a group, not a border of one — anything heavier reads as a second column's edge, which is the shape this replaced
 rail_guide_x = 50%                  # where in the indent step that line stands · - · % of settings.rail_indent · 0 % puts it against the section's own left edge, 100 % against its pages'; the master halves the gutter it brackets, and a Rust reader that picked the middle for itself would be a look decision written in Rust
@@ -5659,9 +5659,10 @@ nameplate.fill = alpha(@surface.raised, 0.90)    # the plate behind a floating n
 # second column — and a second column is exactly what unfolding the rail
 # replaced.
 #
-# WHEN THE WINDOW FOLDS — content narrower than settings.col_min_w — there
-# are no columns: the rail's rows become the first bands of the one vertical
-# flow. A band's fill is a COLUMN's fill, so a folded window paints none of
+# WHEN THE WINDOW FOLDS — content narrower than settings.col_min_w, which one
+# navigation column instead of two makes a rare shape rather than the small
+# screen's normal one — there are no columns: the rail's rows become the first
+# bands of the one vertical flow. A band's fill is a COLUMN's fill, so a folded window paints none of
 # these and the body stands alone over the whole interior — which is the rung
 # the page was on all along, so a folded window looks exactly as it does
 # today. No stripes, and no special case in Rust to keep them away.
