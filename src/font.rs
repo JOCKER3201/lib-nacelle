@@ -1,12 +1,17 @@
 //! Font loading and the glyph atlas (single-channel, R8).
 //!
 //! eDEX-UI uses "United Sans" (UI) and "Fira Mono" (terminal). The .woff2
-//! files from the eDEX repository can be converted to .ttf and dropped into
-//! ./fonts — they are picked up automatically. Otherwise we look for
-//! similar system fonts.
+//! files from the eDEX repository can be converted to .ttf and installed —
+//! `make install` puts a checkout's `fonts/` under
+//! `$(PREFIX)/share/fonts/nacelle-desktop`, which for either of the
+//! prefixes it defaults to is a directory the walk already reaches — and
+//! `NACELLE_FONT_DIR` names one more absolute directory to look in first.
+//! Otherwise we look for similar system fonts. See [`font_dirs`] for why
+//! no entry is ever relative.
 
 use fontdue::{Font, FontSettings};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 pub const ATLAS_W: usize = 2048;
@@ -766,14 +771,59 @@ fn find_font(dirs: &[PathBuf], patterns: &[&str]) -> Option<PathBuf> {
     None
 }
 
+/// Where a font file is looked for, most specific first.
+///
+/// EVERY ENTRY IS ABSOLUTE, and that is the point of this list rather
+/// than a detail of it. The first entry used to be the bare name
+/// `fonts` — a directory relative to whatever the working directory
+/// happened to be — so which typeface the interface came up in was
+/// decided by where the program had been STARTED from, and any
+/// directory a person could `cd` into could hand it the files it draws
+/// with. It was there for a checkout's own `fonts/` folder, which is
+/// the one case it cannot serve honestly: no font file is ever
+/// committed to these repositories (licence — see
+/// `nacelle-desktop/fonts/README.md`), so on any machine but the one
+/// that put files there by hand it matched nothing at all, 94 failed
+/// openat calls per run.
+///
+/// The deliberate door replaces it: `NACELLE_FONT_DIR`, named the way
+/// `NACELLE_THEME_DIR` already names the same wish for themes, and
+/// ACCEPTED ONLY IF ABSOLUTE — a relative value would put the old
+/// behaviour back under a new name. A checkout that wants its own
+/// fonts says so; an INSTALLED one needs nothing, because
+/// `nacelle-desktop/Makefile` puts a checkout's `fonts/` under
+/// `$(PREFIX)/share/fonts/nacelle-desktop` and both of the prefixes it
+/// defaults to are already below — `~/.local/share/fonts` for a user
+/// install, `/usr/local/share/fonts` for `sudo make install`.
 fn font_dirs() -> Vec<PathBuf> {
-    let mut dirs = vec![PathBuf::from("fonts")];
-    if let Ok(home) = std::env::var("HOME") {
-        dirs.push(PathBuf::from(format!("{home}/.local/share/fonts")));
-        dirs.push(PathBuf::from(format!("{home}/.fonts")));
+    font_search_path(
+        std::env::var_os("NACELLE_FONT_DIR"),
+        std::env::var_os("HOME"),
+    )
+}
+
+/// [`font_dirs`] with the environment handed in, so that what the list
+/// IS can be read and tested without one — this crate's tests share a
+/// process, and a test that set `HOME` would be deciding what another
+/// one saw.
+fn font_search_path(explicit: Option<OsString>, home: Option<OsString>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(d) = explicit {
+        dirs.push(PathBuf::from(d));
+    }
+    if let Some(home) = home {
+        let home = PathBuf::from(home);
+        dirs.push(home.join(".local/share/fonts"));
+        dirs.push(home.join(".fonts"));
     }
     dirs.push(PathBuf::from("/usr/share/fonts"));
     dirs.push(PathBuf::from("/usr/local/share/fonts"));
+    // The invariant, kept in one place rather than at every push: a
+    // relative entry is a directory that moves when the program is
+    // started from somewhere else, and both of the outside values above
+    // — `NACELLE_FONT_DIR` and `HOME` — are things a person can set to
+    // anything at all.
+    dirs.retain(|d| d.is_absolute());
     dirs
 }
 
@@ -1230,5 +1280,117 @@ fn alias_of(id: &str, ui: &Font, mono: &Font) -> Font {
         mono.clone()
     } else {
         ui.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// How many directories on `dirs` MOVE when the program is started
+    /// somewhere else.
+    ///
+    /// Measured rather than asserted about: each entry is resolved
+    /// against two different working directories and counted if the two
+    /// resolutions differ, which is precisely what "depends on the
+    /// working directory" means. `Path::join` with an absolute right
+    /// side discards the left, so an absolute entry answers the same
+    /// twice and a relative one does not.
+    fn cwd_dependent(dirs: &[PathBuf]) -> Vec<PathBuf> {
+        dirs.iter()
+            .filter(|d| Path::new("/one").join(d) != Path::new("/two").join(d))
+            .cloned()
+            .collect()
+    }
+
+    /// WHAT THE INTERFACE IS DRAWN WITH MAY NOT DEPEND ON WHERE THE
+    /// PROGRAM WAS STARTED FROM — COUNTED, AT ZERO.
+    ///
+    /// The first entry of this list used to be the bare name `fonts`,
+    /// resolved against the working directory: a shell sitting in a
+    /// folder that happened to have a `fonts/` subdirectory handed the
+    /// desktop its typefaces, and every other launch got a failed
+    /// openat instead — 94 of them in the 89-second run the audit of
+    /// 2026-08-18 traced, one per consultation of this list.
+    ///
+    /// TWO separate things hold the count at zero, and this test fails
+    /// if EITHER is undone. Restoring `"fonts"` at the head fails the
+    /// first block; deleting the `retain` fails the second, which is
+    /// the block that hands the builder a relative value from outside
+    /// on purpose. (Restoring `"fonts"` alone, with the `retain` left
+    /// in place, does NOT fail: the filter eats it, and the code before
+    /// this change was both together.)
+    #[test]
+    fn no_font_directory_is_relative_to_wherever_the_program_was_started() {
+        let dirs = font_dirs();
+        assert_eq!(
+            cwd_dependent(&dirs),
+            Vec::<PathBuf>::new(),
+            "directories that move with the working directory, in {dirs:?}"
+        );
+        // And the list is not empty by way of being clean: the two
+        // system trees are on it whatever the environment says.
+        assert!(dirs.contains(&PathBuf::from("/usr/share/fonts")), "{dirs:?}");
+        assert!(dirs.contains(&PathBuf::from("/usr/local/share/fonts")), "{dirs:?}");
+
+        // The two values that come from outside, both relative, both
+        // refused. `NACELLE_FONT_DIR` is the deliberate door and is
+        // held to the same rule as the accident it replaced — a
+        // relative value there would be the old behaviour under a new
+        // name — and a strange `HOME` may not smuggle one in either.
+        let hostile = font_search_path(
+            Some(OsString::from("fonts")),
+            Some(OsString::from("relative/home")),
+        );
+        assert_eq!(
+            cwd_dependent(&hostile),
+            Vec::<PathBuf>::new(),
+            "an outside value put a moving directory on the list: {hostile:?}"
+        );
+        assert_eq!(
+            hostile,
+            vec![
+                PathBuf::from("/usr/share/fonts"),
+                PathBuf::from("/usr/local/share/fonts"),
+            ],
+            "what survives a hostile environment is the system trees"
+        );
+
+        // And an absolute one is honoured, first: the door has to open.
+        let named = font_search_path(Some(OsString::from("/opt/faces")), None);
+        assert_eq!(named.first(), Some(&PathBuf::from("/opt/faces")));
+    }
+
+    /// WHAT ONE SWEEP OF THE FONT TREE COSTS, COUNTED.
+    ///
+    /// `find_font` walks every directory on this list for every pattern
+    /// it is given, so the list's length is the number of directory
+    /// roots opened per sweep and the number of MISSING ones is what a
+    /// sweep pays for nothing. The bare `fonts` entry was missing on
+    /// every machine that had not put files there by hand, which is how
+    /// one accident became 94 failed openat calls in one session.
+    ///
+    /// Stated as an equality so the arithmetic is in the record: with
+    /// `NACELLE_FONT_DIR` unset and a `HOME` set, four roots, of which
+    /// zero are relative — where it was five, of which one was.
+    #[test]
+    fn the_price_of_a_sweep_is_the_length_of_the_font_search_path() {
+        let dirs = font_search_path(None, Some(OsString::from("/x/home")));
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/x/home/.local/share/fonts"),
+                PathBuf::from("/x/home/.fonts"),
+                PathBuf::from("/usr/share/fonts"),
+                PathBuf::from("/usr/local/share/fonts"),
+            ]
+        );
+        assert_eq!(dirs.len(), 4);
+        assert_eq!(cwd_dependent(&dirs).len(), 0);
+        // A machine with no HOME at all is two, and still not one that
+        // asks the working directory anything.
+        let bare = font_search_path(None, None);
+        assert_eq!(bare.len(), 2, "{bare:?}");
+        assert_eq!(cwd_dependent(&bare).len(), 0, "{bare:?}");
     }
 }

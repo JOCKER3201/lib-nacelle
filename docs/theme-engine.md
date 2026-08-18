@@ -4355,17 +4355,48 @@ new ones written from scratch from the images.
 ### 9.4 On-disk layout
 
 ```
-~/.local/share/nacelle-desktop/themes/<name>.theme          # a bare file, or
-~/.local/share/nacelle-desktop/themes/<name>/theme.theme    # a directory, when the
+~/.local/share/nacelle/themes/<name>.theme                  # a bare file, or
+~/.local/share/nacelle/themes/<name>/theme.theme            # a directory, when the
                                                             # theme ships assets:
                                                             #   fonts/*.otf
                                                             #   icons/*.otf, icons.map
                                                             #   wallpaper/*.jpg
-~/.config/nacelle-desktop/theme.local                       # the settings-UI overlay
+~/.config/nacelle/theme.local                               # the settings-UI overlay
 ```
 
-`nacelle-themes/Makefile` installs `themes/ layauts/ sounds/`; `look/` and `style/`
-die with the old engine and the installer must follow.
+`nacelle` is the folder the whole family shares. The name this program used
+alone — `nacelle-desktop` — is still READ, one rung below the new one at every
+level of the search path, and never written to; nothing is moved and nothing is
+deleted. In full, most specific first:
+
+```
+$NACELLE_THEME_DIR                                          # explicit, wins outright
+~/.local/share/nacelle/themes                               # $XDG_DATA_HOME
+~/.local/share/nacelle-desktop/themes
+~/.config/nacelle-desktop/themes                            # old name only: a theme
+                                                            # is data, and this rung
+                                                            # exists only because
+                                                            # themes once landed there
+/usr/local/share/nacelle/themes          /usr/share/nacelle/themes
+/usr/local/share/nacelle-desktop/themes  /usr/share/nacelle-desktop/themes
+```
+
+The last block is `$XDG_DATA_DIRS`, in its order, with `/usr/local/share:/usr/share`
+when it is unset. `/usr/local` is not decoration: `sudo make install` in
+`nacelle-themes` defaults to `PREFIX = /usr/local`, so a search path naming only
+`/usr/share` would miss the directory the documented install command writes to.
+
+The overlay has both names as well, in the same order:
+`~/.config/nacelle/theme.local`, then `~/.config/nacelle-desktop/theme.local`.
+`$NACELLE_THEME_LOCAL` overrides both, and is used whether or not the file it
+names exists — somebody who names a file outright is told it could not be read
+rather than left with an overlay that silently did nothing.
+
+`nacelle-themes/Makefile` installs `layauts/ sounds/` and the system-end
+configuration — **no theme file, and no `themes/` directory**. That directory is
+one a person fills, by hand or through the editor's SAVE, which is exactly why
+the search path has to name it: nothing will ever create it on the way past.
+`look/` and `style/` die with the old engine and the installer must follow.
 
 ### 9.5 What the settings UI must now offer
 

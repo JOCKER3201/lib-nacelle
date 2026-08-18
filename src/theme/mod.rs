@@ -101,7 +101,7 @@ pub mod raw {
 use cascade::ThemeSource;
 use parse::{Document, LangTag, SectionKind, Sources};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -1143,27 +1143,122 @@ pub fn mood_wash() -> Option<color::Color> {
 
 // ------------------------------------------------------------ the search path
 
+/// The folder the whole nacelle family keeps its data in, and the one
+/// this program alone used before them. Both are READ and only the
+/// first is ever written to — the rule the desktop's own search path
+/// already follows for configuration, sounds and layauts, said here
+/// for themes as well.
+const FAMILY_DIR: &str = "nacelle";
+const LEGACY_FAMILY_DIR: &str = "nacelle-desktop";
+
 struct FsThemes {
     dirs: Vec<PathBuf>,
 }
 
 impl FsThemes {
     fn new() -> FsThemes {
-        let mut dirs = Vec::new();
-        if let Some(d) = std::env::var_os("NACELLE_THEME_DIR") {
-            dirs.push(PathBuf::from(d));
+        FsThemes {
+            dirs: theme_search_path(
+                std::env::var_os("NACELLE_THEME_DIR").map(PathBuf::from),
+                data_home(),
+                home_dir().map(|h| h.join(".config")),
+                data_dirs_var().as_deref(),
+            ),
         }
-        if let Some(home) = home_dir() {
-            if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
-                dirs.push(PathBuf::from(data).join("nacelle-desktop/themes"));
-            } else {
-                dirs.push(home.join(".local/share/nacelle-desktop/themes"));
-            }
-            dirs.push(home.join(".config/nacelle-desktop/themes"));
-        }
-        dirs.push(PathBuf::from("/usr/share/nacelle-desktop/themes"));
-        FsThemes { dirs }
     }
+}
+
+/// `$XDG_DATA_HOME`, or `~/.local/share` — the BASE, without the family
+/// name, because the search path needs it to build both names.
+fn data_home() -> Option<PathBuf> {
+    match std::env::var_os("XDG_DATA_HOME") {
+        Some(d) if !d.is_empty() => Some(PathBuf::from(d)),
+        _ => home_dir().map(|h| h.join(".local/share")),
+    }
+}
+
+/// `$XDG_DATA_DIRS` as written, or nothing — [`theme_search_path`] owns
+/// the default, so that the default is a thing a test can read.
+fn data_dirs_var() -> Option<String> {
+    std::env::var("XDG_DATA_DIRS").ok().filter(|v| !v.is_empty())
+}
+
+/// The system data prefixes when `XDG_DATA_DIRS` says nothing, from the
+/// XDG base directory specification and — the reason it matters here —
+/// from `nacelle-themes/Makefile`, whose `PREFIX ?= /usr/local` under
+/// `sudo make install` puts its files in the FIRST of them.
+const SYSTEM_DATA_DIRS: &str = "/usr/local/share:/usr/share";
+
+/// Every directory a theme file is looked for in, most specific first.
+///
+/// Split from [`FsThemes::new`] so the ORDER can be read — and tested —
+/// without an environment: what belongs on the path is decided here,
+/// and `new` only says where the bases come from.
+///
+/// The family folder comes FIRST at every level and the program's own
+/// old name directly behind it. That pairing is not this function's
+/// invention; it is the contract `nacelle-themes/Makefile` states in
+/// its own head, about this program: "An older release installed into
+/// nacelle-desktop/ instead. Those files are NOT moved or removed by
+/// this installer: the program searches both names, the new one first."
+/// Themes were the one asset that did not — the list asked the old name
+/// at all three levels and the family name at none — so a theme in
+/// `<data>/nacelle/themes`, which `nacelle-themes/config/nacelle-desktop.ron`
+/// documents as THE place a theme file lives (`<data>/themes/<name>.theme`,
+/// with `<data>` spelled out there as `$XDG_DATA_HOME/nacelle` and every
+/// `$XDG_DATA_DIRS/nacelle`), could not be found. The embedder said the
+/// same thing out loud: `nacelle-desktop`'s `warn_once_about_legacy`
+/// prints, on any machine whose data is still under the old name, that
+/// "its place from now on is ~/.local/share/nacelle" — and a theme moved
+/// there on that advice stopped being found. Nothing is copied and
+/// nothing is deleted: both names are read, one is written.
+///
+/// Note what that installer does NOT do: it ships sounds and layauts
+/// and no theme at all. `<data>/nacelle/themes` is a directory a person
+/// fills — by hand or through the editor, which now saves there — and
+/// the contract above is the whole reason it has to be searched, since
+/// no `make install` will ever create it.
+///
+/// The system end expands `XDG_DATA_DIRS` rather than naming one
+/// prefix, for the same reason [`crate::assets::AssetRoots::xdg`] does
+/// three modules over: `sudo make install` defaults to `PREFIX=/usr/local`,
+/// so a hard-coded `/usr/share` misses the directory the documented
+/// install command writes to. One prefix on that list was the same
+/// class of installer-versus-resolver drift as the old name at the
+/// user's end, one rung further down.
+///
+/// The config end is deliberately old-name-only. A theme is DATA and
+/// belongs under the data dirs; `~/.config/nacelle-desktop/themes` is
+/// on the path because themes once landed there, and giving that
+/// mistake a new-name twin would invite it back.
+fn theme_search_path(
+    explicit: Option<PathBuf>,
+    data_home: Option<PathBuf>,
+    config_home: Option<PathBuf>,
+    data_dirs: Option<&str>,
+) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut push = |dir: PathBuf| {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    };
+    if let Some(d) = explicit {
+        push(d);
+    }
+    if let Some(data) = &data_home {
+        push(data.join(FAMILY_DIR).join("themes"));
+        push(data.join(LEGACY_FAMILY_DIR).join("themes"));
+    }
+    if let Some(config) = &config_home {
+        push(config.join(LEGACY_FAMILY_DIR).join("themes"));
+    }
+    let system = data_dirs.filter(|v| !v.is_empty()).unwrap_or(SYSTEM_DATA_DIRS);
+    for base in system.split(':').filter(|b| !b.is_empty()) {
+        push(PathBuf::from(base).join(FAMILY_DIR).join("themes"));
+        push(PathBuf::from(base).join(LEGACY_FAMILY_DIR).join("themes"));
+    }
+    dirs
 }
 
 impl cascade::ThemeSource for FsThemes {
@@ -1226,12 +1321,14 @@ pub fn available_themes() -> Vec<String> {
 /// The directory the editor SAVES to: the user's own themes, first on the
 /// search path after the explicit env override, so a saved theme is found
 /// by the same walk that loads every other.
+///
+/// The family folder, and the old name never. One directory is written
+/// to and both are read, so a machine keeps exactly the theme files it
+/// had and gains one directory the first time a theme is saved; a theme
+/// that was in the old folder and is saved again is answered from the
+/// new one from then on, because that is where the walk looks first.
 pub fn user_themes_dir() -> Option<PathBuf> {
-    let home = home_dir()?;
-    Some(match std::env::var_os("XDG_DATA_HOME") {
-        Some(d) => PathBuf::from(d).join("nacelle-desktop/themes"),
-        None => home.join(".local/share/nacelle-desktop/themes"),
-    })
+    Some(data_home()?.join(FAMILY_DIR).join("themes"))
 }
 
 /// Writes a theme file from the editor's edits and answers where it landed.
@@ -1307,16 +1404,38 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 /// §4.1 stage 5. One file, always the last word.
+///
+/// The family folder first and the old name behind it, for the reason
+/// [`theme_search_path`] gives: the overlay is the last stage of the
+/// same cascade, and a stage that had been left pointing at the old
+/// folder alone would go on answering from it after everything else
+/// had moved.
 fn user_overlay_path() -> Option<PathBuf> {
+    // Returned whether or not it is there, which is deliberate and
+    // unchanged: somebody who names a file outright is told by the
+    // reader a rung up that it could not be read, where a silent skip
+    // would look exactly like an overlay that had no effect.
     if let Some(p) = std::env::var_os("NACELLE_THEME_LOCAL") {
         return Some(PathBuf::from(p));
     }
     let base = match std::env::var_os("XDG_CONFIG_HOME") {
-        Some(c) => PathBuf::from(c),
-        None => home_dir()?.join(".config"),
+        Some(c) if !c.is_empty() => PathBuf::from(c),
+        _ => home_dir()?.join(".config"),
     };
-    let p = base.join("nacelle-desktop/theme.local");
-    p.is_file().then_some(p)
+    overlay_candidates(&base).into_iter().find(|p| p.is_file())
+}
+
+/// The overlay's two candidates, in order, the file system not asked
+/// yet.
+///
+/// Split out for the same reason [`theme_search_path`] is: what the
+/// ORDER is, is a decision, and a decision visible only through an
+/// environment and a disk is one no test can state plainly.
+fn overlay_candidates(config_home: &Path) -> Vec<PathBuf> {
+    [FAMILY_DIR, LEGACY_FAMILY_DIR]
+        .iter()
+        .map(|name| config_home.join(name).join("theme.local"))
+        .collect()
 }
 
 // ------------------------------------------------------------------- reports
@@ -1722,6 +1841,199 @@ mod tests {
         for line in check_hot_set() {
             assert!(line.contains("is not declared"));
         }
+    }
+
+    /// EVERY LEVEL ASKS BOTH NAMES, THE FAMILY ONE FIRST.
+    ///
+    /// It asked neither: the walk wore the old name at all three of its
+    /// levels and the family name at none, so `<data>/nacelle/themes` —
+    /// the location `nacelle-themes/config/nacelle-desktop.ron` gives
+    /// for a theme file, and the folder the desktop's own startup
+    /// message tells people to move their data into — was the one place
+    /// a theme could sit unread. What the pairing
+    /// answers to is that repository's own Makefile, which says of this
+    /// program that it "searches both names, the new one first" and
+    /// declines to move anybody's files on the strength of it. Nothing
+    /// is moved here either: the old rungs are all still on the list,
+    /// one place further down.
+    ///
+    /// No theme is INSTALLED by anything — that Makefile ships sounds
+    /// and layauts only — so this directory is one a person fills and
+    /// the editor writes to, which is exactly why a resolver that never
+    /// looks in it is a defect nobody would see reported as one.
+    #[test]
+    fn the_family_folder_is_on_the_theme_search_path_and_the_old_one_stays() {
+        let data = PathBuf::from("/x/data");
+        let config = PathBuf::from("/x/config");
+        let dirs = theme_search_path(None, Some(data.clone()), Some(config.clone()), None);
+        let new = data.join("nacelle/themes");
+        let old = data.join("nacelle-desktop/themes");
+        let at = |p: &PathBuf| dirs.iter().position(|d| d == p);
+        assert!(at(&new).is_some(), "the documented folder is not searched: {dirs:?}");
+        assert!(at(&old).is_some(), "the old folder is read, not dropped: {dirs:?}");
+        assert!(at(&new) < at(&old), "the family folder answers first: {dirs:?}");
+        // Both names at the system end too, same order.
+        let sys_new = PathBuf::from("/usr/share/nacelle/themes");
+        let sys_old = PathBuf::from("/usr/share/nacelle-desktop/themes");
+        assert!(at(&sys_new) < at(&sys_old), "{dirs:?}");
+        assert!(at(&sys_old).is_some(), "{dirs:?}");
+        // The config rung is the old name ALONE: a theme is data, and
+        // that entry exists only because themes once landed there.
+        assert!(dirs.contains(&config.join("nacelle-desktop/themes")), "{dirs:?}");
+        assert!(!dirs.contains(&config.join("nacelle/themes")), "{dirs:?}");
+        // Every rung of it is below the data ones, which is what makes
+        // an installed theme beat a leftover.
+        assert!(at(&config.join("nacelle-desktop/themes")) > at(&old), "{dirs:?}");
+
+        // The explicit override still outranks the lot, and a machine
+        // with neither variable set still searches the family folder.
+        let forced = PathBuf::from("/tmp/one-theme-dir");
+        let dirs = theme_search_path(Some(forced.clone()), None, None, None);
+        assert_eq!(dirs.first(), Some(&forced));
+        assert!(dirs.contains(&sys_new), "{dirs:?}");
+
+        // And the path the engine actually walks, however this machine
+        // is set up, has the family folder on it.
+        let live = FsThemes::new().dirs;
+        assert!(
+            live.iter().any(|d| d.ends_with("nacelle/themes")),
+            "the live search path missed the family folder: {live:?}"
+        );
+    }
+
+    /// THE PREFIX `sudo make install` USES IS ON THE PATH.
+    ///
+    /// `nacelle-themes/Makefile` documents `sudo make install` and
+    /// defaults it to `PREFIX = /usr/local` for root, so its files land
+    /// in `/usr/local/share/nacelle`. A system rung written as one
+    /// hard-coded `/usr/share` — which is what stood here, and what the
+    /// first pass at this repair left standing — misses that directory
+    /// entirely: the same installer-versus-resolver drift as the old
+    /// folder name, one rung lower down. `XDG_DATA_DIRS` is the list
+    /// that answers it, exactly as `AssetRoots::xdg` reads it for every
+    /// other asset in this crate.
+    #[test]
+    fn the_system_end_follows_xdg_data_dirs_and_not_one_hard_coded_prefix() {
+        // Unset: the two standard prefixes, /usr/local first, because
+        // that is the one `sudo make install` writes to.
+        let dirs = theme_search_path(None, None, None, None);
+        let local = PathBuf::from("/usr/local/share/nacelle/themes");
+        let usr = PathBuf::from("/usr/share/nacelle/themes");
+        let at = |p: &PathBuf| dirs.iter().position(|d| d == p);
+        assert!(at(&local).is_some(), "sudo make install writes here: {dirs:?}");
+        assert!(at(&local) < at(&usr), "the nearer prefix answers first: {dirs:?}");
+        assert!(
+            dirs.contains(&PathBuf::from("/usr/local/share/nacelle-desktop/themes")),
+            "both names at every prefix: {dirs:?}"
+        );
+
+        // Set: what it says, in its order, and nothing that it does not
+        // say. A packager who moves the tree is obeyed.
+        let dirs = theme_search_path(None, None, None, Some("/opt/n/share:/usr/share"));
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/opt/n/share/nacelle/themes"),
+                PathBuf::from("/opt/n/share/nacelle-desktop/themes"),
+                PathBuf::from("/usr/share/nacelle/themes"),
+                PathBuf::from("/usr/share/nacelle-desktop/themes"),
+            ],
+            "the variable is the list"
+        );
+
+        // Empty means unset, per the specification, and an empty member
+        // is skipped rather than turned into a relative directory —
+        // `"".join("nacelle")` is `nacelle`, which would be resolved
+        // against the working directory.
+        assert_eq!(theme_search_path(None, None, None, Some("")), theme_search_path(None, None, None, None));
+        for d in theme_search_path(None, None, None, Some("/a::/b")) {
+            assert!(d.is_absolute(), "{d:?} is relative");
+        }
+    }
+
+    /// WHAT ONE NAME LOOKUP COSTS, COUNTED.
+    ///
+    /// `FsThemes::open` walks the search path and asks `is_file` about
+    /// `<dir>/<name>.theme` in each until one answers, so the number of
+    /// failed probes for a name that is not installed is the length of
+    /// this list — nothing else about it is a cost. The audit of
+    /// 2026-08-18 saw four sweeps in one session, which is what turns
+    /// the per-lookup figures below into the per-session ones.
+    ///
+    /// Stated as exact equalities rather than as "more than before" so
+    /// that the price of the two repairs above is a number in the
+    /// record and not an impression: a rung added carelessly here is a
+    /// syscall on every lookup for the life of the program.
+    #[test]
+    fn the_price_of_a_lookup_is_the_length_of_the_search_path() {
+        // The shape this machine's kind of setup produces: a data home,
+        // a config home, no explicit override, no XDG_DATA_DIRS.
+        let dirs = theme_search_path(
+            None,
+            Some(PathBuf::from("/x/data")),
+            Some(PathBuf::from("/x/config")),
+            None,
+        );
+        // 2 (data) + 1 (config) + 2 x 2 (the two standard prefixes) = 7.
+        // Before this branch it was 3, all of them under the old name;
+        // this is 4 probes more per lookup, 16 more per session at the
+        // four sweeps the audit counted — and the two of them that can
+        // ever answer are the two it was missing.
+        assert_eq!(dirs.len(), 7, "{dirs:?}");
+        // Nothing is asked twice, which is the only way this list can
+        // grow a cost that buys nothing: a duplicate is a syscall whose
+        // answer is already known.
+        let mut once = dirs.clone();
+        once.sort();
+        once.dedup();
+        assert_eq!(once.len(), dirs.len(), "a directory is probed twice: {dirs:?}");
+
+        // A packager's single prefix costs less than the default pair,
+        // and the explicit override costs one probe more, deliberately.
+        assert_eq!(
+            theme_search_path(None, None, None, Some("/usr/share")).len(),
+            2
+        );
+        assert_eq!(
+            theme_search_path(Some(PathBuf::from("/one")), None, None, Some("/usr/share")).len(),
+            3
+        );
+    }
+
+    /// A theme is SAVED into the family folder and never into the old
+    /// name: one directory is written, both are read.
+    #[test]
+    fn the_editor_saves_into_the_family_folder() {
+        let Some(dir) = user_themes_dir() else { return };
+        assert!(dir.ends_with("nacelle/themes"), "{dir:?}");
+        assert!(
+            FsThemes::new().dirs.contains(&dir),
+            "what is written must be found by the walk that loads"
+        );
+    }
+
+    /// THE LAST STAGE OF THE CASCADE MOVED WITH THE REST OF IT.
+    ///
+    /// `theme.local` is stage 5, the overlay that has the last word
+    /// over everything a theme file says. It was left pointing at
+    /// `~/.config/nacelle-desktop/theme.local` alone while the settings
+    /// window had moved to `~/.config/nacelle`, so the file the program
+    /// documents as its overlay was a file it never read — and the one
+    /// it did read is one nothing writes any more.
+    ///
+    /// Both, new name first, for the reason every other rung has both:
+    /// a machine that has the old file keeps it working, and neither is
+    /// moved or deleted.
+    #[test]
+    fn the_overlay_asks_the_family_folder_first_and_the_old_one_after() {
+        let base = PathBuf::from("/x/config");
+        assert_eq!(
+            overlay_candidates(&base),
+            vec![
+                base.join("nacelle").join("theme.local"),
+                base.join("nacelle-desktop").join("theme.local"),
+            ]
+        );
     }
 
     #[test]
