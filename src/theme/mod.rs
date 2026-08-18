@@ -1234,19 +1234,116 @@ pub fn user_themes_dir() -> Option<PathBuf> {
     })
 }
 
-/// Writes a theme file from the editor's edits and answers where it landed.
+/// The first lines of a theme file the editor CREATED. A file that already
+/// exists keeps its own opening — this banner is written once, when there
+/// was nothing to patch, and never again.
+const SAVE_BANNER: &str = "\
+# Written by the theme editor. A later save PATCHES this file: the values
+# the editor owns are replaced where they stand, and every other byte —
+# these notes, hand-written tokens, moods, variants — is left alone.
+";
+
+/// The one line that introduces tokens the file did not have. Recognised on
+/// the next save so a second block does not bring a second copy of it.
+const SAVE_APPEND_BANNER: &str = "# Added by the theme editor.";
+
+/// What a theme file's previous contents are called once a save has replaced
+/// them. `.theme.bak`, so neither the loader's `<name>.theme` join nor
+/// [`available_themes`]' extension test can mistake it for a theme.
 ///
-/// The file is GENERATED, whole, every time: these files are the editor's
-/// own — hand-authored ones do not pass through here — so regeneration
-/// loses nothing and stays simple. Keys are grouped into the section the
-/// master declares them under by splitting at the FIRST dot, which the
-/// loader's `section.key` concatenation makes exact; the round-trip is
-/// pinned by an integration test, not assumed.
+/// One rescue copy per file, overwritten by each save, in the manner of the
+/// RON store's. It exists because a save is now a PATCH of the person's own
+/// file — their notes, their hand-written tokens, their moods — where before
+/// it was a generator whose output could be produced again by pressing the
+/// button. The value of the bytes went up; the cost of losing them had to
+/// come down with it.
+const SAVE_BACKUP_SUFFIX: &str = ".theme.bak";
+
+/// Where a save's bytes are assembled before they become the theme. Renamed
+/// over the target, which is atomic on every filesystem this program runs on,
+/// so a save interrupted halfway leaves the old file whole instead of a
+/// truncated one. `std::fs::write` opens with `O_TRUNC`: it destroys before
+/// it writes, and there is no moment at which it is safe to be killed.
+const SAVE_TEMP_SUFFIX: &str = ".theme.part";
+
+/// WHAT A SAVE MEANS FOR A TOKEN NOBODY TOUCHED — settled 2026-08-18.
 ///
-/// `default` is refused by name: the master is the one look compiled in,
-/// and a file called `default.theme` would shadow it into confusion — the
-/// caller offers SAVE AS instead.
+/// It is left exactly as it was, byte for byte. A save PATCHES: every value
+/// the edit set names is replaced where it stands in the file, tokens the
+/// file did not have are appended, and nothing else in the file is read,
+/// rewritten or reordered.
+///
+/// The alternative — generate the file whole and require the edit set to
+/// mention everything that must survive — is what this function used to do,
+/// and it is the whole of the owner's report on 2026-08-17: "the halo does
+/// not blink any more, but it disappears when I press save". `edit.rs`
+/// deliberately WITHHOLDS `glow.panel_edge.radius`/`.alpha` from a theme
+/// that dressed its own halo, so that the editor's seeds do not flatten the
+/// author's numbers. Laid over a bake that is a keep; written into a
+/// regenerated file it was a delete, and the halo went out. One edit set
+/// cannot serve an overlay and a whole-file rewrite, because the two read
+/// silence as opposite instructions. Patching makes the file read silence
+/// the way the overlay does, which is what lets ONE set answer the three
+/// callers `edit.rs`' header names.
+///
+/// It is also the only way the plan's other promise can be kept: the author's
+/// comments survive a save (`.gap-program/decyzja-edytor-motywu.md` §2-3,
+/// which forbids regeneration outright). `parse.rs` cuts comments off before
+/// parsing and `Document` has no field for them, so text is the only place
+/// they exist to be preserved.
+///
+/// The bytes a save starts from are THE EDITED THEME'S own file — the file
+/// the preview on screen is standing on — taken from the user's own
+/// directory first and from the loader's search path second, so a theme
+/// installed system-wide is COPIED into the user's directory on its first
+/// save instead of being replaced by a file holding only the editor's dozen
+/// values. That is `layout/store.rs`' materialisation, in the words of the
+/// other store.
+///
+/// EDITED THEME, not "the name being written": the two are the same for
+/// SAVE and different for SAVE AS, and reading the second where the first
+/// was meant is how a patch invents a theme nobody asked for. Saving a
+/// dressed theme AS a name that already carries a file would keep THAT
+/// file's halo — the set is silent about a dress, and the silence would be
+/// answered by the wrong file — so the saved theme would match neither the
+/// preview nor the theme it was saved over. That is [`save_theme_as`]'
+/// whole reason to exist, and why [`save_theme`] is nothing but the case
+/// where the two names are one.
+///
+/// So SAVE AS IS A COPY OF THIS THEME, settled here rather than left open,
+/// because the alternative reading — "a new theme, the edit set and nothing
+/// else" — is the 2026-08-17 report again under a different button: the
+/// dress the set withholds would go out. A name with no file anywhere still
+/// generates, but that is the absence of a source, not a second meaning.
+///
+/// A generated file groups keys into the section the master declares them
+/// under by splitting at the FIRST dot, which the loader's `section.key`
+/// concatenation makes exact. The round-trip is pinned by an integration
+/// test, not assumed.
+///
+/// `default` is refused as a TARGET name: the master is the one look
+/// compiled in, and a file called `default.theme` would shadow it into
+/// confusion — the caller offers SAVE AS instead. As a SOURCE it is legal
+/// and means what it says: the master is not a file, so there is nothing to
+/// copy and the set is the whole of the new theme.
 pub fn save_theme(name: &str, edits: &[edit::Edit]) -> std::io::Result<PathBuf> {
+    save_theme_as(Some(name), name, edits)
+}
+
+/// SAVE AS: the theme `source` was showing, written out under `name`.
+///
+/// `source` is the theme the edit set describes — the one the editor opened
+/// and the preview is standing on. `None`, and `Some("default")`, both name
+/// the embedded master, which is not a file: there the edit set is the whole
+/// of the new theme.
+///
+/// See [`save_theme`] for what a save means for a token nobody touched; this
+/// is the same function with the two names told apart.
+pub fn save_theme_as(
+    source: Option<&str>,
+    name: &str,
+    edits: &[edit::Edit],
+) -> std::io::Result<PathBuf> {
     use std::io::{Error, ErrorKind};
     let name = name.trim();
     if name.is_empty() || name.eq_ignore_ascii_case("default") {
@@ -1255,51 +1352,315 @@ pub fn save_theme(name: &str, edits: &[edit::Edit]) -> std::io::Result<PathBuf> 
             "the master is not a file; save under another name",
         ));
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if !is_theme_name(name) {
         return Err(Error::new(
             ErrorKind::InvalidInput,
             "a theme's name is its file's: ascii letters, digits, - and _",
         ));
     }
+    // The source becomes a path too, so it meets the same charset for the
+    // same reason `FsThemes::open` states: a name that could spell `..` is a
+    // file-read primitive. `default` is not refused here — it is simply not
+    // a file, and drops out of the filter below into the generator.
+    let source = source
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("default"));
+    if let Some(s) = source {
+        if !is_theme_name(s) {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "a theme's name is its file's: ascii letters, digits, - and _",
+            ));
+        }
+    }
+    // Checked before a byte is written, and for every edit, so a set with a
+    // bare name cannot leave half a save on disk. Refused loudly, not
+    // dropped: today no edit produces one, and the day one does, a silent
+    // skip would be a value the person set and the file never learned about.
+    for e in edits {
+        if !e.token.contains('.') {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("token without a section: {}", e.token),
+            ));
+        }
+    }
     let dir = user_themes_dir()
         .ok_or_else(|| Error::new(ErrorKind::NotFound, "no home, nowhere to save"))?;
     std::fs::create_dir_all(&dir)?;
-    let mut by_section: Vec<(String, Vec<(String, &str)>)> = Vec::new();
-    for e in edits {
-        let (section, key) = match e.token.split_once('.') {
-            Some(p) => p,
-            // Refused loudly, not dropped: today no edit produces a bare
-            // name, and the day one does, a silent skip would be a value
-            // the person set and the file never learned about.
-            None => {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    format!("token without a section: {}", e.token),
-                ))
-            }
-        };
-        match by_section.iter_mut().find(|(s, _)| s == section) {
-            Some((_, keys)) => keys.push((key.to_string(), e.value.as_str())),
-            None => by_section.push((section.to_string(), vec![(key.to_string(), e.value.as_str())])),
-        }
-    }
-    let mut text = String::new();
-    text.push_str("# Written by the theme editor. Regenerated WHOLE on every save —
-");
-    text.push_str("# notes added here by hand do not survive the next one.
-");
-    for (section, keys) in &by_section {
-        text.push_str(&format!("
-[{section}]
-"));
-        for (k, v) in keys {
-            text.push_str(&format!("{k} = {v}
-"));
-        }
-    }
     let path = dir.join(format!("{name}.theme"));
-    std::fs::write(&path, text)?;
+    let base = source.and_then(|s| {
+        // The user's own copy first — a theme saved here before is patched
+        // where it was written — then the walk, which is what materialises
+        // one that has only ever been installed.
+        std::fs::read_to_string(dir.join(format!("{s}.theme")))
+            .ok()
+            .or_else(|| installed_theme_text(s))
+    });
+    let text = match base {
+        Some(b) if !b.trim().is_empty() => patch_theme_text(name, &b, edits),
+        _ => generated_theme_text(edits),
+    };
+    write_theme_file(&dir, name, &text)?;
     Ok(path)
+}
+
+/// A theme name is a bare identifier, never a path — the rule
+/// `FsThemes::open` enforces on load, in one place so a save cannot enforce
+/// a different one.
+fn is_theme_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Replaces `<name>.theme` with `text`, keeping what stood there as
+/// `<name>[SAVE_BACKUP_SUFFIX]`.
+///
+/// The backup is written FIRST and its failure fails the save: a save with
+/// no rescue copy is exactly the one that must not happen, now that the
+/// bytes being replaced are the person's own work rather than this module's
+/// output. Then the new text goes to a temporary file and is RENAMED over
+/// the target, so the moment of replacement is one syscall wide.
+///
+/// A file identical to what is already there is still rewritten — the
+/// rename makes that harmless — but it does not move the backup, so pressing
+/// SAVE twice cannot cost the person the copy the first press made.
+fn write_theme_file(dir: &std::path::Path, name: &str, text: &str) -> std::io::Result<()> {
+    let path = dir.join(format!("{name}.theme"));
+    if let Ok(old) = std::fs::read_to_string(&path) {
+        if !old.trim().is_empty() && old != text {
+            std::fs::write(dir.join(format!("{name}{SAVE_BACKUP_SUFFIX}")), &old)?;
+        }
+    }
+    let tmp = dir.join(format!("{name}{SAVE_TEMP_SUFFIX}"));
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, &path)
+}
+
+/// The text of `<name>.theme` as the LOADER would find it, for a theme that
+/// has never been saved into the user's own directory. Same walk, same
+/// precedence, so the file a save starts from is the file the person is
+/// looking at.
+fn installed_theme_text(name: &str) -> Option<String> {
+    FsThemes::new()
+        .dirs
+        .iter()
+        .map(|d| d.join(format!("{name}.theme")))
+        .find(|p| p.is_file())
+        .and_then(|p| std::fs::read_to_string(p).ok())
+}
+
+/// A brand-new theme file: the edit set and nothing else.
+fn generated_theme_text(edits: &[edit::Edit]) -> String {
+    let mut text = String::from(SAVE_BANNER);
+    for (section, keys) in group_by_section(edits) {
+        text.push_str(&format!("\n[{section}]\n"));
+        for (k, v) in keys {
+            text.push_str(&format!("{k} = {v}\n"));
+        }
+    }
+    text
+}
+
+/// `elev.panel.glass.rank` under `[elev]` as `panel.glass.rank`: the split is
+/// at the FIRST dot and the loader concatenates `section.key` back, so any
+/// depth of key survives one section header. Sections keep the order the
+/// edits arrived in, which is the order `edit.rs` builds its groups in.
+fn group_by_section<'a>(edits: &'a [edit::Edit]) -> Vec<(&'a str, Vec<(&'a str, &'a str)>)> {
+    let mut out: Vec<(&str, Vec<(&str, &str)>)> = Vec::new();
+    for e in edits {
+        // Unreachable: `save_theme` refuses a set holding a bare name before
+        // it opens a file, so nothing is dropped here that a caller was not
+        // already told about.
+        let Some((section, key)) = e.token.split_once('.') else { continue };
+        match out.iter_mut().find(|(s, _)| *s == section) {
+            Some((_, keys)) => keys.push((key, e.value.as_str())),
+            None => out.push((section, vec![(key, e.value.as_str())])),
+        }
+    }
+    out
+}
+
+/// The file with the edits' values swapped in where they already stand, and
+/// appended where they do not. Everything else is copied through untouched.
+///
+/// Three rules decide what "where they already stand" means, and each one is
+/// a way a naive patch would corrupt a file:
+///
+/// * An OVERLAY section is not the base value. `[mood.alert]` and
+///   `[variant.x]` re-declare absolute tokens for one sibling only
+///   (`default.theme:4157` does exactly this to the panel-edge halo), and
+///   writing the editor's number there would change one mood and leave the
+///   theme itself alone.
+/// * A LOCALISED key (`meta.name[pl]`) addresses the same token in another
+///   language and is never what an edit means.
+/// * A value that does not sit whole on one line is left alone and the token
+///   is appended instead. `value_span.len` is the length of the JOINED text
+///   of a multi-line array while `.line` remembers only the first line, so
+///   patching that span by its numbers would cut the file mid-value. No
+///   `.theme` in the tree has one today; the guard is what makes that a fact
+///   about today rather than a bet ([`value_byte_range`]).
+///
+/// The first two are live shapes with a test each. The third is live too,
+/// and the rest of what [`value_byte_range`] checks is NOT — it is arithmetic
+/// about `parse.rs`' spans that holds by construction, written down as a
+/// refusal so that the day it stops holding the save appends instead of
+/// cutting. Which is which is said there, key by key, because an untestable
+/// check described as a live case reads as coverage nobody has.
+///
+/// WHAT IT DOES NOT FOLLOW: `@include`. The text is parsed by
+/// `parse::parse_text`, which hands the parser no base directory, so an
+/// include is skipped with a warning and the tokens it carries are not in
+/// this document at all. They therefore read as MISSING and are appended to
+/// the parent — where, being last, the cascade gives them the editor's
+/// value, so the save takes. The hole left is narrow and real: a token
+/// declared in the parent AND overridden by an include is patched in the
+/// parent and still loses to the include, so that one edit silently does not
+/// take. Following an include means deciding which file owns a token and
+/// writing into a file the caller did not name; it wants the owner, not a
+/// guess here.
+///
+/// The LAST plain declaration wins, because that is the one the cascade
+/// keeps: `cascade::apply_document` walks keys in file order and each one
+/// overwrites the last.
+fn patch_theme_text(name: &str, base: &str, edits: &[edit::Edit]) -> String {
+    let mut src = Sources::new();
+    let mut diags = Vec::new();
+    let doc = parse::parse_text(&mut src, name, base, &mut diags);
+    let starts = line_starts(base);
+
+    let mut spans: HashMap<String, (usize, usize)> = HashMap::new();
+    if let Some(doc) = doc.as_ref() {
+        for kv in &doc.keys {
+            if kv.locale.is_some() {
+                continue;
+            }
+            let overlay = doc
+                .sections
+                .get(kv.section as usize)
+                .map(parse::Section::is_overlay)
+                .unwrap_or(false);
+            if overlay {
+                continue;
+            }
+            // File 0 is the text handed in, and today it is the only file
+            // there is: `parse_text` passes no base directory, so `do_include`
+            // warns and skips rather than opening anything, and `Sources` was
+            // made empty two lines above — the first `add` is 0. So this
+            // never fires. It stands as the seatbelt for the day an include
+            // IS followed here, because a span measured in another file would
+            // address arbitrary bytes of this one and `value_byte_range`
+            // would have no way to know: its checks all pass on a line that
+            // merely happens to look like a value.
+            if kv.value_span.file != 0 {
+                continue;
+            }
+            if let Some(r) = value_byte_range(base, &starts, kv.value_span) {
+                spans.insert(kv.token(), r);
+            }
+        }
+    }
+
+    let mut swaps: Vec<(usize, usize, &str)> = Vec::new();
+    let mut missing: Vec<edit::Edit> = Vec::new();
+    for e in edits {
+        match spans.get(e.token) {
+            // A repeated token in one set is the LAST one's value, the same
+            // rule the file itself is read by.
+            Some(&(a, b)) => match swaps.iter_mut().find(|(s, _, _)| *s == a) {
+                Some(slot) => slot.2 = e.value.as_str(),
+                None => swaps.push((a, b, e.value.as_str())),
+            },
+            None => match missing.iter_mut().find(|m| m.token == e.token) {
+                Some(slot) => slot.value = e.value.clone(),
+                None => missing.push(e.clone()),
+            },
+        }
+    }
+
+    let mut out = base.to_string();
+    swaps.sort_by_key(|(a, _, _)| *a);
+    // Back to front, so an earlier swap's offsets are still the offsets of
+    // the string being edited.
+    for (a, b, v) in swaps.into_iter().rev() {
+        out.replace_range(a..b, v);
+    }
+
+    if !missing.is_empty() {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        if !out.contains(SAVE_APPEND_BANNER) {
+            out.push('\n');
+            out.push_str(SAVE_APPEND_BANNER);
+            out.push_str(
+                " Tokens the file did not carry yet;\n\
+                 # from here on they are patched in place like every other.\n",
+            );
+        }
+        for (section, keys) in group_by_section(&missing) {
+            out.push_str(&format!("\n[{section}]\n"));
+            for (k, v) in keys {
+                out.push_str(&format!("{k} = {v}\n"));
+            }
+        }
+    }
+    out
+}
+
+/// Byte offset of the start of every line, indexed the way `Span::line` is
+/// (line 1 is entry 0).
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut out = vec![0usize];
+    out.extend(text.match_indices('\n').map(|(i, _)| i + 1));
+    out
+}
+
+/// Where a value's text actually lies in the file, or `None` when the span
+/// cannot be trusted to say.
+///
+/// `Span::col` and `Span::len` are BYTES (`parse.rs`' `indent` and
+/// `find_assign` both count them), and `strip_comment` returns a PREFIX of
+/// its line, so an offset measured on the code half of a line is an offset
+/// into the raw line as well.
+///
+/// ONE of the checks below answers a shape a `.theme` can really have: the
+/// span running past the end of the code is how a multi-line value gives
+/// itself away, because `parse.rs` measures such a span on the JOINED text
+/// and the join is always longer than what the first line has left. That one
+/// is pinned by a test.
+///
+/// The others cannot be reached from `parse.rs` as it stands — a value span
+/// starts at the first non-blank byte after `=` and is exactly the trimmed
+/// value long, so it can neither carry whitespace at an end nor leave code
+/// behind it — and they are here as a CHECKSUM on that arithmetic rather
+/// than as handling for a case. If a future `parse.rs` makes a span mean
+/// something else, the patch refuses the token and appends it instead of
+/// cutting the file at numbers it no longer understands. Saying so plainly
+/// beats calling them guards, which reads as coverage that does not exist:
+/// remove them today and every test still passes.
+fn value_byte_range(text: &str, starts: &[usize], span: Span) -> Option<(usize, usize)> {
+    let idx = (span.line as usize).checked_sub(1)?;
+    let start = *starts.get(idx)?;
+    let end_of_line = text[start..].find('\n').map(|i| start + i).unwrap_or(text.len());
+    let line = &text[start..end_of_line];
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    let code = line.get(..parse::code_len(line))?;
+    let a = (span.col as usize).checked_sub(1)?;
+    let b = a.checked_add(span.len as usize)?;
+    // The live one: a multi-line value.
+    if b > code.len() {
+        return None;
+    }
+    // Checksum from here down; see this function's note.
+    let value = code.get(a..b)?;
+    if value.is_empty() || value.trim().len() != value.len() {
+        return None;
+    }
+    if !code.get(b..)?.trim().is_empty() {
+        return None;
+    }
+    Some((start + a, start + b))
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -2466,6 +2827,56 @@ decor.enabled    = false
                 hue_gap(ok.h, crit.h)
             );
         }
+    }
+
+    /// A LOCALISED key is a different string in the same token's slot, and
+    /// `KeyVal::token` deliberately does not spell the locale — `meta.name`
+    /// and `meta.name[pl]` answer to the same name. So the map of "where
+    /// this token stands" would take whichever came LAST in the file, and
+    /// with the translation last that is the Polish line. Then a save of
+    /// `meta.name` would rewrite the translation and leave the name it was
+    /// asked to change exactly where it was: two wrongs in one swap.
+    ///
+    /// Pure text, no engine: `patch_theme_text` reads a `Sources` it makes
+    /// itself, which is what lets this be a unit test rather than a process.
+    #[test]
+    fn a_translation_is_not_the_slot_a_save_writes_into() {
+        let base = "[meta]\nname = \"Base\"\nname[pl] = \"Polski\"\n";
+        let out = patch_theme_text(
+            "t",
+            base,
+            &[edit::Edit { token: "meta.name", value: "\"Nowy\"".to_string() }],
+        );
+        assert!(out.contains("name = \"Nowy\""), "the name the save named did not change:\n{out}");
+        assert!(
+            out.contains("name[pl] = \"Polski\""),
+            "the save wrote the new name into the Polish translation:\n{out}"
+        );
+    }
+
+    /// `@include` is not followed here (`parse_text` hands the parser no
+    /// base directory), so the tokens it carries are invisible to the patch
+    /// and read as missing. Appending them is the right answer — last
+    /// declaration wins the cascade — and the include line itself has to
+    /// survive, because rewriting a file must never cost it a directive.
+    #[test]
+    fn an_include_survives_a_save_and_what_it_carries_is_appended() {
+        let base = "[palette]\naccent = #FF2A35\n@include \"reszta.theme\"\n";
+        let out = patch_theme_text(
+            "t",
+            base,
+            &[edit::Edit { token: "corner.mode", value: "chamfer".to_string() }],
+        );
+        assert!(
+            out.contains("@include \"reszta.theme\""),
+            "the include directive was dropped by the save:\n{out}"
+        );
+        assert!(out.contains("mode = chamfer"), "the edit was lost:\n{out}");
+        assert!(
+            out.find("mode = chamfer") > out.find("@include"),
+            "the appended token landed before the include, which would then \
+             overwrite it:\n{out}"
+        );
     }
 
     #[test]
