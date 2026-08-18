@@ -5139,12 +5139,12 @@ body_top = 14.4u                    # where the modal body starts · - · len (u
 row_gap = @space.5                  # gap between two setting rows · - · len (u) · @space.5 = 3u = 16.2 px
 
 [settings]
-back_w_frac = 22%                   # width of the back/navigation column · - · % of the modal's width · -
-back_w_min = 13u                    # minimum width of that column · - · len (u) · 70.2 px
+back_w_frac = 22%                   # width of the chrome button (BACK/CLOSE) where the window has FOLDED · - · % of the modal's width · since 2026-08-18 the unfolded window gives that button the rail's own width less band_pad_x, because it stands ON the rail's bed; folded there is no rail and this is the rule again
+back_w_min = 13u                    # minimum width of that button · - · len (u) · 70.2 px
 back_w_min_min_px = 70px            # absolute floor for back_w_min · - · device px · companion of settings.back_w_min (3.2)
 list_w_frac = 60%                   # width of the settings list column · - · % of the modal's width · -
 grid_cols = 3                       # columns in the settings icon grid · - · n · -
-col_gap = @space.6                  # rynna między kolumnami pasa · - · len (u) · 4u = 21.6 px
+col_gap = @space.6                  # rynna między kolumnami pasa · - · len (u) · 4u = 21.6 px; settings.band_pad_x — the air INSIDE a column's bed — has to stay UNDER this number, or a button reads as no further from the next column than from its own bed's edge and the two columns fuse into one (2026-08-18)
 zone_gap = @space.6                 # odstęp pionowy między pasami · - · len (u) · = section_gap, jeden rytm
 col_min_w = 72u                     # próg: węższa kolumna = pas składa się do listy · - · len (u) · 388.8 px
 col_min_w_min_px = 360px            # podłoga companion (3.2) · - · device px · dobrana tak, by 500 px składało, 720p+ trzymało kolumny
@@ -5159,18 +5159,27 @@ note.role = caption                 # type role of a section note · - · role �
 row_label_role = body               # type role of every settings row label: COLUMNS, PADDING, VOLUME … · - · role · settings.rs:925 and four siblings, all font_px(1.0)
 section_role = label.section        # type role of a section header inside a page: the FONT view's TERMINAL and INTERFACE · - · role · type.label.section, the role settings.rs spelled out for these two headers before a binding existed
 section_gap = @space.6              # the break between the BACK row and the first setting · - · len (u) · @space.6 = 4u = 21.6 px; settings.rs:926's undeclared gap*2.0
-band_lift = 1.20                    # one column's bed against the bed of the column INSIDE it, as a multiple of OKLab L · - · f, 0.5 .. 2.0 · read by component.settings.*_fill (5.26) and applied twice, off the window body outwards
+band_lift = 1.20                    # the navigation's bed against the window body it lies on, as a multiple of OKLab L · - · f, 0.5 .. 2.0 · read ONCE, by component.settings.sub_fill (5.26); rail_fill points at that same colour, so the two navigation columns are one bed in two boxes
+band_pad_x = @space.4               # air between a navigation column's bed and the buttons standing on it, left and right · - · len (u) · @space.4 = 2u = 10.8 px; a control flush with the bed under it reads as a slice OF the bed, not as a thing lying on it (owner, 2026-08-18); MUST STAY UNDER settings.col_gap (4u), the gutter to the next column — the rule is written out there
+band_pad_y = @space.4               # the same air at the top and the bottom of that bed · - · len (u) · @space.4 = 2u = 10.8 px; the same number as band_pad_x, because a plate with more air on one axis than the other reads as tilted
 band_corner = @corner.md            # the corner a navigation column's bed wears · - · len (u) · @corner.md = 1.2u = 6.5 px; the panel/card radius, one step under the @corner.lg of the modal these columns stand inside — a nested box takes the smaller arc or it reads as the wider one
 band_corner_mode = @corner.mode     # how that corner is cut · - · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
-# WHY A COLUMN'S BED IS CUT ON ALL FOUR CORNERS. Measured on this file's own
-# numbers: the bands are laid inside `content_rect`, which insets the modal by
-# `modal.pad` (2.8u = 15.1 px) on the left, the right and the bottom, and drops
-# `modal.body_top` (14.4u) from the top before the BACK row takes another
-# button's height. So no corner of any band ever reaches the frame — there is
-# 15 px of window body between the outermost band and the nearest edge on every
-# side that could meet one. A corner that meets nothing has nothing to square
-# itself against: the band is a plate lying ON the body, not a piece cut out of
-# it, and a plate is cut the same on all four. The other case — a theme setting
+# WHY A COLUMN'S BED IS CUT ON ALL FOUR CORNERS — AND WHY THAT SURVIVED THE
+# BANDS GROWING TO FULL HEIGHT. Since 2026-08-18 a navigation column's bed is
+# its WHOLE column of `content_rect`, top edge to bottom edge: the corner
+# button no longer stands in a notch bitten out of the bed, it stands ON the
+# bed, `band_pad_y` down from its top edge. That closed a 61.6 px gap above
+# each navigation band (button.h 45.4 + modal.row_gap 16.2) which the page
+# column never had — the "islands" the owner photographed.
+#
+# It did NOT bring any corner to the frame, and the measurement is this file's
+# own: `content_rect` insets the modal by `modal.pad` (2.8u = 15.1 px) on the
+# left, the right and the bottom, and drops `modal.body_top` (14.4u = 77.8 px)
+# from the top for the title band. A band filling that box therefore still
+# stands 15.1 px clear of the frame on every side it could meet, and 77.8 px
+# clear at the top. A corner that meets nothing has nothing to square itself
+# against: the band is a plate lying ON the body, not a piece cut out of it,
+# and a plate is cut the same on all four. The other case — a theme setting
 # `modal.pad = 0`, where the outer corners WOULD meet the frame and would have
 # to take `modal.corner` instead — is a theme this master does not ship and a
 # rule no reader can guess; it is named here so the day it arrives it is
@@ -5444,10 +5453,24 @@ editor.hold_fill = alpha(@accent.primary, 0.25)  # the hold-to-place progress wa
 nameplate.fill = alpha(@surface.raised, 0.90)    # the plate behind a floating name label · images 1,7 · col · @surface.raised at 0.90
 
 # ---------------------------------------------------------------- settings bands
-# THREE BANDS, ONE HUE, THREE SHADES (owner, 2026-08-17). The settings
-# window stands in three columns — the section rail, the sub-page column
-# beside it, and the page — and each is to read as a different SHADE of the
-# same colour, never a different colour.
+# ONE BED FOR THE NAVIGATION, AND THE PAGE IS THE BODY (owner, 2026-08-18:
+# "mają być po całości i obie w jednakowym kolorze, tym w środkowej kolumnie").
+# The settings window stands in three columns — the section rail, the sub-page
+# column beside it, and the page. The two NAVIGATION columns are one bed in two
+# boxes, at the colour the middle column had; the page keeps the window body.
+#
+# WHAT THIS REPLACED, and why the replacement is a decision and not a
+# regression. Until 2026-08-18 the three columns were three SHADES of one hue,
+# `band_lift` applied twice off the body — L 0.232 / 0.278 / 0.334, a staircase
+# climbing outward. It was defensible and the owner rejected it on sight: three
+# shades across two adjacent strips of the same navigation reads as a seam
+# through one object, not as depth. `band_lift` is still the knob and still
+# decides direction as well as size (below 1.0 the navigation sits UNDER the
+# page, the escape a LIGHT theme takes; at exactly 1.0 the whole interior is
+# one colour) — it is simply applied ONCE now, and both columns read it through
+# the one expression. A theme that wants the old staircase back writes
+# `settings.rail_fill = lum(@component.settings.sub_fill, @settings.band_lift)`
+# and has it, which is the whole reason these are three named tokens.
 #
 # WHAT WAS WRONG WITH THE FIRST ANSWER (owner, from a screenshot, 2026-08-17:
 # "both navigation columns are BLACK"). The two bands were pointed straight
@@ -5470,32 +5493,31 @@ nameplate.fill = alpha(@surface.raised, 0.90)    # the plate behind a floating n
 # apart down the middle. A ladder whose rungs are anchored to three different
 # things is not a ladder.
 #
-# THE ANSWER: THE LADDER IS MEASURED FROM THE BODY, NOT FROM THE FLOOR. The
-# page's bed is `component.panel.fill` and the other two are that same bed
-# lifted by `settings.band_lift` (1.20) once and twice. On this master's own
-# numbers that lands them at OKLab L 0.232 -> 0.278 -> 0.334 — within 0.005 of
-# the ladder's own `inset` (0.283) and `raised` (0.330) rungs, so the surface
-# ladder is still what the eye sees, while the ANCHOR is the one thing every
-# author and every slider already moves. Encoded, the three now reach the codes
-# 32 / 44 / 58: no band is black, and every step is a dozen codes wide. As WCAG
-# contrast against pure black — the ruler that does not flatten down there —
-# 1.26 / 1.44 / 1.76 where the old pair read 1.03 and 1.12.
+# THE ANSWER: THE BED IS MEASURED FROM THE BODY, NOT FROM THE FLOOR. The page's
+# bed is `component.panel.fill` and the navigation's is that same bed lifted
+# once by `settings.band_lift` (1.20). On this master's own numbers that lands
+# it at OKLab L 0.232 -> 0.278 — within 0.005 of the ladder's own `inset`
+# (0.283) rung, so the surface ladder is still what the eye sees, while the
+# ANCHOR is the one thing every author and every slider already moves. Encoded,
+# the two reach the codes 32 and 44: neither is black, and the step is a dozen
+# codes wide. As WCAG contrast against pure black — the ruler that does not
+# flatten down there — 1.26 and 1.44, where the old pair read 1.03 and 1.12.
 #
-# WHY THE STAIRCASE CLIMBS OUTWARD. The page is the well and the navigation is
-# the rim: the further from the content, the higher the bed. That also puts the
-# two columns on the material `@surface.inset` and `@surface.raised` describe —
-# "a bordered box nested inside a panel" and the floating chrome of menus and
-# the taskbar — which is what a navigation column is. A menu opened over the
-# rail shares that rung; what keeps the two apart is the menu's own ring
+# WHY THE NAVIGATION STANDS ABOVE THE PAGE AND NOT BELOW IT. The page is the
+# well and the navigation is the rim: the chrome you steer with lies ON the
+# thing you are steering. That also puts the navigation on the material
+# `@surface.inset` describes — "a bordered box nested inside a panel" — which
+# is what a navigation column is. A menu opened over the rail lands one rung
+# further up; what keeps the two apart is the menu's own ring
 # (`component.menu.edge`), not its bed, which is how every float on that rung
 # has always been separated from what it floats over.
 #
 # `band_lift` DECIDES THE DIRECTION AS WELL AS THE SIZE, and that is deliberate.
 # Above 1.0 the chrome stands above the page, which is right for a dark theme
 # where there is no room below. A LIGHT theme sets it under 1.0 — `0.85`, say —
-# and the same two expressions run the staircase downward instead, with no
-# other edit and no second set of tokens. At exactly 1.0 the three columns are
-# one colour, which is the honest way to say "no stripes".
+# and the same expression runs the step downward instead, with no other edit
+# and no second token. At exactly 1.0 the whole interior is one colour, which is
+# the honest way to say "no bands at all".
 #
 # THE PAGE'S OWN NAME IS HERE TOO, AND IT IS THE SENTINEL. All three columns
 # are named, so a theme may bed any one of them; the master leaves the page's
@@ -5511,17 +5533,24 @@ nameplate.fill = alpha(@surface.raised, 0.90)    # the plate behind a floating n
 # own alpha through the expression, which is what keeps a blurred or
 # translucent window blurred and translucent across all three columns.
 #
+# THE TWO NAVIGATION COLUMNS ARE ONE COLOUR SAID TWICE, not one token used
+# twice: `rail_fill` points at `sub_fill`, so the master's answer is "the same
+# bed" and a theme that disagrees still has two names to part. Pointing the
+# rail at the sub-page column rather than the other way round is deliberate —
+# the owner named the middle column as the one whose colour was right, and this
+# file records the choice where the choice was made.
+#
 # WHEN THE WINDOW FOLDS — content narrower than settings.col_min_w — there
 # are no columns: the rail's rows become the first bands of the one vertical
 # flow. A band's fill is a COLUMN's fill, so a folded window paints none of
 # these and the body stands alone over the whole interior — which is the rung
 # the page was on all along, so a folded window looks exactly as it does
 # today. No stripes, and no special case in Rust to keep them away.
-settings.page_fill = none             # the page column's bed · - · col | none · sentinel none = draw nothing; the window body (@component.panel.fill) is already standing there, and it is the rung the other two are measured from
+settings.page_fill = none             # the page column's bed · - · col | none · sentinel none = draw nothing; the window body (@component.panel.fill) is already standing there, and it is the rung the navigation is measured from
 settings.sub_fill = lum(@component.panel.fill, @settings.band_lift)
-                    # the sub-page column's bed: the body, one lift up · - · col · L 0.232 x 1.20 = 0.278, beside the ladder's own @surface.inset (0.283); the body's alpha rides through lum() untouched
-settings.rail_fill = lum(@component.settings.sub_fill, @settings.band_lift)
-                    # the section rail's bed: the same lift again, off the column INSIDE it · - · col · L 0.278 x 1.20 = 0.334, beside the ladder's own @surface.raised (0.330); written off sub_fill rather than off the body so that ONE number states the whole staircase
+                    # the sub-page column's bed, and through rail_fill the whole navigation's: the body, one lift up · - · col · L 0.232 x 1.20 = 0.278, beside the ladder's own @surface.inset (0.283); the body's alpha rides through lum() untouched
+settings.rail_fill = @component.settings.sub_fill
+                    # the section rail's bed: THE SAME BED as the column beside it · - · col · owner 2026-08-18 — two navigation columns, one colour, "tym w środkowej kolumnie"; a second lift lived here until then and made a seam through one object
 
 # ---------------------------------------------------------------- toast / terminal chrome
 toast.title = @severity.warning.text    # the WARNING word at the top of a toast · - · col · popup.rs:65 draws it in the chrome accent; the toast says "warning" and [severity] exists for exactly this
