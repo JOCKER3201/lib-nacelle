@@ -147,6 +147,7 @@ fn the_shape_words_reach_the_record_as_kinds() {
         fill: Some(INK),
         stroke: None,
         glass: None,
+        soft: None,
     });
     let rec = dl.shapes()[0];
     assert_eq!((rec.flags >> 8) & 0xF, 2, "the record did not come out a hexagon");

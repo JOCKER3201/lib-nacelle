@@ -69,9 +69,20 @@ pub const ADD_ATLAS: ImageId = ImageId(u32::MAX - 8);
 /// the renderer's `fs_shape` — every vertex carries the index of one
 /// [`Shape`] record and its `uv` is the local position in px from that
 /// record's centre. Normal blend, and nothing sampled: the record IS
-/// the picture. The additive lane (`SHAPE_ADD`) is still ahead — see
-/// the note on [`DrawList::glow_ring`] for why.
+/// the picture. Its additive twin is [`SHAPE_ADD`].
 pub const SHAPE: ImageId = ImageId(u32::MAX - 4);
+/// The vector core's ADDITIVE lane (f3 §2.6): the same `fs_shape` over
+/// the same records, under the blend [`ADD_ATLAS`] already carries —
+/// SRC_ALPHA/ONE colour, ZERO/ONE alpha.
+///
+/// It is a second HANDLE and not a second flag because the difference
+/// is blend state, and blend state is fixed for a whole pipeline before
+/// the first fragment of a run is shaded: no bit a fragment could read
+/// can decide whether its answer is added to the target or laid over
+/// it. The record says which silhouette and how soft; the run says
+/// whether that is light or cover. A glow takes this lane, a shadow the
+/// plain one, and the fragment is the same code in both.
+pub const SHAPE_ADD: ImageId = ImageId(u32::MAX - 9);
 /// The vector core's GLASS lanes (f3 §3.3, K3b): a run tagged with one
 /// of these draws through `fs_shape_glass` — the same record, the same
 /// analytic silhouette, and one sample of the pyramid rank the HANDLE
@@ -144,8 +155,10 @@ pub struct Shape {
     /// Stroke band width, INWARD from the boundary (the project's
     /// convention — see [`DrawList::ring`]); 0 = no band.
     pub stroke: f32,
-    /// Softness: shadow feather / glow reach; 0 = crisp. Always 0 so
-    /// far — the soft profiles (§2.6) are still ahead.
+    /// Softness: where the gaussian profile reaches zero, px past the
+    /// boundary; 0 = crisp. Read only with [`Shape::GAUSS`], and it is
+    /// the ONE number the band and the quad have to be told about
+    /// before they are cut — see [`Soft`] and `shape_verts`' envelope.
     pub feather: f32,
     /// The kind's LENGTHS, local px, sentinels already resolved on the
     /// CPU (R9): never negative here. Box spends all four on its corner
@@ -159,9 +172,9 @@ pub struct Shape {
     /// Bits 0-7: [`CornerStyle`] × 4 (tl, tr, br, bl), 2 bits each —
     /// Box's, and zero under every other kind. Bits 8-11:
     /// [`ShapeKind::code`]. Bit 12 [`Shape::FILL`], bit 13
-    /// [`Shape::STROKE`]. Bits 14-31 are unclaimed and MUST be zero;
-    /// 14, 15 and 16 are spoken for by §2.5's table (`OUTSIDE_ONLY`,
-    /// `GAUSS` and the kind modifier, all with the soft profiles).
+    /// [`Shape::STROKE`], bit 14 [`Shape::OUTSIDE_ONLY`], bit 15
+    /// [`Shape::GAUSS`]. Bits 16-31 are unclaimed and MUST be zero; 16
+    /// is spoken for by §2.5's table (the kind modifier).
     ///
     /// **There is no GLASS bit, and for one day there was.** A frost is
     /// told apart by the two things that actually decide the picture:
@@ -207,8 +220,33 @@ impl Shape {
     pub const FILL: u32 = 1 << 12;
     /// Bit 13: draw the inward stroke band with `stroke_c`.
     pub const STROKE: u32 = 1 << 13;
+    /// Bit 14: the coverage is zero INSIDE the silhouette — a glow
+    /// lights what is around a shape and must not tint a translucent
+    /// fill through it (the rule the tessellated glow got by emitting
+    /// no geometry inside its path).
+    ///
+    /// It is not the crisp cut §2.5 wrote. What multiplies the profile
+    /// is the area of the pixel the silhouette does NOT cover,
+    /// `clamp(0.5 + d/w)` — geometry, evaluated once, and exactly 1 as
+    /// soon as the fragment is half a pixel clear of the boundary. A
+    /// step function there would put a stair on the one edge this whole
+    /// lane exists to smooth, and would leave a seam against the panel
+    /// standing on it: the panel's own AA gives that boundary pixel a
+    /// half, and the glow under it has to give the other half.
+    pub const OUTSIDE_ONLY: u32 = 1 << 14;
+    /// Bit 15: the softness profile of §2.6 instead of the crisp
+    /// coverage ramp — [`crate::sdf::soft_profile`], which is
+    /// `FontSystem::bake_masks`' own gaussian to the letter, so a glow
+    /// moved onto this lane keeps its CHARACTER and only loses the
+    /// nine-slice's stretched middle.
+    pub const GAUSS: u32 = 1 << 15;
     /// Bits 8-11 carry the [`ShapeKind`].
     pub const KIND_SHIFT: u32 = 8;
+    /// Bits 14-15: the soft profile's own pair. A record carrying
+    /// either draws a different FUNCTION of the distance, not another
+    /// part of one silhouette, which is why the weld refuses it (§2.10)
+    /// and why the core split refuses it too.
+    pub const SOFT: u32 = Shape::OUTSIDE_ONLY | Shape::GAUSS;
     /// Bits 0-11: everything that describes the SILHOUETTE — the four
     /// corner treatments and the kind — as against the parts drawn on
     /// it. Two records agreeing here and on the numbers above outline
@@ -296,8 +334,41 @@ impl ShapeKind {
     }
 }
 
-/// One shape as the caller means it (f3 §2.11: bed and edge; glow and
-/// shadow are still ahead). Bed and edge SHARE the record
+/// The two soft parts of the vector family (f3 §2.6, and §4.6/§4.7 of
+/// the scope decision), which are ONE mechanism wearing two settings.
+///
+/// A glow and a shadow differ in exactly two things, and both of them
+/// are here: whether the interior draws ([`Shape::OUTSIDE_ONLY`]) and
+/// whether the run adds light or covers ([`SHAPE_ADD`] against
+/// [`SHAPE`]). The profile, the field, the fragment and the record are
+/// the same in both. Spelling them as one enum rather than two booleans
+/// is what stops a caller from asking for the two combinations nobody
+/// means — an inside-only glow that lights nothing, or a shadow that
+/// brightens what it falls on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SoftKind {
+    /// Light around the silhouette, nothing within it: `glow.*`.
+    Glow,
+    /// A plateau under the whole silhouette, falling off outside it:
+    /// `shadow.*`. The offset is the CALLER's — a shadow is its own
+    /// record, so a shifted shadow is a shifted rect and the record
+    /// needs no field for it.
+    Shadow,
+}
+
+/// The soft profile a shape wears, or [`None`] for a crisp one.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Soft {
+    /// Where the profile reaches zero, px past the boundary: the
+    /// theme's `glow.<class>.radius` or `shadow.radius`. σ is a third
+    /// of it — [`crate::sdf::soft_profile`] carries the derivation and
+    /// the reason it is not a token.
+    pub reach: f32,
+    pub kind: SoftKind,
+}
+
+/// One shape as the caller means it (f3 §2.11: bed, edge, glow and
+/// shadow). Bed and edge SHARE the record
 /// when both are present, because they share a silhouette — as two
 /// records their antialiased outer edges would blend twice on the same
 /// pixels and a translucent panel over glass would grow a dark rim
@@ -322,6 +393,21 @@ pub struct ShapeSpec {
     /// its own because it is part of the same silhouette: one record,
     /// one edge, one coverage — the whole reason K3b exists.
     pub glass: Option<Frost>,
+    /// The softness profile (§2.6), or none for a crisp shape.
+    ///
+    /// Unlike the frost this is NOT another layer of one surface: the
+    /// glow around a panel and the shadow under it are separate records
+    /// from the panel, because they are separate functions of the same
+    /// distance and the blender must see them one after another. What
+    /// they share with the panel is the silhouette, and that is why
+    /// they belong in this type at all — a glow that did not read the
+    /// same corners would be the square-bloom bug in a new place.
+    ///
+    /// A soft record carries no `stroke`: the band's coverage is the
+    /// difference of two CRISP ramps and means nothing under a
+    /// gaussian. `shape_verts` asserts it rather than silently dropping
+    /// one of the two.
+    pub soft: Option<Soft>,
 }
 
 /// The blurred scene behind a surface, as a shape carries it (f3 §3.3).
@@ -943,6 +1029,11 @@ pub enum DrawCmd {
         kind: ShapeKind,
         fill: Option<Color>,
         stroke: Option<(f32, Color)>,
+        /// The soft profile, when the caller asked for one. `glow_ring`
+        /// and `shadow` keep their OWN names in the register whichever
+        /// lane draws them, exactly as `ring` does — this slot is for a
+        /// caller who spelled the softness through [`DrawList::shape`].
+        soft: Option<Soft>,
     },
     GlassFill { r: [f32; 4], corners: [Corner; 4], depth: f32, tint: Color },
     RectGrad { r: [f32; 4], stops: Vec<(f32, Color)>, angle: f32 },
@@ -953,7 +1044,13 @@ pub enum DrawCmd {
     MaskQuad { p: [[f32; 2]; 4], uv: [[f32; 2]; 4], color: Color, additive: bool },
     GlowRing { r: [f32; 4], corners: [Corner; 4], radius: f32, color: Color },
     SoftBox { r: [f32; 4], radius: f32, color: Color },
-    Shadow { r: [f32; 4], offset: [f32; 2], radius: f32, color: Color },
+    Shadow {
+        r: [f32; 4],
+        corners: [Corner; 4],
+        offset: [f32; 2],
+        radius: f32,
+        color: Color,
+    },
     Text {
         at: [f32; 2],
         anchor: TextAnchor,
@@ -1201,7 +1298,7 @@ impl fmt::Display for DrawCmd {
                 corners(f, c)?;
                 rgba(f, *color)
             }
-            DrawCmd::Shape { r, corners: c, kind, fill, stroke } => {
+            DrawCmd::Shape { r, corners: c, kind, fill, stroke, soft } => {
                 f.write_str("shape at")?;
                 nums(f, r, PX)?;
                 corners(f, c)?;
@@ -1236,6 +1333,13 @@ impl fmt::Display for DrawCmd {
                 if let Some((w, col)) = stroke {
                     field(f, "stroke", *w, PX)?;
                     rgba(f, *col)?;
+                }
+                if let Some(soft) = soft {
+                    f.write_str(match soft.kind {
+                        SoftKind::Glow => " glow",
+                        SoftKind::Shadow => " shadow",
+                    })?;
+                    field(f, "reach", soft.reach, PX)?;
                 }
                 Ok(())
             }
@@ -1307,9 +1411,10 @@ impl fmt::Display for DrawCmd {
                 field(f, "radius", *radius, PX)?;
                 rgba(f, *color)
             }
-            DrawCmd::Shadow { r, offset, radius, color } => {
+            DrawCmd::Shadow { r, corners: c, offset, radius, color } => {
                 f.write_str("shadow at")?;
                 nums(f, r, PX)?;
+                corners(f, c)?;
                 f.write_str(" offset")?;
                 nums(f, offset, PX)?;
                 field(f, "radius", *radius, PX)?;
@@ -1968,6 +2073,7 @@ impl DrawList {
                 fill: None,
                 stroke: Some((stroke, color)),
                 glass: None,
+                soft: None,
             });
             return;
         }
@@ -2154,6 +2260,7 @@ impl DrawList {
                 fill: Some(color),
                 stroke: None,
                 glass: None,
+                soft: None,
             });
             return;
         }
@@ -2195,8 +2302,8 @@ impl DrawList {
     /// K6 gave bits 8-11 a reader, so Ring, Hex and Chevron now draw as
     /// themselves rather than as their bounding box; `Capsule` is still
     /// recorded and still drawn as a box, because nothing emits one and
-    /// `line()` tessellates. Glow and shadow (the `feather` slot) are
-    /// still ahead.
+    /// `line()` tessellates. The `feather` slot has a writer since the
+    /// soft profiles landed: see [`Soft`].
     pub fn shape(&mut self, s: &ShapeSpec) {
         self.cmd(|| DrawCmd::Shape {
             r: [s.rect.x, s.rect.y, s.rect.w, s.rect.h],
@@ -2204,6 +2311,7 @@ impl DrawList {
             kind: s.kind,
             fill: s.fill,
             stroke: s.stroke,
+            soft: s.soft,
         });
         self.shape_verts(s);
     }
@@ -2227,6 +2335,21 @@ impl DrawList {
         if fill.is_none() && stroke.is_none() && s.glass.is_none() {
             return;
         }
+        // The softness, resolved once: a reach that is not positive is
+        // no softness at all, and a crisp record is what the caller
+        // then gets — the same degeneracy `glow_ring` has always had at
+        // radius 0.
+        let soft = s.soft.filter(|f| f.reach > 0.0);
+        debug_assert!(
+            !(soft.is_some() && stroke.is_some()),
+            "a soft record has no band: the stroke's coverage is the \
+             difference of two crisp ramps and means nothing under a gaussian"
+        );
+        debug_assert!(
+            !(soft.is_some() && s.glass.is_some()),
+            "a soft record reads no pyramid: the frosted fragment composes \
+             a crisp band over a blurred sample, which a profile is not"
+        );
         let snap = self.warp <= 1;
         if snap {
             // §2.7: an axis-aligned shape snaps its OUTER edges to the
@@ -2328,6 +2451,17 @@ impl DrawList {
         if stroke.is_some() {
             flags |= Shape::STROKE;
         }
+        // §2.6's pair. GAUSS says WHAT function of the distance the
+        // fragment computes; OUTSIDE_ONLY says where it is allowed to
+        // be non-zero. The third difference between a glow and a
+        // shadow — light against cover — is the run's, below.
+        let feather = soft.map_or(0.0, |f| f.reach);
+        if let Some(f) = soft {
+            flags |= Shape::GAUSS;
+            if f.kind == SoftKind::Glow {
+                flags |= Shape::OUTSIDE_ONLY;
+            }
+        }
         // A frost claims no bit here: `tint` below says it, the run's
         // handle binds it, and the fragment needs neither told twice.
         let half = [r.w * 0.5, r.h * 0.5];
@@ -2351,7 +2485,18 @@ impl DrawList {
                 // the second layer needs its own record and its own
                 // run. The wash and the border that follow have no such
                 // trouble: they read no target at all.
-                && s.glass.is_none();
+                && s.glass.is_none()
+                // NOR DOES A SOFT RECORD, and this one is load-bearing:
+                // [`Shape::SILHOUETTE`] is bits 0-11, so a glow around
+                // a panel matches that panel's bits EXACTLY — same
+                // corners, same kind — and without this clause the
+                // glow's colour would be composited into the panel's
+                // quad and its profile lost. The soft bits are
+                // deliberately outside SILHOUETTE (they do not change
+                // which curve is drawn, only what is drawn about it),
+                // so the refusal has to be said here rather than fall
+                // out of the mask.
+                && soft.is_none();
             if fits {
                 // A second fill goes into the quad that is already
                 // there. The record keeps its FILL bit — one bed, one
@@ -2408,7 +2553,7 @@ impl DrawList {
         self.shapes.push(Shape {
             half,
             stroke: stroke_w,
-            feather: 0.0,
+            feather,
             corner,
             stroke_c,
             flags,
@@ -2417,16 +2562,34 @@ impl DrawList {
             _pad: 0.0,
             tint: s.glass.map_or([0.0; 4], |g| g.tint.to_array()),
         });
-        // The quad reaches one pixel past the silhouette so the AA ramp
-        // has somewhere to land (a feather would join this margin). The
-        // vertex colour is the fill's — or the stroke's when there is
-        // no fill, so §2.10's mix starts from the band's own colour and
-        // the band's inner AA edge cannot pick up a foreign tint.
+        // The vertex colour is the fill's — or the stroke's when there
+        // is no fill, so §2.10's mix starts from the band's own colour
+        // and the band's inner AA edge cannot pick up a foreign tint.
         let colour = fill
             .or(stroke.map(|(_, c)| c))
             .unwrap_or(Color::WHITE)
             .to_array();
-        let ext = [half[0] + AA_PAD, half[1] + AA_PAD];
+        // THE ENVELOPE MUST KNOW THE REACH OF THE EFFECT (§3.1, and the
+        // first thing the scope decision asks of this step).
+        //
+        // The quad reaches one pixel past the silhouette so the crisp
+        // AA ramp has somewhere to land; a soft profile lands `feather`
+        // px further out, and a quad cut at `AA_PAD` would slice the
+        // glow off on a straight line and draw it as a FRAME. The
+        // margin was always documented as "a feather would join this",
+        // which was correct while nothing wrote one — this is the day
+        // something does.
+        //
+        // What grows is the whole envelope and not one side of it: the
+        // profile is a function of the DISTANCE, so it reaches equally
+        // far past every edge and every corner, and a rounded corner
+        // needs the extra room most (its own arc is furthest inside the
+        // rect's corner). §2.7's snap has already fixed where the
+        // silhouette's edges are; `feather` is added after it, because
+        // the effect's extent is not an edge of the interface and
+        // rounding it would move the profile's zero off its own curve.
+        let pad = AA_PAD + feather;
+        let ext = [half[0] + pad, half[1] + pad];
         let n = self.warp.max(1) as u32;
         // f3 §7b, REMEDY 1 — THE RING OF QUADS. One quad over the whole
         // shape asks the field for every pixel of the interior too,
@@ -2475,24 +2638,50 @@ impl DrawList {
         // from 1 run to 24. Remedy 3 of the same section — merging
         // shape runs on the host's side — is where that is answered,
         // and it stops being optional; it is not answered here.
-        let split = (snap && s.kind == ShapeKind::Box)
+        // * **A GLOW**, and for the reason the split's own premise
+        //   states: the cut is legal only where the field would have
+        //   returned the fill and nothing else. Under `OUTSIDE_ONLY`
+        //   the field returns NOTHING there — the interior is what the
+        //   glow deliberately leaves empty — so a plain-fill core would
+        //   paint the panel's whole face in the glow's colour at full
+        //   alpha. No band depth fixes that; only refusing does.
+        //   A shadow's interior IS its plateau and could be cut, and is
+        //   not, for the reason on the band below.
+        let split = (snap && s.kind == ShapeKind::Box && flags & Shape::OUTSIDE_ONLY == 0)
             .then(|| {
                 let reach = s
                     .corners
                     .iter()
                     .zip(corner)
                     .fold(0.0f32, |m, (c, k)| m.max(corner_reach(c.style, k)));
-                let band = reach + stroke_w + AA_PAD + CORE_PAD;
+                // THE BAND MUST KNOW THE REACH TOO (§3.1). It is the
+                // depth at which the field's answer is certainly the
+                // plain fill; a soft profile is a function OF the
+                // distance on both sides of the boundary, so the depth
+                // at which it has certainly settled is `feather`
+                // further in. §2.6's own profile flattens at exactly
+                // `d = 0` and would not need it — but the band is the
+                // guarantee, not the profile, and a guarantee that
+                // holds only for the profile written today is what a
+                // later §2.6 would quietly break. It costs nothing
+                // measurable: the only soft record the toolkit emits is
+                // a glow, and a glow does not reach here at all.
+                let band = reach + stroke_w + feather + AA_PAD + CORE_PAD;
                 let core = core_half(half, band);
                 (core[0] * core[1] * 4.0 >= CORE_MIN).then_some((band, core))
             })
             .flatten();
-        // Which lane the strips ride: the plain shape pipeline, or the
-        // one that samples the pyramid rung this frost asked for
-        // (§3.3). One record either way — the rank is the RUN's, because
-        // the blurred target is a descriptor and the renderer binds one
-        // per run.
-        let lane = s.glass.map_or(SHAPE, |g| shape_glass_handle(g.rank));
+        // Which lane the strips ride: the plain shape pipeline, the one
+        // that samples the pyramid rung this frost asked for (§3.3), or
+        // the ADDITIVE twin a glow needs ([`SHAPE_ADD`]). One record in
+        // every case — the rank of a frost and the blend of a glow are
+        // alike properties of the RUN, because a descriptor and a blend
+        // state are both bound before the first fragment is shaded.
+        let lane = match (s.glass, soft.map(|f| f.kind)) {
+            (Some(g), _) => shape_glass_handle(g.rank),
+            (None, Some(SoftKind::Glow)) => SHAPE_ADD,
+            (None, _) => SHAPE,
+        };
         let from;
         let paint;
         match split {
@@ -2622,7 +2811,12 @@ impl DrawList {
         //   opens the offer with an EMPTY bed, the wash welds into it,
         //   the border welds after — three calls, one silhouette, one
         //   coverage over all three layers (§3.3).
-        self.weld = (flags & (Shape::FILL | Shape::STROKE) == Shape::FILL).then_some(Weld {
+        //
+        // A SOFT record offers nothing either, and it would otherwise:
+        // a glow is FILL without STROKE, which is the offer's own
+        // shape. The border of the panel the glow wraps would then weld
+        // its band onto the GLOW's record and the panel would lose it.
+        self.weld = (flags & (Shape::FILL | Shape::STROKE | Shape::SOFT) == Shape::FILL).then_some(Weld {
             idx: idx as usize,
             from,
             paint,
@@ -3007,6 +3201,7 @@ impl DrawList {
                 fill: bed.then_some(Color::TRANSPARENT),
                 stroke: None,
                 glass: Some(Frost { rank, tint }),
+                soft: None,
             });
         } else {
             self.glass_fan(r, c, segments, rank, tint);
@@ -3249,60 +3444,55 @@ impl DrawList {
         self.push_quad4(image, p, m, [color.to_array(); 4]);
     }
 
-    /// Glow OUTSIDE the ring, in an additive run — through ADD_ATLAS the
-    /// pipeline adds light instead of filming milk over a lit backdrop.
+    /// Glow OUTSIDE the silhouette, in an ADDITIVE run — the pipeline
+    /// adds light instead of filming milk over a lit backdrop.
     ///
-    /// The real technique (r1 §4.1/§4.3): the soft-disk mask from the R8
-    /// band, laid along the ring's OWN path: the outline — every corner
-    /// in its declared style — extruded outward by `radius`, with the
+    /// # The vector lane (f3 §2.6, and §4.6 of the scope decision)
+    ///
+    /// With `render.vector` on this is ONE record and one quad: the
+    /// caller's own silhouette, `radius` in [`Shape::feather`], bits
+    /// [`Shape::GAUSS`] and [`Shape::OUTSIDE_ONLY`] set, on
+    /// [`SHAPE_ADD`]. The record's quad grows by `radius` so the
+    /// profile has room to reach zero — that growth is the FIRST thing
+    /// this step had to get right, and `shape_verts` says why at the
+    /// envelope.
+    ///
+    /// Three things the sprite could not do and the field does. The
+    /// profile is the same gauss everywhere, corners included, instead
+    /// of a 2-texel strip laid perpendicular to a polyline. The inner
+    /// boundary is antialiased against the panel standing on it —
+    /// `OUTSIDE_ONLY` masks by AREA, not by a step — where the sprite's
+    /// was the tessellation's own staircase. And the cost stops
+    /// depending on the corner: 6 vertices whatever the radius, against
+    /// 24 square, 48 chamfered and 168 at round S=6.
+    ///
+    /// # The tessellated lane, unchanged
+    ///
+    /// The technique (r1 §4.1/§4.3): the soft-disk mask from the R8
+    /// band, laid along the ring's OWN path — the outline, every corner
+    /// in its declared style, extruded outward by `radius`, with the
     /// disk's 2-texel cardinal strip across the extrusion. A rounded
-    /// corner therefore glows on its own arc grown by the glow, a
-    /// chamfered corner glows along its diagonal, and a square corner
-    /// mitres — the glow always matches the shape it wraps. Nothing is
+    /// corner glows on its own arc grown by the glow, a chamfered
+    /// corner along its diagonal, a square corner mitres. Nothing is
     /// emitted inside the path, so the glow never tints a translucent
-    /// fill. Cost: one quad per outline segment — 48 verts around a
-    /// chamfered panel, 24 square, 168 at round S=6 — still far under
-    /// the shell fallback. `mask_uv` is `FontSystem::mask_soft_uv()`,
-    /// passed by the caller (Ctx has it; the draw list stays free of the
-    /// font system).
+    /// fill. `mask_uv` is `FontSystem::mask_soft_uv()`, passed by the
+    /// caller (Ctx has it; the draw list stays free of the font
+    /// system).
     ///
     /// An EMPTY `mask_uv` (u1 ≤ u0 or v1 ≤ v0) is the maskless
-    /// degenerate case and falls back to the concentric-shell
-    /// approximation below — a themeless run must still draw something
-    /// raw. The renderer binds ADD_ATLAS since r1 P7, so both forms
-    /// RENDER; only an actual texture miss still drops the run — the
-    /// glow is then absent, never wrong.
+    /// degenerate case, and its answer is now the FIELD: the analytic
+    /// glow reads no atlas at all, so a run with no baked sprite has
+    /// something better to fall back to than an approximation of one.
+    /// This is what retired `glow_shell` — r1 §4.1's concentric shells,
+    /// 3 to 5 ring strokes deep, up to 840 vertices around a rounded
+    /// panel, with a quadratic stand-in for the tail and a Square
+    /// corner that stayed square however far the glow grew. It existed
+    /// because "a themeless run must still draw something raw", and
+    /// the raw thing to draw is no longer an approximation.
     ///
-    /// **This stays tessellated, and deliberately (f3 §2.6, R7).** The
-    /// vector lane took the bed, the wash over it and the border
-    /// because those SHARE a silhouette and drawing it twice — or three
-    /// times — was a defect: R4's dark rim.
-    /// A glow shares no edge with anything: it is strictly outside the
-    /// path and it composes additively, so nothing about it blocks
-    /// `render.vector`. Moving it would buy vertices and cost three
-    /// things this step cannot pay for:
-    ///
-    /// * an ADDITIVE shape pipeline in the renderer — a second pipeline
-    ///   object, a fourth `RunKind`, a fifth reserved handle — none of
-    ///   which any test in that repo can exercise, because every test
-    ///   there is CPU-side (naga, scissors, rank tables). It would ship
-    ///   unproven.
-    /// * R7's fill-rate answer. A glow quad grows by `glow.<class>.radius`
-    ///   (up to 4u), every fragment of it running through `grade()`; the
-    ///   plan says MEASURE that in K3 and choose between one quad and a
-    ///   ring of four. Measuring wants a device and a display.
-    /// * the profile itself. §2.6 asks for `bake_masks`' own gauss
-    ///   (σ = r/3, hard zero at r) so the picture does not change
-    ///   CHARACTER — and "same character" is a judgement made on a
-    ///   screen, not in a test.
-    ///
-    /// The cost of leaving it is R6, knowingly: panels antialias before
-    /// their glows do. Glass went through that door in K3b and the
-    /// question it was held on — where a glass silhouette would keep
-    /// its rank — was answered by the second horn: a per-run binding,
-    /// [`SHAPE_GLASS_1`]`..3`. A glow cannot follow, because its
-    /// obstacle is the BLEND, not the binding: an additive pipeline is
-    /// a pipeline object the tests in that repository cannot exercise.
+    /// **Both lanes are one record's worth of intent**: the register
+    /// records `glow_ring` either way, because which lane tessellated
+    /// is exactly the knob it must not see.
     pub fn glow_ring(
         &mut self,
         r: Rect,
@@ -3322,8 +3512,20 @@ impl DrawList {
             return;
         }
         let (u0, v0, u1, v1) = mask_uv;
-        if u1 <= u0 || v1 <= v0 {
-            self.glow_shell(r, c, segments, radius, color);
+        if self.vector || u1 <= u0 || v1 <= v0 {
+            self.shape_verts(&ShapeSpec {
+                rect: r,
+                corners: *c,
+                kind: ShapeKind::Box,
+                // The glow's colour rides the vertices, like every
+                // other fill: [`Shape::FILL`] means "the interior wears
+                // the vertex colour", and under `OUTSIDE_ONLY` the
+                // profile is what decides how much of it lands where.
+                fill: Some(color),
+                stroke: None,
+                glass: None,
+                soft: Some(Soft { reach: radius, kind: SoftKind::Glow }),
+            });
             return;
         }
         let mut inner = std::mem::take(&mut self.scratch_a);
@@ -3347,7 +3549,7 @@ impl DrawList {
         // at the outer rim — the same profile the nine-slice edges
         // carried, now perpendicular to the path everywhere, corners
         // included. Point counts agree because counts depend only on
-        // corner STYLE, which inset() preserves (glow_shell's invariant).
+        // corner STYLE, which inset() preserves.
         let su = u0 + (u1 - u0) * (32.0 / 64.0);
         let vi = v0 + (v1 - v0) * (31.0 / 64.0);
         let col = color.to_array();
@@ -3439,21 +3641,71 @@ impl DrawList {
         self.nine_slice(None, r, radius.max(0.0), mask_uv, color, true);
     }
 
-    /// Drop shadow under a panel: soft_box over `r` translated by `offset`
-    /// and inflated by `radius`, so the feather reaches `radius` px past
-    /// every edge of the shifted rect and the plateau still covers the
-    /// panel's own footprint. Normal blend — a shadow subtracts by
-    /// covering, it is not light. Offset, radius and colour are the
-    /// caller's tokens (shadow.dx/dy, shadow.radius, shadow.color);
-    /// nothing here defaults them.
-    pub fn shadow(&mut self, r: Rect, offset: [f32; 2], radius: f32, color: Color, mask_uv: (f32, f32, f32, f32)) {
+    /// Drop shadow under a panel — normal blend, because a shadow
+    /// subtracts by covering and is not light. Offset, radius and
+    /// colour are the caller's tokens (`shadow.dx/dy`, `shadow.radius`,
+    /// `shadow.color`); nothing here defaults them, and the master
+    /// ships `shadow.color = none` on all nine rungs of `elev.*`.
+    ///
+    /// # The vector lane (f3 §2.6, and §4.7 of the scope decision)
+    ///
+    /// One record on the PLAIN shape lane: the caller's silhouette
+    /// shifted by `offset`, `radius` in [`Shape::feather`], bit
+    /// [`Shape::GAUSS`] and no `OUTSIDE_ONLY` — the interior is the
+    /// profile's own plateau, which is what a shadow under a
+    /// translucent panel has to be. THE OFFSET COSTS THE RECORD
+    /// NOTHING: a shadow is its own record, so a shifted shadow is a
+    /// shifted rect, resolved on the CPU before the record is written.
+    ///
+    /// Two defects of the sprite path go with it, and both are
+    /// correctness rather than taste. The nine-slice STRETCHES the
+    /// mask's middle band (see `nine_slice`), so today's shadow has one
+    /// profile in the corners and a smeared one along a long side; the
+    /// field has the same gauss everywhere. And the sprite is a
+    /// RECTANGLE, so a rounded panel casts a square shadow; the record
+    /// carries the panel's own corners.
+    ///
+    /// `c` is read by the vector lane alone — the sprite cannot follow
+    /// a silhouette at all, which is the second defect stated as a
+    /// signature.
+    ///
+    /// # The tessellated lane
+    ///
+    /// `soft_box` over `r` translated by `offset` and INFLATED by
+    /// `radius`, because the sprite's feather runs inward: the plateau
+    /// then still covers the panel's own footprint and the falloff
+    /// reaches `radius` px past every edge of the shifted rect. The
+    /// vector lane does not inflate, and must not — its feather runs
+    /// outward from the silhouette the caller passed.
+    pub fn shadow(
+        &mut self,
+        r: Rect,
+        c: &[Corner; 4],
+        offset: [f32; 2],
+        radius: f32,
+        color: Color,
+        mask_uv: (f32, f32, f32, f32),
+    ) {
         self.cmd(|| DrawCmd::Shadow {
             r: [r.x, r.y, r.w, r.h],
+            corners: *c,
             offset,
             radius,
             color,
         });
         let radius = radius.max(0.0);
+        if self.vector {
+            self.shape_verts(&ShapeSpec {
+                rect: Rect::new(r.x + offset[0], r.y + offset[1], r.w, r.h),
+                corners: *c,
+                kind: ShapeKind::Box,
+                fill: Some(color),
+                stroke: None,
+                glass: None,
+                soft: Some(Soft { reach: radius, kind: SoftKind::Shadow }),
+            });
+            return;
+        }
         self.soft_box_verts(
             Rect::new(
                 r.x + offset[0] - radius,
@@ -3465,56 +3717,6 @@ impl DrawList {
             color,
             mask_uv,
         );
-    }
-
-    /// r1 §4.1's shell approximation, kept as glow_ring's maskless
-    /// degenerate case: concentric ring strokes whose alpha falls
-    /// quadratically with distance. Cost: 3–5 shells at one ring stroke
-    /// each — 144–240 verts around a chamfered panel, 504–840 at round
-    /// S=6, ten times the sprite — which is why it is only the fallback.
-    /// Shells share their boundary rings, so nothing overlaps and additive
-    /// blending cannot double-brighten a seam. Corner sizes grow with each
-    /// shell (round concentric exactly, chamfer by the parallel-face
-    /// offset); a Square corner stays square — the shell technique's
-    /// stated approximation.
-    fn glow_shell(&mut self, r: Rect, c: &[Corner; 4], segments: u8, radius: f32, color: Color) {
-        // Shells thinner than ~2 px stop reading as steps of the falloff —
-        // a quality clamp on the approximation, not a design value; the
-        // radius and the peak alpha both belong to the caller's tokens.
-        let shells = ((radius * 0.5).ceil()).clamp(3.0, 5.0) as u32;
-        let step = radius / shells as f32;
-        let mut prev = std::mem::take(&mut self.scratch_a);
-        let mut cur = std::mem::take(&mut self.scratch_b);
-        ring_points(r, c, segments, &mut prev);
-        let (u, v) = FontSystem::white_uv();
-        for k in 1..=shells {
-            let d = step * k as f32;
-            let grown = Rect::new(r.x - d, r.y - d, r.w + 2.0 * d, r.h + 2.0 * d);
-            let ck = [
-                c[0].inset(-d),
-                c[1].inset(-d),
-                c[2].inset(-d),
-                c[3].inset(-d),
-            ];
-            ring_points(grown, &ck, segments, &mut cur);
-            // (1 − u)² sampled at the shell midline: the cheap honest
-            // stand-in for a blur tail, scaled by the caller's alpha.
-            let f = 1.0 - (k as f32 - 0.5) / shells as f32;
-            let col = Color { a: color.a * f * f, ..color }.to_array();
-            let n = prev.len();
-            for i in 0..n {
-                let j = (i + 1) % n;
-                self.push_quad4(
-                    Some(ADD_ATLAS),
-                    [prev[i], prev[j], cur[j], cur[i]],
-                    [[u, v]; 4],
-                    [col; 4],
-                );
-            }
-            std::mem::swap(&mut prev, &mut cur);
-        }
-        self.scratch_a = prev;
-        self.scratch_b = cur;
     }
 
     fn glyph_quad(&mut self, g: &Glyph, pen_x: f32, baseline: f32, color: Color) {
@@ -4172,40 +4374,37 @@ mod tests {
         assert_eq!(dl.runs.last().unwrap().clip, None);
     }
 
-    /// The glow lives OUTSIDE the rect, inside rect+radius, and in an
-    /// ADD_ATLAS run — absent, never milky, until the renderer binds the
-    /// additive pipeline. Both forms honour the same envelope: the
-    /// nine-slice sprite (real mask uv) and the shell fallback (empty uv).
+    /// The SPRITE glow lives OUTSIDE the rect, inside rect+radius, and
+    /// in an ADD_ATLAS run — light, never milk. The vector lane's own
+    /// containment is a different claim about a different picture (the
+    /// quad covers the rect and the FIELD empties it), and
+    /// `the_glow_lane_adds_light_and_leaves_the_interior_alone` makes
+    /// it.
     #[test]
     fn glow_ring_additive_and_outside() {
         let r = Rect::new(50.0, 60.0, 200.0, 100.0);
         let radius = 8.0;
-        let uvs: [(f32, f32, f32, f32); 2] =
-            [FontSystem::mask_soft_uv(), (0.0, 0.0, 0.0, 0.0)];
-        for uv in uvs {
-            let mut dl = DrawList::new();
-            dl.glow_ring(r, &[Corner::chamfer(16.0); 4], 6, radius, Color::rgb8(0, 255, 200), uv);
-            assert!(!dl.verts.is_empty());
+        let uv = FontSystem::mask_soft_uv();
+        let mut dl = DrawList::new();
+        dl.glow_ring(r, &[Corner::chamfer(16.0); 4], 6, radius, Color::rgb8(0, 255, 200), uv);
+        assert!(!dl.verts.is_empty());
+        assert!(
+            dl.runs.iter().any(|run| run.image == Some(ADD_ATLAS)),
+            "glow must be an additive run"
+        );
+        let e = 1e-3;
+        for v in &dl.verts {
+            let [px, py] = v.pos;
+            let inside =
+                px > r.x + e && px < r.right() - e && py > r.y + e && py < r.bottom() - e;
+            assert!(!inside, "glow leaked into the rect: ({px},{py})");
             assert!(
-                dl.runs.iter().any(|run| run.image == Some(ADD_ATLAS)),
-                "glow must be an additive run (uv {uv:?})"
+                px >= r.x - radius - e
+                    && px <= r.right() + radius + e
+                    && py >= r.y - radius - e
+                    && py <= r.bottom() + radius + e,
+                "glow past its own radius: ({px},{py})"
             );
-            let e = 1e-3;
-            for v in &dl.verts {
-                let [px, py] = v.pos;
-                let inside = px > r.x + e
-                    && px < r.right() - e
-                    && py > r.y + e
-                    && py < r.bottom() - e;
-                assert!(!inside, "glow leaked into the rect: ({px},{py}) (uv {uv:?})");
-                assert!(
-                    px >= r.x - radius - e
-                        && px <= r.right() + radius + e
-                        && py >= r.y - radius - e
-                        && py <= r.bottom() + radius + e,
-                    "glow past its own radius: ({px},{py}) (uv {uv:?})"
-                );
-            }
         }
     }
 
@@ -4354,7 +4553,7 @@ mod tests {
         }
         let (dx, dy, radius) = (4.0, 6.0, 10.0);
         let mut dl = DrawList::new();
-        dl.shadow(r, [dx, dy], radius, Color::rgb8(0, 0, 0), uv);
+        dl.shadow(r, &[Corner::SQUARE; 4], [dx, dy], radius, Color::rgb8(0, 0, 0), uv);
         assert!(!dl.verts.is_empty());
         assert!(
             dl.runs.iter().all(|run| run.image != Some(ADD_ATLAS)),
@@ -4372,18 +4571,293 @@ mod tests {
     }
 
     /// The raw degenerate cases the governing principle demands: an empty
-    /// mask uv must still draw — glow_ring as shells, soft_box as a plain
-    /// rect — never nothing, never a sample of unrelated atlas texels.
+    /// mask uv must still draw — never nothing, never a sample of
+    /// unrelated atlas texels. `soft_box` falls back to a plain rect;
+    /// `glow_ring` falls back to the FIELD, which reads no atlas at all
+    /// and is what retired the concentric-shell approximation.
     #[test]
     fn empty_mask_uv_degrades_raw() {
         let empty = (0.0, 0.0, 0.0, 0.0);
         let r = Rect::new(0.0, 0.0, 100.0, 50.0);
         let mut dl = DrawList::new();
         dl.glow_ring(r, &[Corner::SQUARE; 4], 3, 8.0, Color::rgb8(255, 255, 255), empty);
-        assert!(!dl.verts.is_empty(), "maskless glow must still draw shells");
+        assert_eq!(dl.verts.len(), 6, "maskless glow is one analytic quad");
+        assert_eq!(dl.shape_len(), 1, "maskless glow is one record");
+        assert!(dl.runs.iter().any(|run| run.image == Some(SHAPE_ADD)));
         let mut dl = DrawList::new();
         dl.soft_box(r, 8.0, Color::rgb8(255, 255, 255), empty);
         assert_eq!(dl.verts.len(), 6, "maskless soft_box is a plain rect");
+    }
+
+    // ------------------------------------------------------ soft profiles
+    //
+    // f3 §2.6 and §4.6/§4.7 of the scope decision: the glow and the
+    // shadow as SHAPE RECORDS. The tests below are grouped by the four
+    // claims that step makes, in the order the plan binds them.
+
+    /// **Claim 1, and nothing may go before it: the quad and the band
+    /// must know how far the effect reaches** (§3.1).
+    ///
+    /// The envelope was `half + AA_PAD` on every side, which is exactly
+    /// right for a coverage ramp that dies within a pixel of the
+    /// boundary and exactly wrong for a profile that lives `feather` px
+    /// past it: a glow drawn through the old quad would be sliced off
+    /// on four straight lines and would read as a FRAME. The band is
+    /// the same claim from the inside — it is the depth at which the
+    /// field's answer is certainly the plain fill, and under a soft
+    /// profile that depth moves in by the reach.
+    ///
+    /// Both numbers are asserted against the crisp record of the same
+    /// silhouette, so the assertion is the DIFFERENCE and not a
+    /// restatement of the formula.
+    #[test]
+    fn a_soft_record_grows_its_quad_and_its_band_by_the_reach() {
+        let r = Rect::new(40.0, 30.0, 300.0, 180.0);
+        let c = [Corner::round(12.0); 4];
+        let reach = 9.0f32;
+        let spec = |soft| ShapeSpec {
+            rect: r,
+            corners: c,
+            kind: ShapeKind::Box,
+            fill: Some(Color::rgb8(0, 255, 200)),
+            stroke: None,
+            glass: None,
+            soft,
+        };
+        let span = |dl: &DrawList| {
+            dl.verts.iter().fold(
+                [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
+                |[x0, y0, x1, y1], v| {
+                    [x0.min(v.pos[0]), y0.min(v.pos[1]), x1.max(v.pos[0]), y1.max(v.pos[1])]
+                },
+            )
+        };
+
+        // THE QUAD. A glow refuses the core split, so its geometry is
+        // one quad and the span IS the envelope.
+        let mut soft = DrawList::new();
+        soft.shape(&spec(Some(Soft { reach, kind: SoftKind::Glow })));
+        let [sx0, sy0, sx1, sy1] = span(&soft);
+        let e = 1e-4;
+        for (got, want, what) in [
+            (sx0, r.x - AA_PAD - reach, "left"),
+            (sy0, r.y - AA_PAD - reach, "top"),
+            (sx1, r.right() + AA_PAD + reach, "right"),
+            (sy1, r.bottom() + AA_PAD + reach, "bottom"),
+        ] {
+            assert!(
+                (got - want).abs() < e,
+                "the glow's quad stops at {got} on the {what}, and the profile \
+                 reaches {want} — the effect would be cut off on its own aura"
+            );
+        }
+
+        // THE BAND. A shadow keeps the split (its interior is the
+        // profile's plateau, which the fill path draws exactly), so the
+        // frame's hole is where the band ends — and it must sit `reach`
+        // px deeper than the crisp record's.
+        let mut crisp = DrawList::new();
+        crisp.shape(&spec(None));
+        let mut shade = DrawList::new();
+        shade.shape(&spec(Some(Soft { reach, kind: SoftKind::Shadow })));
+        // The interior quad of a split shape is the one quad carrying
+        // NO_SHAPE: the plain-fill core.
+        let core_span = |dl: &DrawList| {
+            let core: Vec<_> = dl.verts.iter().filter(|v| v.shape == NO_SHAPE).collect();
+            assert!(!core.is_empty(), "the split did not happen — nothing to measure");
+            core.iter().fold([f32::MAX, f32::MIN], |[a, b], v| {
+                [a.min(v.pos[0]), b.max(v.pos[0])]
+            })
+        };
+        let [cx0, cx1] = core_span(&crisp);
+        let [gx0, gx1] = core_span(&shade);
+        assert!(
+            (gx0 - cx0 - reach).abs() < e && (cx1 - gx1 - reach).abs() < e,
+            "the band deepened by {} px on the left and {} px on the right, \
+             and the profile reaches {reach}",
+            gx0 - cx0,
+            cx1 - gx1
+        );
+    }
+
+    /// **Claim 2: which lane, and therefore which blend.** A glow adds
+    /// light ([`SHAPE_ADD`]), a shadow covers ([`SHAPE`]) — the one
+    /// difference between them that no bit in the record could have
+    /// carried, because blend state is fixed for a whole pipeline
+    /// before the first fragment is shaded.
+    #[test]
+    fn the_glow_adds_light_and_the_shadow_covers() {
+        let r = Rect::new(10.0, 10.0, 120.0, 60.0);
+        let c = [Corner::round(8.0); 4];
+        let col = Color::rgb8(0, 255, 200);
+        let uv = FontSystem::mask_soft_uv();
+
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.glow_ring(r, &c, 6, 7.0, col, uv);
+        assert!(
+            dl.runs.iter().any(|run| run.image == Some(SHAPE_ADD)),
+            "the vector glow must ride the additive shape lane"
+        );
+        assert!(dl.runs.iter().all(|run| run.image != Some(SHAPE)));
+
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.shadow(r, &c, [3.0, 4.0], 7.0, col, uv);
+        assert!(
+            dl.runs.iter().all(|run| run.image != Some(SHAPE_ADD)),
+            "a shadow is not light"
+        );
+        assert!(dl.runs.iter().any(|run| run.image == Some(SHAPE)));
+    }
+
+    /// **Claim 3: the bits, and the numbers beside them.** A glow sets
+    /// [`Shape::GAUSS`] and [`Shape::OUTSIDE_ONLY`]; a shadow sets
+    /// GAUSS alone; a crisp shape sets neither and leaves `feather` at
+    /// zero, which is the invariant every record shipped before this
+    /// step relied on.
+    ///
+    /// The shadow's OFFSET is asserted here too, because it is the
+    /// whole reason the record needed no new field: a shifted shadow is
+    /// a shifted rect, resolved on the CPU, and the silhouette that
+    /// arrives is the panel's own — corners included, where the sprite
+    /// could only ever cast a rectangle.
+    #[test]
+    fn the_soft_bits_and_the_feather_ride_the_record() {
+        let r = Rect::new(20.0, 30.0, 160.0, 90.0);
+        let c = [Corner::round(11.0); 4];
+        let uv = FontSystem::mask_soft_uv();
+        let col = Color::rgb8(0, 255, 200);
+
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.glow_ring(r, &c, 6, 6.0, col, uv);
+        let g = dl.shapes()[0];
+        assert_eq!(g.flags & Shape::SOFT, Shape::GAUSS | Shape::OUTSIDE_ONLY);
+        assert_eq!(g.feather, 6.0);
+        assert_eq!(g.corner, [11.0; 4], "the glow wears the silhouette it wraps");
+
+        let (dx, dy) = (5.0, 7.0);
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.shadow(r, &c, [dx, dy], 12.0, col, uv);
+        let s = dl.shapes()[0];
+        assert_eq!(s.flags & Shape::SOFT, Shape::GAUSS, "a shadow has an inside");
+        assert_eq!(s.feather, 12.0);
+        assert_eq!(s.corner, [11.0; 4], "a rounded panel casts a rounded shadow");
+        assert_eq!(
+            s.half,
+            [r.w * 0.5, r.h * 0.5],
+            "the shadow is SHIFTED, never inflated — the sprite inflated \
+             because its feather ran inward, and this one's runs out"
+        );
+        let mid = dl.verts.iter().fold([0.0f32; 2], |a, v| {
+            [a[0] + v.pos[0] / dl.verts.len() as f32, a[1] + v.pos[1] / dl.verts.len() as f32]
+        });
+        assert!(
+            (mid[0] - (r.x + r.w * 0.5 + dx)).abs() < 1e-3
+                && (mid[1] - (r.y + r.h * 0.5 + dy)).abs() < 1e-3,
+            "the shadow did not move with its offset: {mid:?}"
+        );
+
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.ring_fill(r, &c, 6, col);
+        let plain = dl.shapes()[0];
+        assert_eq!(plain.flags & Shape::SOFT, 0, "a crisp record claims no soft bit");
+        assert_eq!(plain.feather, 0.0);
+    }
+
+    /// **Claim 4, the two refusals a soft record has to make**, both of
+    /// which the SILHOUETTE mask cannot make for it: the soft bits sit
+    /// outside [`Shape::SILHOUETTE`] on purpose (they do not change
+    /// which curve is drawn), so a glow's bits compare EQUAL to those
+    /// of the panel it wraps.
+    ///
+    /// * It must not weld. The bed of a panel and the glow around it
+    ///   share centre, half sizes, corners and kind — everything the
+    ///   weld compares — so without the refusal the glow's colour would
+    ///   be composited into the panel's quad and its profile lost
+    ///   entirely.
+    /// * It must not offer a weld. A glow is FILL without STROKE, which
+    ///   is exactly the offer's own shape, so a border drawn after one
+    ///   would sink its band into the GLOW's record and the panel would
+    ///   never get it.
+    #[test]
+    fn a_soft_record_neither_welds_nor_offers_a_weld() {
+        let r = Rect::new(15.0, 25.0, 140.0, 80.0);
+        let c = [Corner::round(9.0); 4];
+        let bed = Color::rgb8(20, 30, 40);
+        let halo = Color::rgb8(0, 255, 200);
+        let edge = Color::rgb8(255, 0, 128);
+        let uv = FontSystem::mask_soft_uv();
+
+        // Bed, then glow: two records, and the bed keeps its own colour.
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.ring_fill(r, &c, 6, bed);
+        dl.glow_ring(r, &c, 6, 5.0, halo, uv);
+        assert_eq!(dl.shape_len(), 2, "the glow welded into the bed");
+        assert_eq!(dl.shapes()[0].flags & Shape::SOFT, 0);
+        assert_eq!(dl.shapes()[1].flags & Shape::GAUSS, Shape::GAUSS);
+
+        // Glow, then border: the border may not join the glow.
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.glow_ring(r, &c, 6, 5.0, halo, uv);
+        dl.ring(r, &c, 6, 2.0, edge);
+        assert_eq!(dl.shape_len(), 2, "the border welded onto the glow");
+        assert_eq!(
+            dl.shapes()[0].flags & Shape::STROKE,
+            0,
+            "the glow took the border's band"
+        );
+        assert_eq!(dl.shapes()[1].flags & Shape::STROKE, Shape::STROKE);
+    }
+
+    /// A GLOW refuses the core split, and this is the one refusal that
+    /// is about the picture rather than about cost. The split's premise
+    /// is that the field would have returned the fill and nothing else
+    /// inside the core; under [`Shape::OUTSIDE_ONLY`] the field returns
+    /// NOTHING there. Cut a core out and the plain-fill path paints the
+    /// whole face of the panel in the glow's colour at full alpha — the
+    /// exact opposite of what a glow is.
+    ///
+    /// A shadow, whose interior IS its plateau, keeps the split; that
+    /// half is asserted in `a_soft_record_grows_its_quad_and_its_band`.
+    #[test]
+    fn a_glow_keeps_its_whole_quad_and_paints_no_core() {
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.glow_ring(
+            // Big enough that the split would certainly have fired: the
+            // same rect splits in the crisp case below.
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+            &[Corner::round(10.0); 4],
+            6,
+            8.0,
+            Color::rgb8(0, 255, 200),
+            FontSystem::mask_soft_uv(),
+        );
+        assert_eq!(dl.verts.len(), 6, "the glow was cut into a frame");
+        assert!(
+            dl.verts.iter().all(|v| v.shape != NO_SHAPE),
+            "a plain-fill quad appeared under the glow — that is the \
+             panel's whole face at the glow's own alpha"
+        );
+
+        let mut dl = DrawList::new();
+        dl.set_vector(true);
+        dl.ring_fill(
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+            &[Corner::round(10.0); 4],
+            6,
+            Color::rgb8(0, 255, 200),
+        );
+        assert!(
+            dl.verts.iter().any(|v| v.shape == NO_SHAPE),
+            "the control did not split, so the test above proves nothing"
+        );
     }
 
     /// Every vertex of the fill must satisfy the eight half-planes of
@@ -4454,6 +4928,7 @@ mod tests {
             fill: Some(ink()),
             stroke: None,
             glass: None,
+            soft: None,
         };
         let mut dl = DrawList::new();
         dl.shape(&spec);
@@ -4518,6 +4993,7 @@ mod tests {
             fill: Some(ink()),
             stroke: None,
             glass: None,
+            soft: None,
         });
         assert_eq!(dl.shapes()[0].corner, [4.0, 4.0, 3.0, 0.0]);
     }
@@ -4896,6 +5372,7 @@ mod tests {
                 fill: Some(wash()),
                 stroke: Some((t, ink())),
                 glass: None,
+                soft: None,
             });
             let mut pair = DrawList::new();
             pair.set_vector(true);
@@ -5440,7 +5917,7 @@ mod tests {
         dl.polyline(&[[0.0, 0.0], [10.0, 10.0], [20.0, 0.0]], 1.5, tint, true);
         dl.rect_grad(r, &[(0.0, tint), (0.5, wash()), (1.0, tint)], 0.6);
         dl.glow_ring(r, &[Corner::round(6.0); 4], 6, 8.0, wash(), FontSystem::mask_soft_uv());
-        dl.shadow(r, [2.0, 3.0], 4.0, wash(), FontSystem::mask_soft_uv());
+        dl.shadow(r, &[Corner::SQUARE; 4], [2.0, 3.0], 4.0, wash(), FontSystem::mask_soft_uv());
         dl.pop_clip();
     }
 
@@ -5558,7 +6035,7 @@ mod tests {
         assert_eq!(one(&|dl| dl.ring_fill(r, &[Corner::SQUARE; 4], 6, ink())), 1);
         assert_eq!(one(&|dl| dl.ring_fill(r, &[Corner::chamfer(8.0); 4], 6, ink())), 1);
         assert_eq!(one(&|dl| dl.polyline(&[[0.0, 0.0], [1.0, 1.0], [2.0, 0.0]], 1.0, ink(), true)), 1);
-        assert_eq!(one(&|dl| dl.shadow(r, [1.0, 2.0], 3.0, ink(), uv)), 1);
+        assert_eq!(one(&|dl| dl.shadow(r, &[Corner::SQUARE; 4], [1.0, 2.0], 3.0, ink(), uv)), 1);
         assert_eq!(one(&|dl| dl.rect_grad(r, &[(0.0, ink())], 0.0)), 1);
         assert_eq!(one(&|dl| dl.soft_box(r, 4.0, ink(), (0.0, 0.0, 0.0, 0.0))), 1);
         // And the suppression is not a latch: the next call still lands.

@@ -289,6 +289,98 @@ pub fn band_coverage(d: f32, stroke: f32, w: f32) -> f32 {
     (coverage(d, w) - coverage(d + stroke, w)).max(0.0)
 }
 
+/// How many standard deviations of the gaussian fit inside the reach
+/// (§2.6) — the profile's whole shape, in one number.
+///
+/// **Why this is not a theme token, in a project whose hardest rule is
+/// that appearance lives in the theme.** It is not a value chosen for a
+/// look; it is the DEFINITION of the profile the atlas already bakes.
+/// `FontSystem::bake_masks` writes `exp(−d²/2σ²)` with `σ = r/3` and a
+/// hard zero at `r` into the soft-disk sprite (`font.rs:471-484`), and
+/// every glow and shadow drawn off the tessellated lane samples it.
+/// Two lanes draw the same glow, so the two profiles have to be the
+/// same function; a token here would let a theme make them differ and
+/// there is no picture in which that is what anybody wanted. What the
+/// theme DOES own is the reach — `glow.<class>.radius`, `shadow.radius`
+/// — which is the only number of the profile a design has an opinion
+/// about.
+pub const GAUSS_SIGMAS: f32 = 3.0;
+
+/// §2.6's softness profile: `FontSystem::bake_masks`' own gaussian, so
+/// a glow moved from the sprite to the field keeps its CHARACTER and
+/// loses only the nine-slice's stretched middle.
+///
+/// `d` is the signed distance, `feather` the reach. Inside the
+/// silhouette (`d ≤ 0`) it is a flat 1 — the plateau a shadow lays
+/// under a panel — and it falls to a hard zero at `feather`, where the
+/// sprite's own texel is zero too.
+///
+/// **A soft shape has ONE coverage, and this is it.** §2.6 says so in
+/// as many words, and the trap it warns about is multiplying the
+/// profile by the crisp ramp: that would dim the boundary twice and
+/// leave a dark seam a pixel wide all round. What [`outside_mask`] does
+/// is a different thing, and the note there says why.
+/// A reach of zero is the degenerate case, and the two sides answer it
+/// identically ON PURPOSE: the profile collapses to the HARD
+/// silhouette — 1 within, 0 without — rather than to nothing. It is
+/// unreachable through the toolkit (`shape_verts` drops a `Soft` whose
+/// reach is not positive, so `GAUSS` is never set beside a zero
+/// feather), which is exactly why the two files could have drifted here
+/// unnoticed. `the_soft_profile_answers_what_the_reference_answers`
+/// sweeps it for that reason.
+pub fn soft_profile(d: f32, feather: f32) -> f32 {
+    if d >= feather {
+        return 0.0;
+    }
+    let x = d.max(0.0);
+    let sg = feather.max(1e-6) / GAUSS_SIGMAS;
+    (-(x * x) / (2.0 * sg * sg)).exp()
+}
+
+/// [`crate::draw::Shape::OUTSIDE_ONLY`]'s factor: the area of the pixel
+/// the silhouette does NOT cover — `coverage`'s own complement.
+///
+/// A glow lights what is around a shape, and today's tessellated glow
+/// says so by emitting no geometry inside its path: the mask is exact,
+/// and exactly aliased, because a polygon edge is where it falls. Here
+/// it is an area, so the boundary pixel gets the fraction it is owed —
+/// and the panel standing on that same boundary takes the rest through
+/// its own coverage, which is what makes the two add up to one instead
+/// of leaving a seam.
+///
+/// This is not the double attenuation §2.6 forbids. That warning is
+/// about weighting a soft profile by the softness of the same edge; the
+/// factor here is geometry — it is exactly 1 as soon as the fragment is
+/// half a pixel clear of the boundary, so nothing in the body of the
+/// glow is touched by it at all.
+pub fn outside_mask(d: f32, w: f32) -> f32 {
+    (0.5 + d / w.max(1e-6)).clamp(0.0, 1.0)
+}
+
+/// The coverage ONE record puts on a fragment at signed distance `d`
+/// under AA width `w`: the crisp ramp, or the soft profile when
+/// [`crate::draw::Shape::GAUSS`] says so, masked to the outside when
+/// [`crate::draw::Shape::OUTSIDE_ONLY`] does.
+///
+/// The whole of the fragment's branch on the soft bits, in one place on
+/// each side of the seam — the shader's twin is `shape_alpha`, which
+/// takes the same four numbers for the same reason `shape_field` takes
+/// the record's: a function with no derivatives in it can be RUN
+/// against this one without a GPU.
+pub fn shape_alpha(d: f32, w: f32, feather: f32, flags: u32) -> f32 {
+    use crate::draw::Shape;
+    let cov = if flags & Shape::GAUSS != 0 {
+        soft_profile(d, feather)
+    } else {
+        coverage(d, w)
+    };
+    if flags & Shape::OUTSIDE_ONLY != 0 {
+        cov * outside_mask(d, w)
+    } else {
+        cov
+    }
+}
+
 /// §2.10's one composition: bed and edge live in ONE record, so their
 /// shared outer silhouette blends ONCE. Straight-alpha RGBA out, the
 /// form the fragment shader returns.
@@ -844,6 +936,7 @@ mod tests {
                 fill: Some(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
                 stroke: None,
                 glass: None,
+                soft: None,
             });
             dl.shapes()[0]
         };
@@ -934,6 +1027,7 @@ mod tests {
                 fill: Some(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
                 stroke: None,
                 glass: None,
+                soft: None,
             });
             dl.shapes()[0]
         };
@@ -1087,6 +1181,117 @@ mod tests {
         // …and its colour is the same weighted sum the blender made:
         // 0.5·white over 0.25 of black.
         assert!((px[0] - 0.5 / 0.75).abs() <= 1e-5, "{px:?}");
+    }
+
+    /// **The soft profile is the SPRITE's profile, texel for texel.**
+    ///
+    /// §2.6 asks that moving a glow from the atlas to the field keeps
+    /// its character and changes nothing but the nine-slice's stretched
+    /// middle. "Same character" is a judgement on a screen — but "same
+    /// function" is not, and this is that: the mask
+    /// `FontSystem::bake_masks` writes into the reserved band is read
+    /// back and compared against [`soft_profile`] at every one of its
+    /// 4096 texels, quantised the same way the baker quantises.
+    ///
+    /// The mapping is `glow_ring`'s own: the sprite is addressed from
+    /// the disk's peak on the path outward to its zero at the rim, so
+    /// a texel `t` px from the disk's centre is the profile at distance
+    /// `t` from the silhouette, and the reach is the disk's radius.
+    ///
+    /// Equality is exact rather than approximate because both sides
+    /// compute one formula in f32 and truncate the same way; a
+    /// tolerance here would hide exactly the drift it is meant to
+    /// catch.
+    #[test]
+    fn the_soft_profile_is_the_sprite_s_own_gauss() {
+        let fs = crate::font::FontSystem::new();
+        let (mx, my, mw, mh) = crate::font::MASK_SOFT;
+        let (cx, cy) = (mw as f32 / 2.0 - 0.5, mh as f32 / 2.0 - 0.5);
+        let reach = mw as f32 / 2.0;
+        let mut compared = 0usize;
+        let mut lit = 0usize;
+        for y in 0..mh {
+            for x in 0..mw {
+                let dx = x as f32 - cx;
+                let dy = y as f32 - cy;
+                let d = (dx * dx + dy * dy).sqrt();
+                let baked = fs.atlas[(my + y) * crate::font::ATLAS_W + (mx + x)];
+                let field = (soft_profile(d, reach) * 255.0) as u8;
+                assert_eq!(
+                    field, baked,
+                    "at {d} px from the path the sprite says {baked} and the \
+                     field says {field}: the two lanes would draw different glows"
+                );
+                compared += 1;
+                lit += usize::from(baked > 0);
+            }
+        }
+        // Fail closed: a comparison of 4096 zeroes proves nothing.
+        assert_eq!(compared, mw * mh);
+        assert!(lit > mw * mh / 4, "only {lit} texels carried any light");
+    }
+
+    /// [`outside_mask`] is [`coverage`]'s exact complement, and that is
+    /// the whole reason a glow may be masked by it without a seam.
+    ///
+    /// On the boundary pixel of a panel the glow takes the fraction the
+    /// panel does not, so the two sum to one pixel's worth of paint. A
+    /// `step` at `d = 0` — which is what §2.5's table asks for in words
+    /// — would give the glow either all of that pixel or none of it,
+    /// and against an antialiased panel that reads as a bright or a
+    /// dark hairline all the way round.
+    #[test]
+    fn the_outside_mask_is_the_coverage_s_complement() {
+        for &w in &[0.5f32, 1.0, 2.7, 4.0] {
+            for i in -60..=60 {
+                let d = i as f32 * 0.1;
+                let s = coverage(d, w) + outside_mask(d, w);
+                assert!(
+                    (s - 1.0).abs() <= 1e-6,
+                    "at d={d}, w={w} the pixel adds up to {s}, not 1"
+                );
+            }
+        }
+        // And it is inert where it must be: a full pixel outside, none
+        // of it in.
+        assert_eq!(outside_mask(3.0, 1.0), 1.0);
+        assert_eq!(outside_mask(-3.0, 1.0), 0.0);
+        assert_eq!(outside_mask(0.0, 1.0), 0.5);
+    }
+
+    /// [`shape_alpha`]'s four answers, one per corner of the two-bit
+    /// space — the branch the fragment takes, stated where it can be
+    /// read without a device.
+    ///
+    /// The one worth naming is the third: a GAUSS record with no
+    /// `OUTSIDE_ONLY` is a shadow, and inside its silhouette it is a
+    /// flat 1 — the plateau. That is what lets a shadow keep the core
+    /// split a glow has to refuse, and what makes a shadow under a
+    /// translucent panel look like a shadow instead of a ring.
+    #[test]
+    fn the_soft_bits_pick_the_four_answers() {
+        use crate::draw::Shape;
+        let (w, f) = (1.0f32, 12.0f32);
+        // Crisp: the ramp, and the feather is not read at all.
+        assert_eq!(shape_alpha(-5.0, w, f, 0), 1.0);
+        assert_eq!(shape_alpha(5.0, w, f, 0), 0.0);
+        // Shadow: plateau inside, gauss outside, zero past the reach.
+        assert_eq!(shape_alpha(-5.0, w, f, Shape::GAUSS), 1.0);
+        assert_eq!(shape_alpha(0.0, w, f, Shape::GAUSS), 1.0);
+        assert!(shape_alpha(f * 0.5, w, f, Shape::GAUSS) > 0.0);
+        assert_eq!(shape_alpha(f, w, f, Shape::GAUSS), 0.0);
+        // Glow: nothing inside, half on the boundary, the plain profile
+        // once the fragment is clear of it.
+        let glow = Shape::GAUSS | Shape::OUTSIDE_ONLY;
+        assert_eq!(shape_alpha(-5.0, w, f, glow), 0.0);
+        assert!((shape_alpha(0.0, w, f, glow) - 0.5).abs() <= 1e-6);
+        assert_eq!(shape_alpha(3.0, w, f, glow), soft_profile(3.0, f));
+        // OUTSIDE_ONLY without GAUSS is not a thing the toolkit emits,
+        // and the fragment still answers something defensible: the
+        // crisp silhouette minus its own interior, which is the empty
+        // shape everywhere but the boundary pixel.
+        assert_eq!(shape_alpha(-5.0, w, f, Shape::OUTSIDE_ONLY), 0.0);
+        assert_eq!(shape_alpha(5.0, w, f, Shape::OUTSIDE_ONLY), 0.0);
     }
 
     /// d_box is the true Euclidean distance wherever that is checkable
@@ -2055,6 +2260,7 @@ mod tests {
             fill: Some(bed()),
             stroke: None,
             glass: None,
+            soft: None,
         };
         let emit = |warp: u8, kind, rect| {
             let mut dl = DrawList::new();
