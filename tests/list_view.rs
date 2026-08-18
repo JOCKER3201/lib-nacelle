@@ -460,6 +460,9 @@ fn a_surface_that_cannot_clip_scrolls_by_whole_rows_instead() {
         fn word(&mut self, n: &str) -> String {
             self.0.word(n)
         }
+        fn theme_text(&mut self, n: &str) -> String {
+            self.0.theme_text(n)
+        }
         fn class_state(&mut self, c: &str, s: State) -> StateInk {
             self.0.class_state(c, s)
         }

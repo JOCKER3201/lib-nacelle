@@ -199,8 +199,18 @@ pub fn sev_text(s: Sev) -> Color {
 // `uper` therefore got SHOUTING, with nothing said about why, which is the
 // silent degradation this whole family of keys exists to make visible.
 
-/// The transform a `*.case` token names: `type.<role>.case`,
-/// `num.unit.case`, `num.suffix.case`.
+/// The transform a `*.case` token names. The master declares three such
+/// keys and this enum is what every one of them means:
+///
+/// - `type.<role>.case`, read by [`Role::case`] — twenty-five of them,
+///   one per role.
+/// - `num.unit.case`, read where a unit run is dressed — the symbol
+///   beside a reading.
+/// - `type.suffix.case`, which has NO reader yet. It belongs to the
+///   `[type.suffix]` block — a status word in brackets — and none of
+///   that block is read: not `brackets`, not `paren_alpha`, not `gap`,
+///   not `face`. Wiring the case alone would honour a quarter of a
+///   sentence, so it waits for the object that draws the whole of it.
 ///
 /// Resolved from the WORD and never from the enum index. Each key
 /// declares its own `enum:` list, so an index memoised across keys names

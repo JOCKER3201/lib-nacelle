@@ -450,11 +450,6 @@ pub fn enum_index(token: TokenId, word: &str) -> Option<u16> {
     g.schema.enum_index(token, word)
 }
 
-/// The word an enum token currently resolves to. This is how OPEN word sets
-/// are read — a type-role binding (`script.rows_label_role = caption`) names a
-/// role, not a member of a closed enum, so the consumer wants the word itself
-/// rather than an index to compare. The resolved index is taken before the
-/// engine lock: [`resolved`] may itself load on first use.
 /// The NAME a token id stands for — [`id`] read backwards.
 ///
 /// The one caller is the plugin boundary: a TEXT token is stored by name
@@ -469,6 +464,11 @@ pub fn name_of(token: TokenId) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
+/// The word an enum token currently resolves to. This is how OPEN word sets
+/// are read — a type-role binding (`script.rows_label_role = caption`) names a
+/// role, not a member of a closed enum, so the consumer wants the word itself
+/// rather than an index to compare. The resolved index is taken before the
+/// engine lock: [`resolved`] may itself load on first use.
 pub fn enum_word_of(token: TokenId) -> Option<String> {
     let i = resolved().enum_of(token);
     let e = ENGINE.get()?;

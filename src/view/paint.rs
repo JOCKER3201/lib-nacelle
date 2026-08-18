@@ -1037,12 +1037,14 @@ pub(crate) mod tests {
     /// its own test, not the state every other test runs under.
     struct Ruler;
 
-    // What this ruler's theme says `type.ellipsis` holds. Per thread, so
-    // a test that restates it restates it for itself alone.
-    thread_local! {
-        static RULER_CUT: std::cell::RefCell<String> =
-            std::cell::RefCell::new("\u{2026}".to_string());
-    }
+    /// What this ruler's theme says `type.ellipsis` holds.
+    ///
+    /// A constant, because this ruler is the FIXTURE and not the subject:
+    /// the tests that vary the marker — a theme stating a comma, a theme
+    /// stating nothing — drive `FakeSurface::text_at`, which is the seam
+    /// built for exactly that. A ruler that could be restated would be a
+    /// second such seam with one shape of question fewer.
+    const RULER_CUT: &str = "\u{2026}";
 
     impl Surface for Ruler {
         fn rect(&mut self, _r: Rect, _c: Color) {}
@@ -1091,7 +1093,7 @@ pub(crate) mod tests {
         }
         fn theme_text(&mut self, name: &str) -> String {
             match name {
-                "type.ellipsis" => RULER_CUT.with(|c| c.borrow().clone()),
+                "type.ellipsis" => RULER_CUT.to_string(),
                 _ => String::new(),
             }
         }

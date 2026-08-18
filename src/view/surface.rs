@@ -325,15 +325,22 @@ pub trait Surface {
     /// how a run is DRAWN; this one only fetches a string the theme
     /// states.
     ///
-    /// The default is that empty answer, stated once. A surface that
-    /// cannot reach text tokens is in exactly the position of a host too
-    /// old to carry [`crate::runtime::HostApi::theme_text`], and the two
-    /// have to look the same from the calling side or a caller would
-    /// grow a fallback for one of them.
-    fn theme_text(&mut self, name: &str) -> String {
-        let _ = name;
-        String::new()
-    }
+    /// REQUIRED, like [`Surface::word`] and [`Surface::flag`] beside it
+    /// and unlike [`Surface::enum_is`] above, which is written in terms
+    /// of another method rather than answering on its own. It carried a
+    /// default returning the empty string for exactly one release, and
+    /// the argument for it — "a surface that cannot reach text tokens is
+    /// in the position of a host too old to carry
+    /// [`crate::runtime::HostApi::theme_text`]" — is true of the ABI
+    /// surface, which overrides this anyway, and of nothing else. What
+    /// the default actually bought was silence: a new surface that
+    /// forgot the method would trim every label it draws with NO marker
+    /// and no diagnostic, and the run would look merely cut short rather
+    /// than wrong. Three probes in this repository's own integration
+    /// tests had to be given the method by hand for that reason. A
+    /// surface that genuinely cannot reach text tokens says so in one
+    /// line, on purpose, where a reader can see it.
+    fn theme_text(&mut self, name: &str) -> String;
     /// The word an enum token currently resolves to.
     fn word(&mut self, name: &str) -> String;
     /// Whether an enum token stands at `word`. Written in terms of
@@ -1276,6 +1283,12 @@ pub(crate) mod tests {
                 false
             }
             fn word(&mut self, _n: &str) -> String {
+                String::new()
+            }
+            /// A theme that states nothing, which is what this surface
+            /// says about every other kind of token too. Nothing here
+            /// draws text at all, so no trim is reached.
+            fn theme_text(&mut self, _n: &str) -> String {
                 String::new()
             }
             fn class_state(&mut self, _c: &str, _s: State) -> StateInk {
