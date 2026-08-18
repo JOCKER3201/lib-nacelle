@@ -6,10 +6,28 @@
 //! backdrop PLATE (traces, grid, vignette) is `theme::plate` — baked
 //! pixels, not per-frame geometry.
 //!
-//! A board standing still paints NO ground of its own: the clear and
-//! the plate already fill the screen behind it. A board turning
-//! SIDEWAYS is a different thing — a WALL of a solid — and takes its
-//! ground with it ([`board_ground`]) over the flat [`ride_void`] the
+//! EVERY board paints its ground ([`board_ground`]), standing or
+//! moving. This header used to say the opposite — "a board standing
+//! still paints NO ground of its own: the clear and the plate already
+//! fill the screen behind it" — and the host believed it. They do not
+//! fill it, and the gap is a whole rung of the ladder: the frame clears
+//! to `surface.void` ([`clear_color`]) while the ground a board stands
+//! on is `backdrop.solid`, which the master derives from
+//! `@surface.base`. Measured on the master 2026-08-18: sRGB(0.0096,
+//! 0.0240, 0.0171) against sRGB(0.0418, 0.0758, 0.0613). So the same
+//! board showed one ground standing and another the instant it turned,
+//! and `backdrop.solid` and `elev.board.fill` had no reader at all on
+//! the path 99% of frames take.
+//!
+//! It is also what a FROSTED surface samples. The renderer's base scene
+//! is everything drawn before the first glass run; a theme that ships
+//! no decoration bakes no plate, so a standing frame that paints no
+//! ground opens its list with the first frosted panel, the base scene
+//! is empty, and every glass quad on the screen reads a pyramid holding
+//! nothing but the clear.
+//!
+//! A board turning SIDEWAYS is still a different thing — a WALL of a
+//! solid — and takes its ground with it over the flat [`ride_void`] the
 //! whole turn happens in; without that the walls are panes of glass
 //! with the frame's own clear showing through them.
 
@@ -37,9 +55,13 @@ pub fn clear_color() -> Color {
 /// order: `backdrop.solid` — what lies behind the board — then the
 /// board's field `elev.board.fill`, then the baked backdrop plate, the
 /// decoration whose traces, grid and stars live on that field (5.5).
-/// Emitted by a board riding SIDEWAYS, before its panels, so the
-/// caller's yaw and perspective carry ground and panels together and
-/// the face turns as one solid wall. Two levels rather than one because
+/// Emitted before a board's panels, standing or moving: by the FRAME
+/// once, under everything, and again per FACE by a board riding
+/// sideways, so that caller's yaw and perspective carry ground and
+/// panels together and the face turns as one solid wall. The two do
+/// not fight — a sideways ride lays [`ride_void`] over the whole
+/// screen before its first face, so the frame's own copy is covered
+/// for as long as a cube is up. Two levels rather than one because
 /// a family-B board paints NOTHING of its own (`elev.board.fill` at
 /// alpha 0) and a wall of nothing is a pane of glass, not a wall: what
 /// that theme puts behind its panes is the backdrop, and the backdrop
