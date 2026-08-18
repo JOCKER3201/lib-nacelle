@@ -5144,7 +5144,7 @@ back_w_min = 13u                    # minimum width of that button · - · len (
 back_w_min_min_px = 70px            # absolute floor for back_w_min · - · device px · companion of settings.back_w_min (3.2)
 list_w_frac = 60%                   # width of the settings list column · - · % of the modal's width · -
 grid_cols = 3                       # columns in the settings icon grid · - · n · -
-col_gap = @space.6                  # rynna między kolumnami pasa · - · len (u) · 4u = 21.6 px
+col_gap = @space.6                  # rynna między kolumnami pasa · - · len (u) · 4u = 21.6 px; settings.band_pad_x — the air INSIDE a column's bed — has to stay UNDER this number, or a button reads as no further from the next column than from its own bed's edge and the two columns fuse into one (2026-08-18)
 zone_gap = @space.6                 # odstęp pionowy między pasami · - · len (u) · = section_gap, jeden rytm
 col_min_w = 72u                     # próg: węższa kolumna = pas składa się do listy · - · len (u) · 388.8 px
 col_min_w_min_px = 360px            # podłoga companion (3.2) · - · device px · dobrana tak, by 500 px składało, 720p+ trzymało kolumny
@@ -5160,7 +5160,7 @@ row_label_role = body               # type role of every settings row label: COL
 section_role = label.section        # type role of a section header inside a page: the FONT view's TERMINAL and INTERFACE · - · role · type.label.section, the role settings.rs spelled out for these two headers before a binding existed
 section_gap = @space.6              # the break between the BACK row and the first setting · - · len (u) · @space.6 = 4u = 21.6 px; settings.rs:926's undeclared gap*2.0
 band_lift = 1.20                    # the navigation's bed against the window body it lies on, as a multiple of OKLab L · - · f, 0.5 .. 2.0 · read ONCE, by component.settings.sub_fill (5.26); rail_fill points at that same colour, so the two navigation columns are one bed in two boxes
-band_pad_x = @space.4               # air between a navigation column's bed and the buttons standing on it, left and right · - · len (u) · @space.4 = 2u = 10.8 px; a control flush with the bed under it reads as a slice OF the bed, not as a thing lying on it (owner, 2026-08-18)
+band_pad_x = @space.4               # air between a navigation column's bed and the buttons standing on it, left and right · - · len (u) · @space.4 = 2u = 10.8 px; a control flush with the bed under it reads as a slice OF the bed, not as a thing lying on it (owner, 2026-08-18); MUST STAY UNDER settings.col_gap (4u), the gutter to the next column — the rule is written out there
 band_pad_y = @space.4               # the same air at the top and the bottom of that bed · - · len (u) · @space.4 = 2u = 10.8 px; the same number as band_pad_x, because a plate with more air on one axis than the other reads as tilted
 band_corner = @corner.md            # the corner a navigation column's bed wears · - · len (u) · @corner.md = 1.2u = 6.5 px; the panel/card radius, one step under the @corner.lg of the modal these columns stand inside — a nested box takes the smaller arc or it reads as the wider one
 band_corner_mode = @corner.mode     # how that corner is cut · - · enum: square | round | chamfer · @corner.mode, the one place this file states its corner language
