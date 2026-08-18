@@ -285,8 +285,92 @@ pub fn border_edits(scope: Scope, kind: Border, colour: Oklch, halo_dressed: boo
     out
 }
 
+/// The BORDER'S OWN THICKNESS — `border.edge.width`, and nothing else.
+///
+/// SEVEN KEYS OF GEOMETRY AND NOT ONE OF THEM IS A RADIUS. `[border.edge]`
+/// (default.theme:432-446) declares `width`, `style`, `dash`, `gap`,
+/// `phase`, `bracket_len` and `bracket_inset`. A border in this theme
+/// language has a WIDTH; the only radius anywhere near one is the REACH of
+/// its light ([`glow_reach_edit`]), which is a different token in a
+/// different section and answers a different question. The owner asked for
+/// "ustawienie promienia borderu" on 2026-08-18 and both readings were
+/// delivered, because both were missing and both are useful.
+///
+/// THE READER IS NAMED AND IT IS HOT. `border.edge.width` is one of the
+/// tokens the bake resolves into its fast table (`theme/mod.rs:1939`,
+/// `border_width`), and the master hangs the panel's own ring off it:
+/// `elev.panel.edge.width = @panel.border -> @border.edge.width ->
+/// @stroke.hair` (default.theme:1767). So this is the one number that
+/// moves every container's ring at once — which is exactly the size of
+/// question BASIC asks.
+///
+/// AND IT IS NOT `stroke.hair`. The kerf is the GLOBAL one, worn by 72
+/// derivations including `menu.border` and `tooltip.border`; the editor
+/// already offers it under HAIRLINE, on the page for one-token questions.
+/// Writing the border's own key instead is what lets a person thicken the
+/// frames without thickening every rule and separator on the screen.
+///
+/// THE WALL IS THE MASTER'S, not a taste: `[stroke]` tops out at `bold =
+/// 0.7u` (default.theme:251), so 1u is past every weight the file states —
+/// the same wall, for the same reason, that [`shape_edits`] puts on the
+/// kerf.
+pub fn border_width_edit(scope: Scope, width_u: f32) -> Edit {
+    let Scope::Theme = scope;
+    Edit::new("border.edge.width", format!("{:.2}u", width_u.clamp(0.0, 1.0)))
+}
+
+/// HOW FAR A LIT BORDER'S LIGHT REACHES — `glow.panel_edge.radius`.
+///
+/// The second reading of "promień borderu", and the only token in this
+/// build that a border and a radius both have a claim on. It is read by
+/// `object/window.rs:104`, which returns at zero, and it is the number
+/// [`border_edits`] SEEDS at `1.6u` on a theme that has never dressed its
+/// halo. That seeding is a floor under a switch, not an answer to "how
+/// wide" — until now nothing could answer that, which is why a person who
+/// picked GLOW got one reach and no say in it.
+///
+/// THE RANGE IS DECLARED IN THE FILE, not chosen here: `panel_edge.radius`
+/// says `u, 0u .. 4u` (default.theme:1105-1107), so 4u is the wall and 0u
+/// is the master's own `none` sentinel — draw nothing. A caller that hands
+/// this zero is asking for an unlit border by way of the reach, which is a
+/// legal thing to ask and reads on screen exactly like LINE.
+///
+/// WHO WINS. This is written by the editor AFTER [`border_edits`], over
+/// the top of the seed, because a number a person moved outranks a floor
+/// the model put under a switch. The caller does that merge — one
+/// assignment per token, or a file would carry the key twice.
+pub fn glow_reach_edit(scope: Scope, radius_u: f32) -> Edit {
+    let Scope::Theme = scope;
+    Edit::new("glow.panel_edge.radius", format!("{:.2}u", radius_u.clamp(0.0, 4.0)))
+}
+
+/// How far a background answer's COLOUR travels along the `[elev.*]`
+/// ladder — the owner's ZGŁOSZENIE 7, 2026-08-18.
+///
+/// "W trybie BASIC zmiana przezroczystości wpływa TYLKO na główne tło
+/// obiektu." The rule is about a PAGE, which is why it is a parameter and
+/// not a change to what a background edit means: ADVANCED is the page for
+/// "what exactly should this one token do" and its answer still dresses
+/// every reachable rung, which is what keeps a menu from being the one
+/// flat plate over a frosted window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GlassReach {
+    /// Every reachable rung wears the same glass: rank, tint and wash.
+    EveryRung,
+    /// The RANK travels and the COLOURS do not. Every rung still learns
+    /// that the theme is glassy — so a float over a frosted window is
+    /// frosted too — but the tint and the wash, which is where the alpha
+    /// a person moved lives, land on the body's own rung alone. The other
+    /// rungs keep whatever the theme's file says (the master ships
+    /// `#FFFFFF / 1.0` and `none`, default.theme:1888-1889).
+    BodyOnly,
+}
+
 /// The glass trio's key names on every rung of the `[elev.*]` ladder a
 /// background edit reaches: `(rank, tint, wash)`.
+///
+/// THE BODY'S OWN RUNG IS FIRST and that order is load-bearing:
+/// [`GlassReach::BodyOnly`] means "the colours stop after index 0".
 ///
 /// A rung is reachable exactly when some object is BUILT from it, because
 /// `elev::Level` reads the trio off whichever rung it was named with and
@@ -333,7 +417,10 @@ const GLASS_RUNGS: [(&str, &str, &str); 2] = [
 /// first, a menu opened over a frosted window is the one flat plate on
 /// the screen; without the second, going back to SOLID leaves the menu
 /// frosted for good, because the rank that turned it on is still in the
-/// file. SOLID's own COLOUR stays on the single shared seam and does not
+/// file. Since 2026-08-18 the KIND is what travels unconditionally and
+/// the COLOURS answer to `reach` ([`GlassReach`]) — both halves above
+/// survive that, because both are statements about the RANK.
+/// SOLID's own COLOUR stays on the single shared seam and does not
 /// travel — a menu and a tooltip have bodies of their own
 /// (`component.menu.fill`, `component.tooltip.fill`) and the editor has
 /// no control that claims to set them, whereas glass has no colour of its
@@ -345,6 +432,9 @@ const GLASS_RUNGS: [(&str, &str, &str); 2] = [
 /// base beneath it), depth picks the pyramid rank, and coverage is the
 /// wash's alpha — a slider now, where an opening literal stood before
 /// verification called it out.
+///
+/// `reach` is ZGŁOSZENIE 7's answer and it is about the PAGE that asked,
+/// never about the kind: see [`GlassReach`].
 pub fn glass_edits(
     scope: Scope,
     kind: Glass,
@@ -353,6 +443,7 @@ pub fn glass_edits(
     opacity: f32,
     depth: f32,
     coverage: f32,
+    reach: GlassReach,
 ) -> Vec<Edit> {
     let Scope::Theme = scope;
     let op = opacity.clamp(0.0, 1.0);
@@ -379,13 +470,20 @@ pub fn glass_edits(
     if let Glass::Solid = kind {
         out.push(Edit::new("component.panel.fill", oklch_literal(Oklch { alpha: op, ..wash })));
     }
-    for (rank_key, tint_key, wash_key) in GLASS_RUNGS {
+    for (i, (rank_key, tint_key, wash_key)) in GLASS_RUNGS.into_iter().enumerate() {
+        // The BODY's rung is index 0 (see [`GLASS_RUNGS`]). Under
+        // `BodyOnly` the rank still travels — every float learns that this
+        // theme is glassy — and the two COLOUR keys, which is where the
+        // alpha a person moved lives, stop here.
+        let colours = matches!(reach, GlassReach::EveryRung) || i == 0;
         match kind {
             Glass::Solid => out.push(Edit::new(rank_key, "0")),
             Glass::Blur | Glass::Frosted => {
                 out.push(Edit::new(rank_key, rank.clone()));
-                out.push(Edit::new(tint_key, tint_lit.clone()));
-                out.push(Edit::new(wash_key, wash_lit.clone()));
+                if colours {
+                    out.push(Edit::new(tint_key, tint_lit.clone()));
+                    out.push(Edit::new(wash_key, wash_lit.clone()));
+                }
             }
         }
     }
@@ -984,12 +1082,28 @@ fn snap(value: f32, step: f32) -> f32 {
 /// sliders have to work over the master, over a user's file and over a
 /// preview that has not been saved, and none of those is "the theme" from
 /// inside this module.
+///
+/// WHAT LEFT THIS STRUCT ON 2026-08-18, and why it is the whole of the
+/// owner's ZGŁOSZENIE 5. `severity: [Oklch; 7]` used to stand here, because
+/// BASIC turned the seven roles by hand — the roles were frozen literals in
+/// the master and rotating them was the only way to make them belong to a
+/// re-coloured theme. Rotating them by the FULL move is what the owner saw:
+/// mint -> red sent `ok` from 148 deg to 10.5 (a green success drawn in red)
+/// and `critical` from 27 to 249.5 (a red alarm drawn in blue). The roles are
+/// expressions now (`toward()` in the master), so they lean toward
+/// `palette.accent` on their own, by `severity.pull` and no further than
+/// `severity.pull_clamp` — and BASIC has nothing to say about them. This
+/// struct holds only what BASIC still WRITES.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ToneSeeds {
     /// `palette.accent`.
     pub accent: Oklch,
-    /// `severity.<r>.text`, indexed by [`SEVERITY_ROLES`].
-    pub severity: [Oklch; 7],
+    /// `palette.black` — `shade()`'s target.
+    pub black: Oklch,
+    /// `palette.white` — `tint()`'s target.
+    pub white: Oklch,
+    /// `palette.neutral` — the grey anchor `severity.offline.text` rides.
+    pub neutral: Oklch,
     /// `surface.lift`.
     pub surface_lift: f32,
     /// `text.lift`.
@@ -1010,13 +1124,11 @@ impl ToneSeeds {
     /// that promise to, and it applies the same clamps the writes do so the
     /// two cannot drift.
     pub fn shifted(&self, tone: Tone) -> ToneSeeds {
-        let mut severity = self.severity;
-        for s in severity.iter_mut() {
-            *s = tone_shift(*s, tone);
-        }
         ToneSeeds {
             accent: tone_shift(self.accent, tone),
-            severity,
+            black: tone_turn(self.black, tone),
+            white: tone_turn(self.white, tone),
+            neutral: tone_spin(self.neutral, tone),
             surface_lift: clamp_surface_lift(self.surface_lift + tone.light),
             text_lift: clamp_text_lift(self.text_lift + tone.light),
         }
@@ -1035,6 +1147,51 @@ fn tone_shift(c: Oklch, tone: Tone) -> Oklch {
     }
 }
 
+/// The same move with THE LIGHTNESS LEFT ALONE — `palette.black` and
+/// `palette.white`.
+///
+/// Measured over the master, and this is why the pair may not take
+/// `tone.light`: `black` is `#0A100E` (L 0.166, C 0.010, h 172.6) and
+/// `white` is `#EAF6F1` (L 0.963, C 0.014, h 169.2). Neither is neutral —
+/// both sit on the ACCENT's hue at 7 % and 9 % of its chroma — so both are
+/// already style, frozen in hex, and a re-coloured theme that leaves them
+/// there is the owner's ZGŁOSZENIE 5 exactly: "the background stays the old
+/// hue". The hue and the chroma must come along.
+///
+/// The LIGHTNESS must not. These two are the poles the whole file is pulled
+/// between (`shade()` and `tint()` take no other target, and `shade()` alone
+/// has ten readers in the master), so their L is the theme's POLARITY and
+/// not a shade of the accent. Moving it with the accent's lightness would
+/// mean that choosing a darker ink also raised the floor everything is
+/// shaded toward — two questions answered by one slider, and the answer to
+/// the second one wrong. Polarity is a theme file, not a knob
+/// (`.gap-program/audyt-kolory-bazowe.md` §3).
+fn tone_turn(c: Oklch, tone: Tone) -> Oklch {
+    Oklch {
+        l: c.l,
+        c: (c.c * tone.sat).max(0.0),
+        h: (c.h + tone.hue_deg).rem_euclid(360.0),
+        alpha: c.alpha,
+    }
+}
+
+/// The hue ALONE — `palette.neutral`.
+///
+/// The master calls this token a "hue-free grey anchor" and
+/// `severity.offline.text` lives off it, whose whole meaning is "absent, not
+/// zero": a thing that is not reporting must not look like a live reading.
+/// So the hue may follow the theme — at the master's C 0.020 nobody can see
+/// which way a grey leans — and the CHROMA may not, because chroma is the
+/// difference between grey and a colour.
+///
+/// This is also a bug fix. `tone_shift` multiplied every seed's chroma,
+/// `offline` rode this token, and SATURATION at 200 % therefore took the
+/// anchor to C 0.040: a visibly green "not reporting"
+/// (`.gap-program/audyt-kolory-bazowe.md` §5.4).
+fn tone_spin(c: Oklch, tone: Tone) -> Oklch {
+    Oklch { h: (c.h + tone.hue_deg).rem_euclid(360.0), ..c }
+}
+
 /// The bake's own wall ([`super::bake::SURFACE_LIFT_WALL`]), not a new
 /// opinion and not a second copy of the number: writing a wilder value
 /// saves a file that resolves to the clamp anyway and reopens with a
@@ -1048,12 +1205,43 @@ fn clamp_text_lift(v: f32) -> f32 {
     v.clamp(-super::bake::TEXT_LIFT_WALL, super::bake::TEXT_LIFT_WALL)
 }
 
-/// BASIC's three sliders, as edits to the theme's authors.
+/// BASIC's one colour, as edits to the theme's authors.
 ///
-/// TEN TOKENS AND NO MORE, every one of them already on this module's ALIVE
-/// list with its reader named: `palette.accent`, the seven
-/// `severity.<r>.text`, `surface.lift` and `text.lift` — plus `surface.hue`
-/// on the one condition below.
+/// SIX TOKENS AND NO MORE, every one of them on this module's ALIVE list with
+/// its reader named: `palette.accent`, `palette.black`, `palette.white`,
+/// `palette.neutral`, `surface.lift` and `text.lift` — plus `surface.hue` on
+/// the one condition below.
+///
+/// IT USED TO BE TEN, AND SEVEN OF THEM WERE THE MISTAKE (ZGŁOSZENIE 5,
+/// 2026-08-18). The seven `severity.<r>.text` were written here because the
+/// master held them as frozen literals and nothing else would have made them
+/// belong to a re-coloured theme; they were written with the FULL move, so
+/// mint -> red carried green `ok` to 10.5 deg and red `critical` to 249.5.
+/// The roles are `toward()` expressions in the master now and lean toward
+/// `palette.accent` themselves, capped at `severity.pull_clamp` — so the
+/// cascade does it, this page does not, and three things fall out at once:
+///
+/// * a role KEEPS ITS MEANING under any accent (a green success stays green);
+/// * a theme that wrote its own role colour keeps it, because BASIC no longer
+///   overwrites all seven the moment somebody opens the page — the silence of
+///   an edit set means "leave it as it is", and until today this page had
+///   nothing silent to say about severity;
+/// * the roles still FOLLOW, which is what the owner asked for. They lean.
+///
+/// AND THREE TOKENS ARRIVED, which is the other half of the same report. The
+/// palette's three grounds — `black`, `white`, `neutral` — are hex literals
+/// sitting on the accent's own hue at 7 %, 9 % and 13 % of its chroma
+/// (measured: h 172.6 / 169.2 / 169.6 against the accent's 166.5). They ARE
+/// style. Left behind by a re-colour they hold the whole file back, because
+/// `shade()` and `tint()` pull every derived colour toward them — which is
+/// why "I change the colour and the background stays as it was" was true.
+/// They cannot become expressions over the accent: §5.2 of the master keeps
+/// them literal precisely so `shade()`/`tint()` are structurally incapable of
+/// closing a cycle, and `expr.rs`'s `black()`/`white()` swallow a cycle into
+/// plain black. So the EDITOR writes the literal, the way it already writes a
+/// role's. See [`tone_turn`] for why they take the hue and the chroma but
+/// never the lightness, and [`tone_spin`] for why `neutral` takes the hue
+/// alone.
 ///
 /// WHY SATURATION DOES NOT TOUCH `surface.chroma` OR `text.chroma`. Both
 /// ladders take their C from `@chroma.accent = sat(@palette.accent)` and are
@@ -1082,14 +1270,23 @@ fn clamp_text_lift(v: f32) -> f32 {
 /// re-weld a surface hue somebody chose on purpose.
 pub fn tone_edits(scope: Scope, seeds: &ToneSeeds, tone: Tone) -> Vec<Edit> {
     let Scope::Theme = scope;
-    let mut out = Vec::with_capacity(11);
+    let mut out = Vec::with_capacity(7);
     out.push(accent_edit(scope, tone_shift(seeds.accent, tone)));
     if tone.hue_deg != 0.0 {
         out.push(Edit::new("surface.hue", "@hue.accent"));
     }
-    for (i, role) in SEVERITY_ROLES.iter().enumerate() {
-        out.push(severity_role_edit(scope, *role, tone_shift(seeds.severity[i], tone)));
-    }
+    out.push(Edit::new(
+        "palette.black",
+        oklch_literal(tone_turn(seeds.black, tone)),
+    ));
+    out.push(Edit::new(
+        "palette.white",
+        oklch_literal(tone_turn(seeds.white, tone)),
+    ));
+    out.push(Edit::new(
+        "palette.neutral",
+        oklch_literal(tone_spin(seeds.neutral, tone)),
+    ));
     out.push(Edit::new(
         "surface.lift",
         format!("{:.4}", clamp_surface_lift(seeds.surface_lift + tone.light)),
@@ -1309,7 +1506,7 @@ mod tests {
         }
         all.push(border_colour_edit(Scope::Theme, colour));
         for kind in [Glass::Solid, Glass::Blur, Glass::Frosted] {
-            all.extend(glass_edits(Scope::Theme, kind, colour, colour, 1.0, 2.0, 0.42));
+            all.extend(glass_edits(Scope::Theme, kind, colour, colour, 1.0, 2.0, 0.42, GlassReach::EveryRung));
         }
         for e in &all {
             assert!(
@@ -1331,7 +1528,7 @@ mod tests {
     fn the_background_lands_on_the_shared_seam_and_never_on_the_fixture() {
         let colour = c(0.3, 0.05, 220.0, 1.0);
         for kind in [Glass::Solid, Glass::Blur, Glass::Frosted] {
-            for e in glass_edits(Scope::Theme, kind, colour, colour, 1.0, 2.0, 0.42) {
+            for e in glass_edits(Scope::Theme, kind, colour, colour, 1.0, 2.0, 0.42, GlassReach::EveryRung) {
                 assert!(
                     !e.token.starts_with("elev.fixture"),
                     "{:?} wrote {} — the desktop's decoration is not the editor's",
@@ -1345,7 +1542,7 @@ mod tests {
                 );
             }
         }
-        let solid = glass_edits(Scope::Theme, Glass::Solid, colour, colour, 1.0, 2.0, 0.42);
+        let solid = glass_edits(Scope::Theme, Glass::Solid, colour, colour, 1.0, 2.0, 0.42, GlassReach::EveryRung);
         assert!(
             solid.iter().any(|e| e.token == "component.panel.fill"),
             "SOLID does not colour the seam both windows and panels read"
@@ -1370,7 +1567,7 @@ mod tests {
     fn a_glassy_background_reaches_the_popover_rung_as_well_as_the_panel() {
         let colour = c(0.62, 0.08, 210.0, 1.0);
         for kind in [Glass::Blur, Glass::Frosted] {
-            let edits = glass_edits(Scope::Theme, kind, colour, colour, 0.8, 2.0, 0.42);
+            let edits = glass_edits(Scope::Theme, kind, colour, colour, 0.8, 2.0, 0.42, GlassReach::EveryRung);
             let of = |token: &str| {
                 edits.iter().find(|e| e.token == token).map(|e| e.value.clone())
             };
@@ -1398,7 +1595,7 @@ mod tests {
     #[test]
     fn going_back_to_solid_takes_the_glass_off_the_popover_rung_too() {
         let colour = c(0.3, 0.05, 220.0, 1.0);
-        let solid = glass_edits(Scope::Theme, Glass::Solid, colour, colour, 1.0, 2.0, 0.42);
+        let solid = glass_edits(Scope::Theme, Glass::Solid, colour, colour, 1.0, 2.0, 0.42, GlassReach::EveryRung);
         assert!(
             solid.iter().any(|e| e.token == "elev.popover.glass.rank" && e.value == "0"),
             "SOLID left the popover rung frosted: {solid:?}"
@@ -1417,19 +1614,19 @@ mod tests {
             v.iter().find(|e| e.token.ends_with("glass.tint")).unwrap().value.clone()
         };
         // Full opacity: no alpha tail, whatever the seeded colour carried.
-        let blur = glass_edits(Scope::Theme, Glass::Blur, tint, wash, 1.0, 2.0, 0.42);
+        let blur = glass_edits(Scope::Theme, Glass::Blur, tint, wash, 1.0, 2.0, 0.42, GlassReach::EveryRung);
         assert!(!tint_of(&blur).contains('/'), "full opacity grew an alpha tail");
         // Dialled down: the tail is the KNOB's number, for blur and frosted
         // alike — a translucent tint blends the blur with the sharp scene.
         for kind in [Glass::Blur, Glass::Frosted] {
-            let v = glass_edits(Scope::Theme, kind, tint, wash, 0.6, 2.0, 0.42);
+            let v = glass_edits(Scope::Theme, kind, tint, wash, 0.6, 2.0, 0.42, GlassReach::EveryRung);
             assert!(
                 tint_of(&v).contains("/ 0.600"),
                 "{kind:?}: the tint's alpha is not the opacity knob's 0.6"
             );
         }
         // And the wash follows coverage, not the seeded colour's 0.34.
-        let frosted = glass_edits(Scope::Theme, Glass::Frosted, tint, wash, 1.0, 2.0, 0.7);
+        let frosted = glass_edits(Scope::Theme, Glass::Frosted, tint, wash, 1.0, 2.0, 0.7, GlassReach::EveryRung);
         let wash_of = frosted
             .iter()
             .find(|e| e.token.ends_with("glass.wash"))
@@ -1439,17 +1636,145 @@ mod tests {
             "the wash's alpha is not the coverage knob's 0.7"
         );
         // Depth lands in the rank, clamped to the pyramid the renderer has.
-        let deep = glass_edits(Scope::Theme, Glass::Blur, tint, wash, 1.0, 9.0, 0.42);
+        let deep = glass_edits(Scope::Theme, Glass::Blur, tint, wash, 1.0, 9.0, 0.42, GlassReach::EveryRung);
         assert!(
             deep.iter().any(|e| e.token.ends_with("glass.rank") && e.value == "3.00"),
             "a depth past the pyramid was not clamped"
         );
         // And a fraction survives to the file — the whole point of the
         // two-fan emitter.
-        let mid = glass_edits(Scope::Theme, Glass::Blur, tint, wash, 1.0, 1.7, 0.42);
+        let mid = glass_edits(Scope::Theme, Glass::Blur, tint, wash, 1.0, 1.7, 0.42, GlassReach::EveryRung);
         assert!(
             mid.iter().any(|e| e.token.ends_with("glass.rank") && e.value == "1.70"),
             "a fractional depth was rounded away"
+        );
+    }
+
+    // ---------------------------- ZGŁOSZENIE 7 (2026-08-18): how far the
+    // ---------------------------- alpha a person moved is allowed to go.
+
+    /// The owner's rule for BASIC: "zmiana przezroczystości wpływa TYLKO na
+    /// główne tło obiektu".
+    ///
+    /// The two halves are measured apart, because they must not be traded
+    /// for each other: the RANK still reaches every rung (a menu over a
+    /// frosted window is frosted), and the two COLOUR keys — which is where
+    /// the alpha lives — stop at the body.
+    #[test]
+    fn a_body_only_background_carries_the_kind_everywhere_and_the_alpha_nowhere_else() {
+        let tint = c(0.7, 0.15, 200.0, 1.0);
+        let wash = c(0.3, 0.05, 40.0, 1.0);
+        for kind in [Glass::Blur, Glass::Frosted] {
+            let narrow =
+                glass_edits(Scope::Theme, kind, tint, wash, 0.4, 2.0, 0.7, GlassReach::BodyOnly);
+            let wide =
+                glass_edits(Scope::Theme, kind, tint, wash, 0.4, 2.0, 0.7, GlassReach::EveryRung);
+            let has = |v: &[Edit], t: &str| v.iter().any(|e| e.token == t);
+            // The kind travels, both ways round.
+            for set in [&narrow, &wide] {
+                for (rank_key, _, _) in GLASS_RUNGS {
+                    assert!(
+                        has(set, rank_key),
+                        "{kind:?}: `{rank_key}` was not written — a float that never \
+                         learns the theme is glassy is the flat plate this set exists \
+                         to prevent"
+                    );
+                }
+            }
+            // The body's own rung takes the colours under both reaches.
+            for key in ["elev.panel.glass.tint", "elev.panel.glass.wash"] {
+                assert!(has(&narrow, key), "{kind:?}: the body lost `{key}`");
+            }
+            // And the float's do not, under BodyOnly alone.
+            for key in ["elev.popover.glass.tint", "elev.popover.glass.wash"] {
+                assert!(
+                    has(&wide, key),
+                    "{kind:?}: EveryRung must still dress `{key}` — ADVANCED's answer \
+                     did not change"
+                );
+                assert!(
+                    !has(&narrow, key),
+                    "{kind:?}: BASIC's transparency reached `{key}`, which is the menu \
+                     and the tooltip and not the object's own background"
+                );
+            }
+        }
+    }
+
+    /// And the alpha that DOES land is the caller's number, not a rounding
+    /// of it — the expectation is spelled out here from the argument, so a
+    /// change to `oklch_literal` cannot move both sides of the equation at
+    /// once.
+    #[test]
+    fn the_bodys_own_rung_wears_the_alpha_the_caller_asked_for() {
+        let tint = c(0.7, 0.15, 200.0, 1.0);
+        let edits =
+            glass_edits(Scope::Theme, Glass::Blur, tint, tint, 0.4, 2.0, 0.7, GlassReach::BodyOnly);
+        let body = edits
+            .iter()
+            .find(|e| e.token == "elev.panel.glass.tint")
+            .expect("the body's tint");
+        assert!(
+            body.value.ends_with("/ 0.400)"),
+            "the body's tint is `{}` and the knob said 0.4",
+            body.value
+        );
+    }
+
+    // ------------------- ZGŁOSZENIE 6 (2026-08-18): the border's thickness
+    // ------------------- and the reach of its light — two readings, both
+    // ------------------- of them tokens the master already declares.
+
+    #[test]
+    fn the_border_carries_its_own_thickness_and_not_the_global_kerf() {
+        let e = border_width_edit(Scope::Theme, 0.35);
+        assert_eq!(
+            e.token, "border.edge.width",
+            "the border's thickness must be the border's own key; `stroke.hair` is the \
+             kerf 72 derivations share and the editor already offers it under HAIRLINE"
+        );
+        assert_eq!(e.value, "0.35u");
+        // The wall is the master's heaviest stroke rounded up, the same
+        // wall `shape_edits` puts on the kerf: `[stroke] bold = 0.7u`.
+        assert_eq!(
+            border_width_edit(Scope::Theme, 9.0).value,
+            "1.00u",
+            "a width past every weight the master states was let through"
+        );
+        assert_eq!(border_width_edit(Scope::Theme, -3.0).value, "0.00u");
+    }
+
+    #[test]
+    fn a_lit_borders_reach_is_held_inside_the_range_the_master_declares() {
+        let e = glow_reach_edit(Scope::Theme, 2.4);
+        assert_eq!(e.token, "glow.panel_edge.radius");
+        assert_eq!(e.value, "2.40u");
+        // default.theme:1105-1107 declares `u, 0u .. 4u` for this key, and
+        // 0u is its own `none` sentinel — both ends are the FILE's.
+        assert_eq!(
+            glow_reach_edit(Scope::Theme, 12.0).value,
+            "4.00u",
+            "a reach past the master's declared 4u was let through"
+        );
+        assert_eq!(glow_reach_edit(Scope::Theme, -1.0).value, "0.00u");
+    }
+
+    /// The seed a lit kind lays under an undressed theme is a FLOOR, and a
+    /// number a person moved outranks it. The merge is the caller's — this
+    /// only pins that the two really do collide on one token, which is the
+    /// fact that makes a merge necessary at all.
+    #[test]
+    fn the_reach_a_person_sets_and_the_seed_a_kind_lays_are_one_token() {
+        let lit = border_edits(Scope::Theme, Border::Neon, c(0.7, 0.15, 200.0, 1.0), false);
+        let seeded = lit
+            .iter()
+            .find(|e| e.token == "glow.panel_edge.radius")
+            .expect("an undressed theme must be given a reach by the kind");
+        assert_eq!(
+            seeded.token,
+            glow_reach_edit(Scope::Theme, 1.0).token,
+            "if these two ever stop naming one token the caller's merge is a no-op \
+             and the knob stops winning"
         );
     }
 
@@ -1461,6 +1786,9 @@ mod tests {
     /// grepped on 2026-08-16, not inherited from the reconnaissance.
     const ALIVE: &[(&str, &str)] = &[
         ("palette.accent", "theme/bake.rs:859; class ladders via view/surface.rs:527"),
+        ("palette.black", "theme/expr.rs `Env::black` — shade()'s only target, 10 callers in the master"),
+        ("palette.white", "theme/expr.rs `Env::white` — tint()'s only target"),
+        ("palette.neutral", "severity.offline.text (default.theme) -> view/paint.rs:42; ui.rs:147"),
         ("surface.hue", "the six level exprs (default.theme:317-331); levels read at deco.rs:33, winframe.rs:414"),
         ("surface.lift", "theme/bake.rs:519"),
         ("surface.chroma", "theme/bake.rs:520"),
@@ -1506,18 +1834,37 @@ mod tests {
         ("scrollbar.fade_ms", "view/scroll.rs:586"),
         ("scrollbar.track", "view/paint.rs:673"),
         ("component.scrollbar.track", "view/paint.rs:674"),
+        // ZGŁOSZENIE 6 (2026-08-18): the two readings of "promień borderu".
+        ("border.edge.width", "theme/mod.rs:1939 (hot table `border_width`); elev.panel.edge.width = @panel.border -> @border.edge.width (default.theme:1767), read at object/elev.rs:421"),
+        ("glow.panel_edge.radius", "object/window.rs:104 — returns at zero, so this is the number that decides whether a lit border is visible at all"),
     ];
 
-    /// Declared by the master, read by no Rust in the workspace, and near
-    /// enough to the new groups that a control over them was actually
-    /// PROPOSED — the reconnaissance wanted a MODE list and three sliders
-    /// on the first four, on the strength of theme-file comments describing
-    /// an engine that does not exist (the only match outside the theme file
-    /// is `parse.rs:1710`, a parser test). Measured 2026-08-16.
-    const DEAD_CONTROLS: [&str; 5] = [
+    /// Declared by the master and read by nothing that reaches the screen,
+    /// so a control over one of them would look as if it worked and change
+    /// no picture. Measured 2026-08-16, revised 2026-08-18.
+    ///
+    /// TWO LEFT THE LIST ON 2026-08-18, and the way they left is the point.
+    /// `severity.pull` and `severity.pull_clamp` used to sit here because
+    /// the "engine" their comments described did not exist — and the fix
+    /// was NOT to write that engine in Rust. The master now spells the pull
+    /// out where the colour is written (`severity.<r>.text =
+    /// toward(oklch(...), @palette.accent, @severity.pull,
+    /// @severity.pull_clamp)`), so both tokens have a reader, both change
+    /// the picture, and a control over either would do what it says. The
+    /// reader is arithmetic in `theme/expr.rs`; the numbers stayed in the
+    /// theme file, which is where this project keeps appearance.
+    ///
+    /// THE OTHER TWO COULD NOT LEAVE THE SAME WAY, and this is a finding
+    /// rather than an oversight. `severity.mode` selects among FOUR
+    /// generations (`hue | mono | mono_plus_warning | mono_strict`), and an
+    /// expression cannot select between generations — only a generator can,
+    /// and `hue` is the only one of the four that anything in this workspace
+    /// can produce. `severity.chroma` is declared to scale "the mono modes"
+    /// and so cannot come alive before `mode` does. Both stay here until
+    /// somebody writes the three mono generations; neither may be given a
+    /// control before then, which is exactly what this list is for.
+    const DEAD_CONTROLS: [&str; 3] = [
         "severity.mode",
-        "severity.pull",
-        "severity.pull_clamp",
         "severity.chroma",
         "glow.focus_ring.color",
     ];
@@ -1566,6 +1913,13 @@ mod tests {
             all.extend(focus_ring_edits(Scope::Theme, enabled, &ring));
         }
         all.push(unfocused_dim_edit(Scope::Theme, 0.62));
+        // ZGŁOSZENIE 6's two: the border's own thickness, and the reach of
+        // its light. Both ends of both walls, so a clamp cannot smuggle a
+        // token past this net.
+        for w in [0.0, 0.2, 5.0] {
+            all.push(border_width_edit(Scope::Theme, w));
+            all.push(glow_reach_edit(Scope::Theme, w));
+        }
         // BASIC's three sliders, both sides of the one conditional write.
         for tone in [Tone::NEUTRAL, Tone { hue_deg: 37.0, sat: 1.3, light: -0.02 }] {
             all.extend(tone_edits(Scope::Theme, &seeds(), tone));
@@ -1822,20 +2176,15 @@ mod tests {
 
     // ------------------------------------------------------------- BASIC
 
-    /// The master's own authors, near enough: a mint accent, seven severity
-    /// hues spread round the circle, both ladders unlifted.
+    /// The master's own authors, near enough: a mint accent, the three
+    /// grounds sitting on its hue at a fraction of its chroma the way the
+    /// master's really do, both ladders unlifted.
     fn seeds() -> ToneSeeds {
         ToneSeeds {
             accent: c(0.82, 0.130, 162.0, 1.0),
-            severity: [
-                c(0.78, 0.170, 150.0, 1.0), // ok
-                c(0.76, 0.120, 230.0, 1.0), // info
-                c(0.80, 0.150, 80.0, 1.0),  // warning
-                c(0.62, 0.220, 25.0, 1.0),  // critical
-                c(0.72, 0.160, 55.0, 1.0),  // contained
-                c(0.60, 0.010, 160.0, 1.0), // offline (the grey anchor)
-                c(0.70, 0.100, 300.0, 1.0), // unknown
-            ],
+            black: c(0.166, 0.010, 172.6, 1.0),
+            white: c(0.963, 0.014, 169.2, 1.0),
+            neutral: c(0.565, 0.020, 169.6, 1.0),
             surface_lift: 0.0,
             text_lift: 0.0,
         }
@@ -1845,12 +2194,15 @@ mod tests {
         edits.iter().find(|e| e.token == token).map(|e| e.value.clone())
     }
 
-    /// The set is closed at ten tokens plus the one conditional weld, and
+    /// The set is closed at six tokens plus the one conditional weld, and
     /// every one of them is an AUTHOR. The two derived families a slider
     /// might tempt somebody into — `hue.accent`/`chroma.accent`, which are
     /// literally `hue(@palette.accent)` and `sat(@palette.accent)` — must
     /// never be written: pinning them would cut the cascade at the joint
     /// and the next drag would move the seed and nothing else.
+    ///
+    /// It was TEN until 2026-08-18, and seven of the ten were the severity
+    /// roles. They are the theme's own expressions now.
     #[test]
     fn basic_writes_authors_only_and_nothing_derived() {
         let quiet = tone_edits(Scope::Theme, &seeds(), Tone { hue_deg: 0.0, sat: 1.2, light: 0.01 });
@@ -1859,18 +2211,24 @@ mod tests {
             names,
             [
                 "palette.accent",
-                "severity.ok.text",
-                "severity.info.text",
-                "severity.warning.text",
-                "severity.critical.text",
-                "severity.contained.text",
-                "severity.offline.text",
-                "severity.unknown.text",
+                "palette.black",
+                "palette.white",
+                "palette.neutral",
                 "surface.lift",
                 "text.lift",
             ],
             "BASIC's token set drifted"
         );
+        // The three palette GROUNDS are gone from this list as of
+        // 2026-08-18, and the reason is that they never belonged on it: they
+        // are not derived and cannot be. §5.2 of the master keeps
+        // `palette.black` and `palette.white` literal on purpose, so that
+        // `shade()` and `tint()` — which take no other target — are
+        // structurally incapable of closing a cycle, and `palette.neutral`
+        // is a literal beside them. Nothing in the cascade was ever going to
+        // carry them, which is why a re-coloured theme kept its old
+        // background. An editor writing the literal is the only road there
+        // is; see [`tone_turn`].
         for derived in [
             "hue.accent",
             "chroma.accent",
@@ -1879,9 +2237,6 @@ mod tests {
             "surface.panel",
             "surface.chroma",
             "text.chroma",
-            "palette.neutral",
-            "palette.black",
-            "palette.white",
         ] {
             assert!(
                 value_of(&quiet, derived).is_none(),
@@ -1910,23 +2265,89 @@ mod tests {
                 inner.split(',').nth(2).unwrap().trim().parse::<f32>().unwrap()
             };
             let want = |h: f32| (h + turn).rem_euclid(360.0);
-            assert!((hue_written("palette.accent") - want(s.accent.h)).abs() < 0.02);
-            for (i, role) in SEVERITY_ROLES.iter().enumerate() {
-                let token = severity_role_edit(Scope::Theme, *role, s.severity[i]).token;
+            for (token, seed) in [
+                ("palette.accent", s.accent),
+                ("palette.black", s.black),
+                ("palette.white", s.white),
+                ("palette.neutral", s.neutral),
+            ] {
                 assert!(
-                    (hue_written(token) - want(s.severity[i].h)).abs() < 0.02,
+                    (hue_written(token) - want(seed.h)).abs() < 0.02,
                     "{token} did not turn with the rest at {turn} deg"
                 );
             }
-            // The gaps that carry MEANING survive: ok and critical stay as
-            // far apart as the author put them, whatever the slider says.
-            let gap = |a: f32, b: f32| {
-                let d = (a - b).rem_euclid(360.0);
-                d.min(360.0 - d)
-            };
-            let before = gap(s.severity[0].h, s.severity[3].h);
-            let after = gap(hue_written("severity.ok.text"), hue_written("severity.critical.text"));
-            assert!((before - after).abs() < 0.05, "severity flattened: {before} -> {after}");
+        }
+    }
+
+    /// ZGŁOSZENIE 5, first half: **the three grounds come along, and they
+    /// bring only what they are allowed to bring.**
+    ///
+    /// `palette.black`, `white` and `neutral` are hex literals on the
+    /// accent's own hue — style frozen in hex — and leaving them behind is
+    /// what made "I change the colour and the background does not change"
+    /// true. They must turn. What they must NOT do is take the lightness
+    /// (their L is the theme's polarity, the poles `shade()` and `tint()`
+    /// pull everything toward) or, for `neutral`, the chroma (its whole job
+    /// is to be colourless, and `severity.offline.text` rides it).
+    #[test]
+    fn the_palettes_three_grounds_take_the_turn_but_neither_pole_moves() {
+        let s = seeds();
+        let e = tone_edits(
+            Scope::Theme,
+            &s,
+            Tone { hue_deg: 137.0, sat: 2.0, light: 0.06 },
+        );
+        let part = |token: &str, i: usize| -> f32 {
+            let v = value_of(&e, token).unwrap();
+            let inner = v.trim_start_matches("oklch(").trim_end_matches(')');
+            inner.split(',').nth(i).unwrap().trim().parse::<f32>().unwrap()
+        };
+        // The poles keep their own lightness while the accent takes the lift.
+        assert!((part("palette.black", 0) - s.black.l).abs() < 0.001, "black changed polarity");
+        assert!((part("palette.white", 0) - s.white.l).abs() < 0.001, "white changed polarity");
+        assert!(
+            (part("palette.accent", 0) - (s.accent.l + 0.06)).abs() < 0.001,
+            "the accent did not take the lightness the poles refused"
+        );
+        // SATURATION reaches the two poles (they are the accent's own hue at
+        // a fraction of its chroma, and the fraction is the theme's) …
+        assert!((part("palette.black", 1) - s.black.c * 2.0).abs() < 0.001);
+        assert!((part("palette.white", 1) - s.white.c * 2.0).abs() < 0.001);
+        // … and never the grey anchor, which would go visibly green at 200 %.
+        assert!(
+            (part("palette.neutral", 1) - s.neutral.c).abs() < 0.0005,
+            "SATURATION coloured the hue-free anchor: {} -> {}",
+            s.neutral.c,
+            part("palette.neutral", 1)
+        );
+        assert!((part("palette.neutral", 0) - s.neutral.l).abs() < 0.001);
+    }
+
+    /// ZGŁOSZENIE 5, second half: **BASIC has nothing to say about the
+    /// severity roles any more.**
+    ///
+    /// It used to write all seven with the full rotation, which is how a
+    /// green success came out red. The roles lean toward `palette.accent`
+    /// on their own now — `toward()` in the master, capped at
+    /// `severity.pull_clamp` — so this page writing them would be a second
+    /// opinion over the top of the first, and a destructive one: a theme
+    /// that dressed its own `contained` amber lost it the moment anybody
+    /// opened this page, because silence is what "leave it as it is" is
+    /// spelled with and this set had none.
+    #[test]
+    fn basic_leaves_every_severity_role_to_the_theme() {
+        for tone in [
+            Tone::NEUTRAL,
+            Tone { hue_deg: 193.0, sat: 1.4, light: -0.02 },
+            Tone { hue_deg: -137.5, ..Tone::NEUTRAL }, // mint -> red, the reported one
+        ] {
+            let e = tone_edits(Scope::Theme, &seeds(), tone);
+            let touched: Vec<_> =
+                e.iter().filter(|x| x.token.starts_with("severity.")).collect();
+            assert!(
+                touched.is_empty(),
+                "BASIC repainted the severity roles: {touched:?}"
+            );
         }
     }
 

@@ -1,11 +1,11 @@
-//! The unevaluated value tree, and the fourteen derivation functions of §6.
+//! The unevaluated value tree, and the fifteen derivation functions of §6.
 //!
 //! `parse.rs` produces [`Expr`] and never evaluates. Everything that turns an
-//! `Expr` into a [`Value`] is here: the fourteen functions, each in the colour
+//! `Expr` into a [`Value`] is here: the fifteen functions, each in the colour
 //! space §6 names for it and with its own clamping, and the [`Evaluator`] that
 //! walks the tree.
 //!
-//! **Fourteen. Closed. No more.** There is no metavariable (`@severity.<r>.fill`
+//! **Fifteen. Closed. No more.** There is no metavariable (`@severity.<r>.fill`
 //! is not an expression) and no runtime query (`@severity.<highest live>.text` is
 //! not one either): anything indexed by something only the host knows at draw
 //! time is indexed at draw time. `composite_as_rendered` (§4.4) lives in
@@ -91,7 +91,7 @@ impl Unit {
 
 // ------------------------------------------------------------------ functions
 
-/// The fourteen legal function names of §3.2's `fn-name`. Closed set.
+/// The fifteen legal function names of §3.2's `fn-name`. Closed set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Func {
     Alpha,
@@ -108,13 +108,49 @@ pub enum Func {
     Ramp,
     ContrastOn,
     Ensure,
+    /// `toward(colour, target, pull, clamp_deg)` — the fifteenth, added
+    /// 2026-08-18 for the one thing §5.10 and §5.11 both describe in prose
+    /// and neither could write down: **a canonical hue that leans toward
+    /// the theme's own without ever leaving itself.**
+    ///
+    /// The master says of the severity roles that "the engine pulls each of
+    /// them toward the accent by `severity.pull`, clamped to
+    /// `severity.pull_clamp`", and of the ANSI row the same thing with
+    /// `term.ansi.pull`. That engine never existed: the four severity
+    /// controls sat on `theme::edit`'s DEAD list "until someone writes their
+    /// reader", and the sentence in the theme file was a promise about a
+    /// machine. Written as a FUNCTION rather than as a pass in `bake.rs`,
+    /// the promise keeps itself:
+    ///
+    /// * a role's value goes on being ONE expression in the theme file, so
+    ///   the pull is visible where the colour is written and a theme can
+    ///   change it, drop it, or point it somewhere else entirely;
+    /// * **a theme that pins a role escapes the pull by construction** —
+    ///   §5.10 promises exactly that, and a bake-time pass could not keep it
+    ///   without provenance the baker does not have. Writing
+    ///   `severity.critical.text = oklch(...)` overrides the whole
+    ///   expression, `toward()` and all;
+    /// * the numbers stay in the theme (`@severity.pull`,
+    ///   `@severity.pull_clamp`), which is the project's rule about where
+    ///   appearance lives. This function contributes arithmetic and no
+    ///   value at all.
+    ///
+    /// HUE ONLY, and both walls are what the numbers MEAN rather than
+    /// taste: `pull` is a fraction of the SHORTEST way round the circle
+    /// (so a colour never takes the long way to a target 10 deg away), and
+    /// `clamp_deg` is a hard ceiling in degrees on the walk — the master's
+    /// own measurement of why it must be there is at
+    /// `default.theme`'s `severity.pull_clamp`. L and C are untouched: a
+    /// canonical red pulled toward a mint accent has to stay as red and as
+    /// bright as its author made it, and only lean.
+    Toward,
 }
 
 impl Func {
-    pub const ALL: [Func; 14] = [
+    pub const ALL: [Func; 15] = [
         Func::Alpha, Func::Fade, Func::Mix, Func::Over, Func::Shade, Func::Tint,
         Func::Lum, Func::LumMin, Func::LumMax, Func::Sat, Func::Hue, Func::Ramp,
-        Func::ContrastOn, Func::Ensure,
+        Func::ContrastOn, Func::Ensure, Func::Toward,
     ];
 
     pub fn from_name(s: &str) -> Option<Func> {
@@ -133,6 +169,7 @@ impl Func {
             "ramp" => Func::Ramp,
             "contrast_on" => Func::ContrastOn,
             "ensure" => Func::Ensure,
+            "toward" => Func::Toward,
             _ => return None,
         })
     }
@@ -153,6 +190,7 @@ impl Func {
             Func::Ramp => "ramp",
             Func::ContrastOn => "contrast_on",
             Func::Ensure => "ensure",
+            Func::Toward => "toward",
         }
     }
 
@@ -161,11 +199,12 @@ impl Func {
             Func::Alpha | Func::Fade | Func::Shade | Func::Tint | Func::Lum
             | Func::LumMin | Func::LumMax | Func::Sat | Func::Hue | Func::Over => 2,
             Func::Mix | Func::Ramp | Func::ContrastOn | Func::Ensure => 3,
+            Func::Toward => 4,
         }
     }
 
     /// The one line §4.2 requires when a theme names something else:
-    /// "names the function and lists the 14 legal names".
+    /// "names the function and lists the legal names".
     pub fn legal_names() -> String {
         Func::ALL.iter().map(|f| f.name()).collect::<Vec<_>>().join(" ")
     }
@@ -597,7 +636,51 @@ fn call(f: Func, a: &[Expr], env: &mut dyn Env) -> Result<Color, EvalError> {
             let ratio = num(&a[2], env)?;
             ensure(fg, bg, ratio)
         }
+        Func::Toward => {
+            let c = col(&a[0], env)?;
+            let target = col(&a[1], env)?;
+            let pull = num(&a[2], env)?;
+            let clamp_deg = num(&a[3], env)?;
+            toward(c, target, pull, clamp_deg)
+        }
     })
+}
+
+/// `toward(c, target, pull, clamp_deg)`: lean `c`'s hue toward `target`'s,
+/// by `pull` of the way, never further than `clamp_deg` degrees.
+///
+/// THE SHORTEST WAY ROUND, which is what makes this a lean and not a
+/// journey: the difference is folded into -180..180 before the fraction is
+/// taken, so a colour 10 deg clockwise of its target goes 10 deg clockwise
+/// and not 350 the other way. `pull` is held to 0..1 (0 is "never move",
+/// which the master documents, and past 1 the colour would overshoot its
+/// target and come out on the far side); `clamp_deg` is held at or above
+/// zero, and a zero clamp is a second way to say "never move".
+///
+/// L, C AND ALPHA ARE NOT TOUCHED. A canonical severity red leaning toward
+/// a mint accent has to stay the red its author wrote, at the lightness the
+/// contrast floors were measured at; all this may do is turn it a little.
+/// Anything else belongs to `sat()`, `lum()` or `ensure()`, which the master
+/// already wraps around this one where it wants them.
+///
+/// A GREY TARGET STILL HAS A HUE, and that is deliberate rather than
+/// overlooked: `Oklch` carries `h` through zero chroma (`color.rs` keeps it
+/// so a drag onto the grey axis does not lose where it came from), so a
+/// theme whose accent is a desaturated near-grey still says which way its
+/// severity leans. A theme that wants no lean says `pull = 0`.
+pub fn toward(c: Color, target: Color, pull: f32, clamp_deg: f32) -> Color {
+    let pull = pull.clamp(0.0, 1.0);
+    let clamp_deg = clamp_deg.max(0.0);
+    if pull == 0.0 || clamp_deg == 0.0 {
+        return c;
+    }
+    let mut p = c.to_oklch();
+    let want = target.to_oklch().h;
+    // -180..180: the signed shortest arc from `p.h` to `want`.
+    let d = (want - p.h + 180.0).rem_euclid(360.0) - 180.0;
+    let step = (d * pull).clamp(-clamp_deg, clamp_deg);
+    p.h = (p.h + step).rem_euclid(360.0);
+    Color::from_oklch(p)
 }
 
 /// `mix(a, b, t)`: premultiplied lerp in linear light, then un-premultiply.
@@ -1137,9 +1220,56 @@ mod tests {
             .mentions_base());
     }
 
+    /// `toward()` LEANS and never travels: a canonical hue moves by the
+    /// fraction the theme asks for, and stops dead at the theme's cap
+    /// however far the target is. The numbers below are the arithmetic's,
+    /// not the master's — a fraction of a signed arc, and a ceiling.
     #[test]
-    fn the_fourteen_are_closed() {
-        assert_eq!(Func::ALL.len(), 14);
+    fn a_hue_leans_by_the_fraction_and_stops_at_the_cap() {
+        let h_of = |c: Color| c.to_oklch().h;
+        let red = Color::from_oklch(Oklch { l: 0.68, c: 0.21, h: 27.0, alpha: 1.0 });
+        let mint = Color::from_oklch(Oklch { l: 0.82, c: 0.15, h: 166.5, alpha: 1.0 });
+        // Uncapped, a fifth of the way: 27 -> 166.5 is +139.5, a fifth is
+        // +27.9, so the lean lands on 54.9.
+        let free = toward(red, mint, 0.2, 360.0);
+        assert!((h_of(free) - 54.9).abs() < 0.2, "{}", h_of(free));
+        // Capped at seven degrees, it goes seven — the same direction, no
+        // further. This is the whole reason the cap exists: red that walks
+        // 27.9 deg is orange, and `git diff` stops reading.
+        let held = toward(red, mint, 0.2, 7.0);
+        assert!((h_of(held) - 34.0).abs() < 0.2, "{}", h_of(held));
+        // A zero pull and a zero cap are both "never move", which the
+        // master documents as a theme's way of opting out.
+        assert!((h_of(toward(red, mint, 0.0, 7.0)) - 27.0).abs() < 0.2);
+        assert!((h_of(toward(red, mint, 0.9, 0.0)) - 27.0).abs() < 0.2);
+    }
+
+    /// THE SHORT WAY ROUND, and only the hue.
+    ///
+    /// A colour ten degrees clockwise of its target must lean ten degrees
+    /// clockwise and not three hundred and fifty the other way — the wrap is
+    /// the one place this arithmetic can go silently wrong, and it goes
+    /// wrong invisibly, as a colour that leans away from the theme.
+    #[test]
+    fn the_lean_takes_the_short_way_and_leaves_lightness_and_chroma_alone() {
+        let at = |h: f32| Color::from_oklch(Oklch { l: 0.6, c: 0.12, h, alpha: 1.0 });
+        // 350 -> 10 is +20 the short way, +20 * 0.5 = +10, landing on 0/360.
+        let over_the_seam = toward(at(350.0), at(10.0), 0.5, 90.0);
+        let h = over_the_seam.to_oklch().h;
+        assert!(h < 0.2 || h > 359.8, "the lean took the long way round: {h}");
+        // and the other direction across the same seam.
+        let back = toward(at(10.0), at(350.0), 0.5, 90.0);
+        assert!((back.to_oklch().h - 0.0).abs() < 0.2 || back.to_oklch().h > 359.8);
+        // L and C are the author's, whatever the lean.
+        let before = at(200.0).to_oklch();
+        let after = toward(at(200.0), at(20.0), 1.0, 45.0).to_oklch();
+        assert!((after.l - before.l).abs() < 0.002, "the lean moved the lightness");
+        assert!((after.c - before.c).abs() < 0.002, "the lean moved the chroma");
+    }
+
+    #[test]
+    fn the_closed_set_is_closed() {
+        assert_eq!(Func::ALL.len(), 15);
         for f in Func::ALL {
             assert_eq!(Func::from_name(f.name()), Some(f));
         }

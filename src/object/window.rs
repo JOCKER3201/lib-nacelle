@@ -7,7 +7,7 @@
 //! allowed to look raw, which is what keeps every design decision in the
 //! theme files.
 
-use crate::draw::{ring_segments, Corner, CornerStyle, DrawList};
+use crate::draw::{Corner, CornerStyle, DrawList};
 use crate::font::FontSystem;
 use crate::theme::{self, Color, TokenId};
 use crate::{Ctx, Rect};
@@ -79,15 +79,21 @@ pub(crate) fn cut_of(
     }
 }
 
-/// The arc tessellation for a corner of size `size`: the theme's
-/// `corner.segments` is the ceiling, `ring_segments` the quarter-pixel
-/// chord-error rule under it (r1 §3.4).
+/// The arc tessellation for a corner of size `size` — the name this
+/// file's own callers reach it by.
+///
+/// The RULE moved to [`crate::corner::segments`] on 2026-08-18, where
+/// the vocabulary already lives, because a drawing outside this crate
+/// needs it and `pub(crate)` was as far as this could reach. Kept as a
+/// forwarder rather than replaced at nine call sites: the corner
+/// resolver is one module, and which door a caller in this file uses to
+/// it is not a decision worth spending a diff on.
 pub(crate) fn corner_segments(
     t: &theme::ResolvedTheme,
     cell: &'static OnceLock<TokenId>,
     size: f32,
 ) -> u8 {
-    ring_segments(size, 0.25, t.px(tok(cell, "corner.segments")) as u8)
+    crate::corner::segments(t, cell, size)
 }
 
 /// The six token ids one `[glow]` class needs before its light can be a

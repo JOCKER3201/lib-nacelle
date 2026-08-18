@@ -3041,14 +3041,11 @@ decor.enabled    = false
         // what it is relative to.
         let (s0, _, t0) = baked("");
         let seed_of = |n: &str| lch(t0.color(s0.id(n).expect(n)));
-        let mut severity = [color::Oklch { l: 0.0, c: 0.0, h: 0.0, alpha: 1.0 }; 7];
-        for (i, role) in edit::SEVERITY_ROLES.iter().enumerate() {
-            let token = edit::severity_role_edit(edit::Scope::Theme, *role, severity[i]).token;
-            severity[i] = seed_of(token);
-        }
         let seeds = edit::ToneSeeds {
             accent: seed_of("palette.accent"),
-            severity,
+            black: seed_of("palette.black"),
+            white: seed_of("palette.white"),
+            neutral: seed_of("palette.neutral"),
             surface_lift: t0.px(s0.id("surface.lift").unwrap()),
             text_lift: t0.px(s0.id("text.lift").unwrap()),
         };
@@ -3137,33 +3134,240 @@ decor.enabled    = false
                 rail.l
             );
 
-            // THE EXCEPTION. Severity is a rotation, not a flattening: the
-            // roles that were different colours are still different colours.
+            // THE EXCEPTION, AND IT GOT STRONGER ON 2026-08-18. It used to
+            // read "severity is a rotation, not a flattening": the roles
+            // turned the whole way with the interface and the test only
+            // asked that they stay APART. Apart they were — green `ok` sat
+            // in red and red `critical` in blue, exactly as far from each
+            // other as before, and the check could not see it.
+            //
+            // The claim now is the one that matters: a role never leaves
+            // its own hue at all. Its LEAN is the theme's, capped by the
+            // theme's own `severity.pull_clamp`, and the ceiling below is
+            // read from the token rather than written here — a literal 7
+            // would go on passing if the master changed its mind.
+            //
+            // THE CANONICAL HUE IS THE THEME'S OWN ANSWER, asked for with
+            // `severity.pull = 0` — which the master documents as "0 =
+            // never move" — rather than a literal copied into this file.
+            // The frozen bake is checked to be genuinely frozen just below,
+            // so it cannot quietly become a second copy of the pull.
+            let cap = t.px(schema.id("severity.pull_clamp").unwrap());
+            assert!(cap > 0.0, "the master stopped capping the severity lean");
+            let (sf, _, frozen) = baked(&format!("{file}\n[severity]\npull = 0.0\n"));
             let sev = |n: &str| lch(t.color(schema.id(n).unwrap()));
-            let ok = sev("severity.ok.text");
-            let crit = sev("severity.critical.text");
-            let warn = sev("severity.warning.text");
-            for (a, b, an, bn) in [
-                (ok, crit, "ok", "critical"),
-                (ok, warn, "ok", "warning"),
-                (warn, crit, "warning", "critical"),
-            ] {
+            for name in ROLES_THAT_MEAN_SOMETHING {
+                let canonical = lch(frozen.color(sf.id(name).unwrap()));
+                let moved = hue_gap(sev(name).h, canonical.h);
                 assert!(
-                    hue_gap(a.h, b.h) > 15.0,
-                    "at {turn} deg {an} and {bn} collapsed onto one hue: {} vs {}",
-                    a.h,
-                    b.h
+                    moved <= cap + 0.5,
+                    "at {turn} deg `{name}` left its own hue by {moved} deg, past the \
+                     theme's own cap of {cap}"
                 );
             }
-            // They kept the gap the AUTHOR wrote, not just some gap.
-            let before = hue_gap(seeds.severity[0].h, seeds.severity[3].h);
+        }
+
+        // AND THE FROZEN READING IS REALLY FROZEN. Two accents a third of
+        // the wheel apart must give a role with `pull = 0` the SAME hue, or
+        // the reference the loop just measured against was moving too and
+        // the whole check was comparing a thing to itself.
+        let frozen_at = |turn: f32| {
+            let file = as_theme_file(&edit::tone_edits(
+                edit::Scope::Theme,
+                &seeds,
+                edit::Tone { hue_deg: turn, ..edit::Tone::NEUTRAL },
+            ));
+            let (sf, _, tf) = baked(&format!("{file}\n[severity]\npull = 0.0\n"));
+            ROLES_THAT_MEAN_SOMETHING
+                .map(|n| lch(tf.color(sf.id(n).unwrap())).h)
+        };
+        let (a, b) = (frozen_at(0.0), frozen_at(120.0));
+        for (i, name) in ROLES_THAT_MEAN_SOMETHING.iter().enumerate() {
             assert!(
-                (hue_gap(ok.h, crit.h) - before).abs() < 2.0,
-                "severity drifted at {turn} deg: {before} -> {}",
-                hue_gap(ok.h, crit.h)
+                hue_gap(a[i], b[i]) < 0.05,
+                "`{name}` moved with the accent at pull = 0: {} vs {}",
+                a[i],
+                b[i]
             );
         }
     }
+
+    /// ZGŁOSZENIE 5, THE OWNER'S OWN SENTENCE: "in BASIC I pick only the
+    /// base colour and the other colours adapt to it".
+    ///
+    /// The severity roles are the family that could not adapt, because
+    /// nothing carried them: they were six frozen literals, so a
+    /// re-coloured theme left them where the master put them, and the only
+    /// machine that ever moved them was the editor, turning them the whole
+    /// way and destroying what they mean. They ADAPT now — `toward()` in
+    /// the master, `@severity.pull` degrees of lean — and this is the test
+    /// of the adaptation itself, with no editor anywhere near it: two
+    /// theme files that differ in ONE LINE, the accent.
+    #[test]
+    fn a_theme_that_changes_its_accent_carries_the_severity_roles_with_it() {
+        let at = |accent: &str| {
+            let (sc, _, t) = baked(&format!("[palette]\naccent = {accent}\n"));
+            ROLES_THAT_MEAN_SOMETHING.map(|n| lch(t.color(sc.id(n).unwrap())).h)
+        };
+        // The master's mint, and a red a third of the wheel away.
+        let mint = at("oklch(0.820, 0.153, 166.5)");
+        let red = at("oklch(0.680, 0.190, 29.0)");
+        for (i, name) in ROLES_THAT_MEAN_SOMETHING.iter().enumerate() {
+            assert!(
+                hue_gap(mint[i], red[i]) > 1.0,
+                "`{name}` did not move at all when the theme changed colour \
+                 ({} under mint, {} under red) — the role is deaf to the palette",
+                mint[i],
+                red[i]
+            );
+        }
+    }
+
+    /// …AND THE ADAPTATION IS A LEAN, WHICH IS THE OTHER HALF. A role that
+    /// followed the accent all the way would "adapt" too, and it is exactly
+    /// what the editor used to do: mint -> red sent green `ok` to 10.5 deg
+    /// and red `critical` to 249.5, so a successful job was drawn in the
+    /// colour of an alarm and the alarm in the colour of a hyperlink. The
+    /// bands below are the CONVENTION each role exists to speak — green,
+    /// azure, amber, red, amber, violet — and no accent may take a role out
+    /// of its own band.
+    #[test]
+    fn no_accent_can_take_a_role_out_of_the_band_that_gives_it_its_meaning() {
+        // (role, the arc of the hue circle the convention lives in)
+        let bands: [(&str, f32, f32); 6] = [
+            ("severity.ok.text", 120.0, 175.0),        // green
+            ("severity.info.text", 210.0, 260.0),      // azure
+            ("severity.warning.text", 55.0, 100.0),    // amber
+            ("severity.critical.text", 5.0, 50.0),     // red
+            ("severity.contained.text", 65.0, 115.0),  // the dimmer amber
+            ("severity.unknown.text", 285.0, 335.0),   // violet
+        ];
+        for accent_h in [0.0f32, 60.0, 120.0, 180.0, 240.0, 300.0] {
+            let (sc, _, t) =
+                baked(&format!("[palette]\naccent = oklch(0.760, 0.170, {accent_h})\n"));
+            for (name, lo, hi) in bands {
+                let h = lch(t.color(sc.id(name).unwrap())).h;
+                assert!(
+                    h >= lo && h <= hi,
+                    "with the accent at {accent_h} deg, `{name}` came out at {h} deg — \
+                     outside {lo}..{hi}, which is the convention it exists to speak"
+                );
+            }
+        }
+    }
+
+    /// The three GROUNDS of the palette, and the owner's most visible
+    /// symptom: "I change the colour and the background stays as it was".
+    ///
+    /// `palette.black` and `palette.white` are the only targets `shade()`
+    /// and `tint()` have, and the master reaches for `shade()` ten times —
+    /// every badge interior, every sunk plate. Both are hex literals on the
+    /// ACCENT's hue (measured h 172.6 and 169.2 against the accent's 166.5),
+    /// so a theme that re-colours without them keeps its old bed hue and
+    /// drags every shaded thing back toward it. Nothing in the cascade can
+    /// carry them — §5.2 keeps them literal so `shade()`/`tint()` cannot
+    /// close a cycle — so the EDITOR writes them, and this is that write
+    /// arriving on the screen.
+    #[test]
+    fn the_editors_move_carries_the_grounds_the_cascade_cannot() {
+        let (s0, _, t0) = baked("");
+        let seed_of = |n: &str| lch(t0.color(s0.id(n).expect(n)));
+        let seeds = edit::ToneSeeds {
+            accent: seed_of("palette.accent"),
+            black: seed_of("palette.black"),
+            white: seed_of("palette.white"),
+            neutral: seed_of("palette.neutral"),
+            surface_lift: t0.px(s0.id("surface.lift").unwrap()),
+            text_lift: t0.px(s0.id("text.lift").unwrap()),
+        };
+        let turn = 150.0f32;
+        let file = as_theme_file(&edit::tone_edits(
+            edit::Scope::Theme,
+            &seeds,
+            edit::Tone { hue_deg: turn, ..edit::Tone::NEUTRAL },
+        ));
+        let (sc, _, t) = baked(&file);
+        for name in ["palette.black", "palette.white", "palette.neutral"] {
+            let before = seed_of(name).h;
+            let after = lch(t.color(sc.id(name).unwrap())).h;
+            assert!(
+                hue_gap(after, (before + turn).rem_euclid(360.0)) < 2.0,
+                "`{name}` stayed behind the move: {before} -> {after}, wanted {}",
+                (before + turn).rem_euclid(360.0)
+            );
+        }
+        // AND IT REACHES THE PICTURE. A badge's interior is
+        // `alpha(shade(@severity.<r>.text, 0.78), 0.88)` — three quarters of
+        // the way to `palette.black` — so it is the shortest road from that
+        // token to something a person looks at.
+        let pill = |t: &bake::ResolvedTheme, sc: &Schema| {
+            lch(t.color(sc.id("severity.critical.fill").unwrap())).h
+        };
+        assert!(
+            hue_gap(pill(&t, &sc), pill(&t0, &s0)) > 20.0,
+            "the badge interiors kept the old bed's hue: {} -> {}",
+            pill(&t0, &s0),
+            pill(&t, &sc)
+        );
+        // The two POLES keep their lightness through all of it: they are the
+        // theme's polarity, not a shade of the accent.
+        for name in ["palette.black", "palette.white"] {
+            assert!(
+                (lch(t.color(sc.id(name).unwrap())).l - seed_of(name).l).abs() < 0.005,
+                "`{name}` changed the theme's polarity on a hue move"
+            );
+        }
+    }
+
+    /// The master's own promise about a PINNED role, kept by construction:
+    /// "a theme that writes its own `severity.<r>.text` pins that role and
+    /// the pull no longer touches it — that is exactly image 4, everything
+    /// red by derivation with an amber `contained` written out on one line".
+    ///
+    /// A pull applied in `bake.rs` could not have kept it: the baker has no
+    /// provenance and cannot tell the master's own literal from a theme's.
+    /// Written as an expression the theme OVERRIDES, the pin needs no
+    /// machinery at all — and the editor's own per-role control (ADVANCED's
+    /// SEVERITY group) rides the same road, so the colour a person picks
+    /// there is the colour that gets drawn.
+    #[test]
+    fn a_role_a_theme_writes_out_is_the_colour_it_wrote() {
+        let (sc, _, t) = baked(
+            "[palette]\naccent = oklch(0.680, 0.190, 29.0)\n\
+             [severity]\ncontained.text = oklch(0.700, 0.105, 92)\n",
+        );
+        let pinned = lch(t.color(sc.id("severity.contained.text").unwrap()));
+        assert!(
+            hue_gap(pinned.h, 92.0) < 0.5,
+            "the pinned amber was pulled anyway: 92 -> {}",
+            pinned.h
+        );
+        // …while the role beside it, left to the theme, leaned toward the
+        // new accent. Without this half the test would pass on a build where
+        // nothing pulls anything.
+        let (s0, _, t0) = baked("");
+        let free = lch(t.color(sc.id("severity.warning.text").unwrap()));
+        let was = lch(t0.color(s0.id("severity.warning.text").unwrap()));
+        assert!(
+            hue_gap(free.h, was.h) > 1.0,
+            "no role moved at all, so the pin proved nothing: {} vs {}",
+            was.h,
+            free.h
+        );
+    }
+
+    /// The six roles whose hue IS their meaning: green success, azure
+    /// notice, amber warning, red alarm, the dimmer amber of a contained
+    /// alarm, and the violet no other role uses. `offline` is not among
+    /// them — it is the hue-free anchor and rides `palette.neutral`.
+    const ROLES_THAT_MEAN_SOMETHING: [&str; 6] = [
+        "severity.ok.text",
+        "severity.info.text",
+        "severity.warning.text",
+        "severity.critical.text",
+        "severity.contained.text",
+        "severity.unknown.text",
+    ];
 
     /// A LOCALISED key is a different string in the same token's slot, and
     /// `KeyVal::token` deliberately does not spell the locale — `meta.name`
