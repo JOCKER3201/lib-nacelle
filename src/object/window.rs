@@ -356,6 +356,22 @@ pub(crate) fn panel_edge_glow(
         FontSystem::mask_soft_uv(),
         profile,
     );
+    // A tube lights the frame it edges, not only the dark outside it: NEON
+    // throws the same profile inward, over the body just drawn, so the
+    // border glows on BOTH sides. A halo is a one-way bleed and asks for no
+    // such thing — the gate is the profile, which is the theme's own
+    // `glow.panel_edge.falloff = tube` and nothing decided in Rust.
+    if !profile.is_halo() {
+        dl.glow_ring_inward_with(
+            r,
+            c,
+            segments,
+            radius,
+            edge.alpha(alpha),
+            FontSystem::mask_soft_uv(),
+            profile,
+        );
+    }
 }
 
 /// Dims everything behind a modal window.

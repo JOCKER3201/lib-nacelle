@@ -3774,29 +3774,78 @@ impl DrawList {
             });
             return;
         }
-        // The strip: u pinned to the centre of the stretchable band, v
-        // running from the disk's peak on the path to the sprite's zero
-        // at the outer rim — the same profile the nine-slice edges
-        // carried, now perpendicular to the path everywhere, corners
-        // included. Point counts agree because counts depend only on
-        // corner STYLE, which inset() preserves.
+        // The soft strip laid perpendicular to the path and OUTWARD from
+        // it — the halo's one-way bleed and the tube's outer face alike.
+        // A tube's INNER face, the light it throws onto the frame it edges,
+        // is the same strip mirrored: [`glow_ring_inward_with`].
+        self.glow_strip(r, c, segments, radius, color, mask_uv, profile, false);
+    }
+
+    /// One face of a soft ring's light: the profile laid perpendicular to
+    /// the path, extruded `radius` px to one side of it.
+    ///
+    /// `inward = false` grows the strip AWAY from the rect — the halo and a
+    /// tube's outer face, the picture this toolkit has always drawn.
+    /// `inward = true` mirrors it INTO the rect, peak on the path and
+    /// falling toward the middle, and is the tube's inner face
+    /// ([`glow_ring_inward_with`]). The two differ in exactly the sign of
+    /// the extrusion and, on the inner side, a clamp: the reach cannot pass
+    /// half the shorter side or the ring's two facing runs would cross and
+    /// fold. Everything else — the band re-map, the aura, the additive
+    /// atlas, the mask sample — is the SAME arithmetic, which is why it is
+    /// one function and not two.
+    #[allow(clippy::too_many_arguments)]
+    fn glow_strip(
+        &mut self,
+        r: Rect,
+        c: &[Corner; 4],
+        segments: u8,
+        radius: f32,
+        color: Color,
+        mask_uv: (f32, f32, f32, f32),
+        profile: GlowProfile,
+        inward: bool,
+    ) {
+        let (u0, v0, u1, v1) = mask_uv;
+        // u pinned to the centre of the stretchable band, v running from
+        // the disk's peak on the path to the sprite's zero at the reach's
+        // rim — the profile the nine-slice edges carried, now perpendicular
+        // to the path everywhere, corners included. Point counts agree
+        // because counts depend only on corner STYLE, which inset()
+        // preserves.
         let su = u0 + (u1 - u0) * (32.0 / 64.0);
         let vi = v0 + (v1 - v0) * (31.0 / 64.0);
+        // The inner face cannot reach past the panel's own middle: at that
+        // depth the two runs coming off opposite edges meet, and beyond it
+        // they would swap sides and the ring would turn itself inside out.
+        // The outer face has no such ceiling and keeps the caller's radius.
+        let reach = if inward { radius.min(r.w.min(r.h) * 0.5) } else { radius };
+        if !(reach > 0.0) {
+            return;
+        }
         let mut stops = [0.0f32; GlowProfile::MAX_BANDS as usize + 1];
         let n_stops = profile.stops(&mut stops);
         let mut inner = std::mem::take(&mut self.scratch_a);
         let mut outer = std::mem::take(&mut self.scratch_b);
         ring_points(r, c, segments, &mut inner);
-        // The path itself, asked of the profile like every other
-        // boundary rather than written out here: a distance of nothing is
-        // a distance, and a second spelling of the peak is a second place
-        // for it to drift.
+        // The path itself, asked of the profile like every other boundary
+        // rather than written out here: a distance of nothing is a
+        // distance, and a second spelling of the peak is a second place for
+        // it to drift.
         let (mut v_in, mut a_in) =
             (profile.v_at(0.0, vi, v0), profile.alpha_at(0.0, color.a));
         for &f in &stops[..n_stops] {
-            let d = radius * f;
-            let grown = Rect::new(r.x - d, r.y - d, r.w + 2.0 * d, r.h + 2.0 * d);
-            let ck = [c[0].inset(-d), c[1].inset(-d), c[2].inset(-d), c[3].inset(-d)];
+            let d = reach * f;
+            // `g` is how far the boundary moves OUTWARD: `+d` for the outer
+            // face, `-d` for the inner. The rect's origin shifts by `-g` and
+            // its size by `+2g` (out grows it, in shrinks it), and the
+            // corners move by `inset(-g)` — `Corner::inset` takes a positive
+            // inset and a negative outset, so one sign carries the rect and
+            // its arcs together. At `g = +d` this is byte for byte the
+            // outward strip this emitter has always drawn.
+            let g = if inward { -d } else { d };
+            let grown = Rect::new(r.x - g, r.y - g, r.w + 2.0 * g, r.h + 2.0 * g);
+            let ck = [c[0].inset(-g), c[1].inset(-g), c[2].inset(-g), c[3].inset(-g)];
             ring_points(grown, &ck, segments, &mut outer);
             let v_out = profile.v_at(f, vi, v0);
             let a_out = profile.alpha_at(f, color.a);
@@ -3818,6 +3867,49 @@ impl DrawList {
         }
         self.scratch_a = inner;
         self.scratch_b = outer;
+    }
+
+    /// A tube's INNER face: [`glow_ring_with`]'s strip thrown into the
+    /// frame instead of off it.
+    ///
+    /// A neon tube set on the rim of a frame lights the surface it frames,
+    /// not only the dark outside its outer edge — so NEON is drawn twice,
+    /// the outer bloom by [`glow_ring_with`] and this inner one over the
+    /// body. A HALO is a one-way bleed and never asks for this; the caller
+    /// gates on the profile ([`GlowProfile::is_halo`]), which is the theme's
+    /// own `falloff = tube` reaching the screen.
+    ///
+    /// It writes NO command to the register: the outer call already stands
+    /// for "a tube is here", and the inner face is that one intent
+    /// rendered, not a second glow to hash. Drawn AFTER the body fill by
+    /// its one caller ([`crate::object::window::panel_edge_glow`], itself
+    /// the rung's last act), so the additive light lands ON the frame and
+    /// is not buried under an opaque fill.
+    #[allow(clippy::too_many_arguments)]
+    pub fn glow_ring_inward_with(
+        &mut self,
+        r: Rect,
+        c: &[Corner; 4],
+        segments: u8,
+        radius: f32,
+        color: Color,
+        mask_uv: (f32, f32, f32, f32),
+        profile: GlowProfile,
+    ) {
+        if !(radius > 0.0) || color.a <= 0.0 || r.w <= 0.0 || r.h <= 0.0 {
+            return;
+        }
+        let (u0, v0, u1, v1) = mask_uv;
+        // The vector lane cannot yet express an inside-only feather — its
+        // soft glow is OUTSIDE_ONLY by construction — and a tube already
+        // degrades to a plain outer glow there (K3d debt). So the inner
+        // face is dropped on the vector lane and on a maskless caller, and
+        // the sprite lane, which is the shipping one and the one the tube
+        // was written for, carries it.
+        if self.vector || u1 <= u0 || v1 <= v0 {
+            return;
+        }
+        self.glow_strip(r, c, segments, radius, color, mask_uv, profile, true);
     }
 
     /// The nine-slice core every soft sprite shape shares (r1 §4.3): `r`
@@ -4841,6 +4933,75 @@ mod tests {
         assert!(uv1.iter().any(|&v| (v - vi).abs() < 1e-6), "no band starts at the glass");
         assert!(uv1.iter().any(|&v| (v - v0).abs() < 1e-6), "no band ends at the rim");
         let _ = u0;
+    }
+
+    /// A tube throws light INTO the frame too: the inner face lands
+    /// strictly on the body, peak on the border and gone within the reach
+    /// — the mirror of the outer bloom the test above measures on the far
+    /// side. And it costs the register nothing: the outer call already
+    /// recorded the tube, and a second record would double-count the border
+    /// in the frame hash.
+    #[test]
+    fn the_tube_lights_the_frame_interior() {
+        let uv = FontSystem::mask_soft_uv();
+        let (_, v0, _, v1) = uv;
+        let vi = v0 + (v1 - v0) * (31.0 / 64.0);
+        let col = Color { r: 0.6, g: 0.2, b: 0.95, a: 0.4 };
+        let r = Rect::new(40.0, 40.0, 200.0, 120.0);
+        let c = [Corner { style: CornerStyle::Square, size: 0.0 }; 4];
+        let radius = 24.0;
+        let tube = GlowProfile { decay: 3.0, aura: 1.0, aura_reach: 0.0, bands: 5 };
+
+        // No register line: the outer call stands for the tube; this is
+        // that one intent's second face, not a second glow to hash.
+        let mut rec = DrawList::recording();
+        rec.glow_ring_inward_with(r, &c, 6, radius, col, uv, tube);
+        assert!(
+            !rec.cmds().iter().any(|cmd| matches!(cmd, DrawCmd::GlowRing { .. })),
+            "the inner face recorded a second glow_ring"
+        );
+
+        let mut dl = DrawList::new();
+        dl.glow_ring_inward_with(r, &c, 6, radius, col, uv, tube);
+        assert!(!dl.verts.is_empty(), "the inner face drew nothing");
+        assert!(
+            dl.runs.iter().any(|run| run.image == Some(ADD_ATLAS)),
+            "the inner face must be additive, like the outer bloom"
+        );
+        let e = 1e-3;
+        let (mut saw_peak, mut saw_rim) = (false, false);
+        for v in &dl.verts {
+            let [px, py] = v.pos;
+            // Strictly inside the frame — never past its outer edge, which
+            // is the outer bloom's ground.
+            assert!(
+                px >= r.x - e && px <= r.right() + e && py >= r.y - e && py <= r.bottom() + e,
+                "the inner face leaked outside the frame: ({px},{py})"
+            );
+            // And no deeper than the reach: the light is gone before the
+            // panel's middle.
+            let depth = (px - r.x).min(r.right() - px).min(py - r.y).min(r.bottom() - py);
+            assert!(depth <= radius + e, "the inner face reached past its radius: depth {depth}");
+            saw_peak |= (v.uv[1] - vi).abs() < 1e-6;
+            saw_rim |= (v.uv[1] - v0).abs() < 1e-6;
+        }
+        assert!(saw_peak, "no band sits at the glass — the peak is not on the border");
+        assert!(saw_rim, "no band fades to nothing — the light never lets go");
+
+        // The two faces stand on opposite sides of the path: the outer
+        // bloom is entirely outside the same rect the inner face is
+        // entirely inside.
+        let mut out = DrawList::new();
+        out.glow_ring_with(r, &c, 6, radius, col, uv, tube);
+        assert!(
+            out.verts.iter().any(|v| {
+                v.pos[0] < r.x - e
+                    || v.pos[0] > r.right() + e
+                    || v.pos[1] < r.y - e
+                    || v.pos[1] > r.bottom() + e
+            }),
+            "the outer bloom is not outside the frame — the faces do not oppose"
+        );
     }
 
     /// The alpha a PIXEL is drawn with at distance fraction `f` of the
