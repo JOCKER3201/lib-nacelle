@@ -3908,7 +3908,7 @@ gesture_frac = 60%                    # hand travel for a full quarter turn or a
 rubber_gain = 0.15                    # the rubbery give past the end of the row; -; f, 0.0 .. 1.0; main.rs:687 — the give is a visible material property, not a bound
 rubber_max  = 10%                     # how far that give may stretch at most; -; % of the viewport; main.rs:687's clamp, companion of rubber_gain
 epsilon     = 0.05                    # below this progress the ride is not drawn at all; -; f, 0.0 .. 0.5; main.rs:1676 — a rendering guard with a visible threshold
-void        = @surface.void           # the space the cube turns in: painted under the whole turn, and what a wall turning away settles toward; -; colour; @surface.void — the swapchain clear, so the ride happens in the dark the frame already stands on
+void        = @backdrop.solid         # the space the cube turns in: painted under the whole turn, and what a wall turning away settles toward; -; colour; @backdrop.solid — THE GROUND A STANDING BOARD LAYS (deco::board_ground's first level), so the turn opens and closes on the colour that was already there and a ride is a turn rather than a flash. It read @surface.void until 2026-08-18, which said the same thing while a standing frame painted nothing but the swapchain clear; the moment the frame laid its ground the two parted by a rung of the ladder (measured: 0.0096,0.0240,0.0171 against 0.0418,0.0758,0.0613) and every sideways ride dimmed the screen fourfold for its duration
 
 # ---- widget_grow · editor tear-off growth --------------------------------
 [motion.widget_grow]
@@ -4411,7 +4411,18 @@ alarm.pulse = true                  # whether the alarm half participates in mot
 [render]
 text_gamma = 0.72                   # exponent on atlas coverage before the alpha multiply · - · f, 0.45 .. 2.2 · measured on 1440p shots: 0.72 restores +13.5% stem width to light-on-dark text by fattening only pixels the glyph already owns; 0.55 and below spill into new pixels (bloom, not weight). 1.0 = raw coverage
 vector = false                      # whether ring/ring_fill ride the SDF vector lane (one analytic quad, smooth corners) instead of the tessellated ring generator · - · bool · literal by rule: false until f3 K3d. THE TOKEN IS LIVE as of K3a — nacelle-desktop/src/vector.rs reads it at every frame boundary and arms the screen's list, so true and false now draw different pictures. R4 is CLOSED (bed, state wash and border are one record with one antialiased edge — draw.rs, Weld) and GLASS IS ONE RECORD TOO as of K3b (the frost's core rides GLASS_RANK_*, its perimeter rides SHAPE_GLASS_*, so the frost's corners are as analytic as the border over them, §3.3). THREE things still hold the switch down. Cost: measured in .gap-program/pomiar-wektor-k3c.md — one shape fragment is 87 compute instructions against 13 on the fill path, and the core cut that halves the field area costs TWO RUNS PER SHAPE (a board of 204 silhouettes goes from 1 draw call to 408). A FRACTIONAL glass.rank is two rungs, hence two records, whose outer edges blend twice (glass_fill says so at the code, and rank is a float, so a theme may write 1.5). A GRADIENT edge does not weld, which is ring_grad's own note from K3. Raising this is K3d and belongs to the owner, on those numbers
-blur_clear = @surface.void          # what the blur pyramid's borders resolve to where it samples past its own edge · images 7,8 · col · gfx.rs:919 clears to [0.0;4], so the frost's rim fades to neutral black on a bed that is never neutral
+# `blur_clear` stood here and is GONE (2026-08-18). It promised "what the blur pyramid's
+# borders resolve to where it samples past its own edge", and cited gfx.rs clearing to
+# [0.0;4]. Measured on the shipped renderer, no part of that describes this program: the
+# pyramid's downsample passes do clear to transparent black, but each then draws a quad
+# covering the whole target through a CLAMP_TO_EDGE sampler, so the clear is overdrawn to
+# the last pixel and nothing ever samples past an edge; and the pyramid's BASE level clears
+# to the swapchain colour, which is `surface.void` through deco::clear_color and belongs to
+# the screen's background, not to the blur. The key had no reader in libnacelle, in the
+# desktop or in the renderer, and no reader it could honestly be given — a key that looks
+# like it works is worse than a missing one (theme/edit.rs says so at its own head). What
+# it was reaching for — a frost that comes up black — was a ground the standing frame never
+# laid; that is fixed where it lives, in deco::board_ground's callers.
 wire = @data.line                   # the wireframe lines themselves · images 1,2,5,6 · col · @data.line
 wire_width = @stroke.chart          # their weight · images 1,2,5,6 · str · @stroke.chart
 hull = sat(@data.line, 0.0)         # the body between the wires; images 4/5's greyscale hull IS this default, image 1's cyan hull is @data.line · images 1,3,4,5 · col · sat() desaturates the data hue in OKLab (6)

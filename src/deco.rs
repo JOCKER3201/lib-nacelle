@@ -6,10 +6,28 @@
 //! backdrop PLATE (traces, grid, vignette) is `theme::plate` — baked
 //! pixels, not per-frame geometry.
 //!
-//! A board standing still paints NO ground of its own: the clear and
-//! the plate already fill the screen behind it. A board turning
-//! SIDEWAYS is a different thing — a WALL of a solid — and takes its
-//! ground with it ([`board_ground`]) over the flat [`ride_void`] the
+//! EVERY board paints its ground ([`board_ground`]), standing or
+//! moving. This header used to say the opposite — "a board standing
+//! still paints NO ground of its own: the clear and the plate already
+//! fill the screen behind it" — and the host believed it. They do not
+//! fill it, and the gap is a whole rung of the ladder: the frame clears
+//! to `surface.void` ([`clear_color`]) while the ground a board stands
+//! on is `backdrop.solid`, which the master derives from
+//! `@surface.base`. Measured on the master 2026-08-18: sRGB(0.0096,
+//! 0.0240, 0.0171) against sRGB(0.0418, 0.0758, 0.0613). So the same
+//! board showed one ground standing and another the instant it turned,
+//! and `backdrop.solid` and `elev.board.fill` had no reader at all on
+//! the path 99% of frames take.
+//!
+//! It is also what a FROSTED surface samples. The renderer's base scene
+//! is everything drawn before the first glass run; a theme that ships
+//! no decoration bakes no plate, so a standing frame that paints no
+//! ground opens its list with the first frosted panel, the base scene
+//! is empty, and every glass quad on the screen reads a pyramid holding
+//! nothing but the clear.
+//!
+//! A board turning SIDEWAYS is still a different thing — a WALL of a
+//! solid — and takes its ground with it over the flat [`ride_void`] the
 //! whole turn happens in; without that the walls are panes of glass
 //! with the frame's own clear showing through them.
 
@@ -37,9 +55,13 @@ pub fn clear_color() -> Color {
 /// order: `backdrop.solid` — what lies behind the board — then the
 /// board's field `elev.board.fill`, then the baked backdrop plate, the
 /// decoration whose traces, grid and stars live on that field (5.5).
-/// Emitted by a board riding SIDEWAYS, before its panels, so the
-/// caller's yaw and perspective carry ground and panels together and
-/// the face turns as one solid wall. Two levels rather than one because
+/// Emitted before a board's panels, standing or moving: by the FRAME
+/// once, under everything, and again per FACE by a board riding
+/// sideways, so that caller's yaw and perspective carry ground and
+/// panels together and the face turns as one solid wall. The two do
+/// not fight — a sideways ride lays [`ride_void`] over the whole
+/// screen before its first face, so the frame's own copy is covered
+/// for as long as a cube is up. Two levels rather than one because
 /// a family-B board paints NOTHING of its own (`elev.board.fill` at
 /// alpha 0) and a wall of nothing is a pane of glass, not a wall: what
 /// that theme puts behind its panes is the backdrop, and the backdrop
@@ -67,6 +89,18 @@ pub fn board_ground(dl: &mut DrawList, w: f32, h: f32, plate: Option<ImageId>) {
 /// from the viewer, so a wall edge-on melts into the space behind it
 /// instead of into grey. Read as a BED — a raw master rides through
 /// near-black rather than mid-grey.
+///
+/// WHAT THE MASTER PUTS THERE AND WHY IT MOVED. `motion.board_ride.void`
+/// derived from `@surface.void` — the swapchain clear — for as long as a
+/// standing frame painted nothing else, and the two were the same colour
+/// by accident of that. They are not the same rung: the ground a board
+/// stands on is `backdrop.solid`, and once the frame started laying it
+/// ([`board_ground`], 2026-08-18) a ride that opened on the clear dropped
+/// the whole screen fourfold darker for its 300 ms and put it back. The
+/// master now derives this from `@backdrop.solid`, which is what its own
+/// comment always meant by "the ground the frame already stands on"; a
+/// theme that wants the cube to turn in a darker room still says so here,
+/// which is the point of the token.
 pub fn ride_void() -> Color {
     static VOID: OnceLock<TokenId> = OnceLock::new();
     col(theme::resolved().bed(tok(&VOID, "motion.board_ride.void")))
@@ -238,5 +272,47 @@ mod tests {
         assert!((full - 0.8).abs() < 1e-6, "the theme's wash alpha arrived as {full}");
         assert!((half - 0.4).abs() < 1e-6, "the user's opacity did not scale the wash: {half}");
         assert_eq!(alpha_at(0.0), None, "an opacity of zero still drew the wash quad");
+    }
+
+    /// A RIDE IS A TURN, NOT A FLASH: the space the cube turns in is the
+    /// ground the standing board was already on.
+    ///
+    /// `motion.board_ride.void` derived from `@surface.void` — the
+    /// swapchain clear — and that was the same colour as the ground only
+    /// while a standing frame painted no ground at all. It paints one now
+    /// ([`board_ground`], from the frame as well as from each face), and
+    /// the two tokens are a rung of the ladder apart: measured on the
+    /// master, sRGB(0.0096, 0.0240, 0.0171) against sRGB(0.0418, 0.0758,
+    /// 0.0613). A board pushed sideways therefore dropped the whole
+    /// screen fourfold darker for the length of the ride and put it back
+    /// — a picture nobody asked for, on a path with no test to notice.
+    ///
+    /// Both halves are the theme's and neither is a number written here:
+    /// the master's own value has to BE the ground, and it has to be the
+    /// ground BY REFERENCE, so a theme that moves its backdrop moves the
+    /// space its cube turns in with it. A copied literal passes the first
+    /// claim and fails the second.
+    #[test]
+    fn the_cube_turns_in_the_ground_a_standing_board_lays() {
+        let same = |t: &theme::ResolvedTheme, note: &str| {
+            let ground = col(t.bed(theme::id("backdrop.solid").expect("backdrop.solid")));
+            let void = col(t.bed(theme::id("motion.board_ride.void").expect("the void")));
+            for (ch, g, v) in
+                [('r', ground.r, void.r), ('g', ground.g, void.g), ('b', ground.b, void.b)]
+            {
+                assert!(
+                    (g - v).abs() < 1e-4,
+                    "{note}: the ride's void is not the ground the board stands on: \
+                     {ch} {v} against the ground's {g}"
+                );
+            }
+        };
+        same(&theme::bake_over_master(""), "the master");
+        // …and it follows the backdrop, because it is written as a
+        // reference to it and not as a copy of today's colour.
+        same(
+            &theme::bake_over_master("[backdrop]\nsolid = #FF00FF / 1.0\n"),
+            "a theme that moves its backdrop",
+        );
     }
 }
