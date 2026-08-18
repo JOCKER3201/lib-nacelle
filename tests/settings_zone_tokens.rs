@@ -82,4 +82,23 @@ fn the_zone_tokens_of_the_settings_window_bake_to_the_specs_numbers() {
         "rail + subrail must leave the content panel the majority, got {}",
         rail + subrail
     );
+
+    // The air a navigation column's bed keeps around what stands on it
+    // (owner, 2026-08-18: "żadnych paddingów nie ma, totalna amatorka").
+    // Both axes ride @space.4, so the plate reads square rather than
+    // tilted, and both are real lengths and not the zero the window had
+    // before there was a token at all.
+    let pad_x = px("settings.band_pad_x");
+    let pad_y = px("settings.band_pad_y");
+    assert!(near(pad_x, 10.8), "band_pad_x: {pad_x}");
+    assert!(near(pad_y, 10.8), "band_pad_y: {pad_y}");
+    assert!(pad_x > 0.0 && pad_y > 0.0, "a bed with no air is the fault, not the fix");
+    // And the padding stays SMALLER than the gutter beside it: a button
+    // must read as further from the next COLUMN than from its own bed's
+    // edge, or the two columns fuse into one.
+    assert!(
+        pad_x < px("settings.col_gap"),
+        "the bed's own air ({pad_x}) is not under the gutter between columns ({})",
+        px("settings.col_gap")
+    );
 }

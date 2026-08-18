@@ -2123,26 +2123,37 @@ decor.enabled    = false
     /// it is under this line on purpose.
     const NOT_BLACK: f32 = 1.15;
 
-    /// ŻYCZENIE 1, RE-ARGUED FROM A SCREENSHOT. The settings window's three
-    /// columns are three SHADES of one colour — and, since 2026-08-17, three
-    /// shades the eye can actually tell apart on a screen.
+    /// ŻYCZENIE 1, RE-ARGUED TWICE FROM TWO SCREENSHOTS. The settings
+    /// window's two NAVIGATION columns are ONE bed at ONE colour, standing
+    /// one step off the window body the page keeps — and no band of it is
+    /// black.
     ///
-    /// WHAT THE OWNER SAW, and what this test could not see before. The two
-    /// navigation columns were pointed at `@surface.void` and
-    /// `@surface.base`, and by the only ruler this test carried — OKLab L,
-    /// two even steps of about 0.06 — they were three shades. Encoded to the
-    /// swapchain their brightest channel reads 6, 19 and 32 of 255: two black
-    /// stripes beside a coloured page. So a step gate alone is not the claim. The
-    /// claim is that no band is BLACK, and [`off_black`] is the ruler for
-    /// that half of it.
+    /// WHAT CHANGED ON 2026-08-18, and what did not. The owner looked at the
+    /// three-shade staircase this test used to demand and rejected it: "mają
+    /// być po całości i obie w jednakowym kolorze, tym w środkowej
+    /// kolumnie". Two adjacent strips of one navigation at two shades read
+    /// as a seam through one object. So the STEP GATE between the rail and
+    /// the sub-page column is gone and its opposite stands in its place —
+    /// the two must be the SAME COLOUR, compared as colours and not as token
+    /// names. Everything else this test was built for is untouched, and the
+    /// black floor most of all.
     ///
-    /// AND ONE ANCHOR, NOT THREE. The three beds are the window body and
-    /// that same body lifted by `settings.band_lift` once and twice, so
-    /// whatever moves the body — a theme, BASIC's sliders, or the editor's
-    /// BACKGROUND section writing `component.panel.fill` as a literal —
-    /// moves all three together. The screenshot's second fault was exactly
-    /// this: the page followed the BACKGROUND sliders and the two pinned
-    /// columns did not.
+    /// WHAT THE OWNER SAW THE DAY BEFORE, and what this test could not see
+    /// before that. The two navigation columns were pointed at
+    /// `@surface.void` and `@surface.base`, and by the only ruler this test
+    /// carried — OKLab L, two even steps of about 0.06 — they were three
+    /// shades. Encoded to the swapchain their brightest channel reads 6, 19
+    /// and 32 of 255: two black stripes beside a coloured page. So a step
+    /// gate alone was never the claim. The claim is that no band is BLACK,
+    /// and [`off_black`] is the ruler for that half of it.
+    ///
+    /// AND ONE ANCHOR, NOT TWO. Both beds are the window body — the page's
+    /// is it, and the navigation's is it lifted once by `settings.band_lift`
+    /// — so whatever moves the body — a theme, BASIC's sliders, or the
+    /// editor's BACKGROUND section writing `component.panel.fill` as a
+    /// literal — moves both together. The 2026-08-17 screenshot's second
+    /// fault was exactly this: the page followed the BACKGROUND sliders and
+    /// the two pinned columns did not.
     ///
     /// THE PAGE'S NAME IS DECLARED AND IS THE SENTINEL. All three columns
     /// are named so a theme may bed any one of them; the master leaves the
@@ -2150,10 +2161,10 @@ decor.enabled    = false
     /// `panel.fill` is translucent — a second coat composes its alpha twice.
     ///
     /// The folded case is in the same claim: with no columns there is
-    /// nothing to stripe, and the interior is the body — the bed the page
-    /// was on all along.
+    /// nothing to bed, and the interior is the body — the bed the page was
+    /// on all along.
     #[test]
-    fn the_three_settings_bands_are_three_shades_of_one_hue() {
+    fn the_two_navigation_bands_are_one_bed_over_the_body() {
         let (schema, _, t) = baked("");
         let raw = |n: &str| t.color(schema.id(n).expect(n));
         let band = |n: &str| lch(raw(n));
@@ -2186,13 +2197,33 @@ decor.enabled    = false
             );
         }
 
-        // THREE SHADES, CLIMBING OUTWARD — the page is the well and the
-        // navigation the rim — and the two steps are the same size, so the
-        // three read as one ladder rather than as an accident.
-        assert!(page.l < sub.l && sub.l < rail.l, "{} {} {}", page.l, sub.l, rail.l);
-        let (a, b) = (sub.l - page.l, rail.l - sub.l);
-        assert!(a > 0.03 && b > 0.03, "two bands too close to tell apart: {a} and {b}");
-        assert!((a - b).abs() < 0.02, "the ladder is uneven: {a} then {b}");
+        // ONE BED FOR THE NAVIGATION. Not "two shades close enough" — the
+        // SAME COLOUR, read off what the two tokens actually resolve to,
+        // channel for channel and alpha included. A test that compared the
+        // two token EXPRESSIONS would pass on `rail_fill = @surface.void`
+        // the moment somebody wrote it as a reference to the same word.
+        let (r_raw, s_raw) =
+            (raw("component.settings.rail_fill"), raw("component.settings.sub_fill"));
+        for (ch, a, b) in [
+            ("r", r_raw.r, s_raw.r),
+            ("g", r_raw.g, s_raw.g),
+            ("b", r_raw.b, s_raw.b),
+            ("a", r_raw.a, s_raw.a),
+        ] {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "the two navigation columns part on {ch}: {a} vs {b} — the owner asked \
+                 for one colour across both"
+            );
+        }
+        // AND THE NAVIGATION STANDS OFF THE PAGE. One step, not none: a bed
+        // the eye cannot find is the same fault as a seam through it.
+        assert!(page.l < sub.l, "the navigation did not climb off the body: {} {}", page.l, sub.l);
+        assert!(
+            sub.l - page.l > 0.03,
+            "the navigation and the page are too close to tell apart: {}",
+            sub.l - page.l
+        );
 
         // AND NOT ONE OF THEM IS BLACK. This is the assertion the owner's
         // screenshot is about, and the one the old master fails.
@@ -2274,25 +2305,23 @@ decor.enabled    = false
             );
         }
         assert!(
-            body.l < u5.l && u5.l < r5.l,
-            "the staircase did not follow the body it is measured from: {} {} {}",
-            body.l,
-            u5.l,
-            r5.l
+            (r5.l - u5.l).abs() < 1e-3,
+            "the moved body parted the two navigation columns: {} vs {}",
+            r5.l,
+            u5.l
         );
         assert!(
-            u5.l - body.l > 0.03 && r5.l - u5.l > 0.03,
-            "the bands collapsed onto the body they follow: {} {} {}",
+            u5.l - body.l > 0.03,
+            "the navigation collapsed onto the body it follows: {} {}",
             body.l,
-            u5.l,
-            r5.l
+            u5.l
         );
 
-        // ONE NUMBER STATES THE WHOLE STAIRCASE — its size AND its
-        // direction. At 1.0 the three columns are one colour, which is the
-        // honest way for a theme to say "no stripes"; under 1.0 the
-        // staircase runs the other way, which is the escape a LIGHT theme
-        // takes instead of a second set of tokens.
+        // ONE NUMBER STATES THE STEP — its size AND its direction. At 1.0
+        // the whole interior is one colour, which is the honest way for a
+        // theme to say "no bands"; under 1.0 the step runs the other way,
+        // which is the escape a LIGHT theme takes instead of a second set
+        // of tokens.
         let (s6, _, t6) = baked("[settings]\nband_lift = 1.0\n");
         let flat = |n: &str| lch(t6.color(s6.id(n).expect(n)));
         let (fr, fs, fp) = (
@@ -2302,7 +2331,7 @@ decor.enabled    = false
         );
         assert!(
             (fr.l - fp.l).abs() < 1e-3 && (fs.l - fp.l).abs() < 1e-3,
-            "band_lift = 1.0 left a staircase behind: {} {} {}",
+            "band_lift = 1.0 left a step behind: {} {} {}",
             fp.l,
             fs.l,
             fr.l
@@ -2310,9 +2339,11 @@ decor.enabled    = false
         let (s7, _, t7) = baked("[settings]\nband_lift = 0.85\n");
         let down = |n: &str| lch(t7.color(s7.id(n).expect(n)));
         assert!(
-            down("component.settings.rail_fill").l < down("component.settings.sub_fill").l
+            (down("component.settings.rail_fill").l - down("component.settings.sub_fill").l)
+                .abs()
+                < 1e-3
                 && down("component.settings.sub_fill").l < down("component.panel.fill").l,
-            "a lift under 1.0 did not run the staircase the other way"
+            "a lift under 1.0 did not put the one navigation bed under the page"
         );
 
         // AND THE PAGE CAN BE BEDDED AFTER ALL, by the theme that wants it:
@@ -2423,9 +2454,10 @@ decor.enabled    = false
                     off_black(bed)
                 );
             }
-            // Still a staircase, and still climbing outward, wherever the
-            // wheel stopped: the three are one expression off one anchor,
-            // so a turn cannot part them.
+            // Still ONE bed for the navigation and still one step off the
+            // page, wherever the wheel stopped: both come out of one
+            // expression off one anchor, so a turn can neither part them
+            // nor flatten them onto the page.
             let bed = |n: &str| lch(t.color(schema.id(n).unwrap()));
             let (page, sub, rail) = (
                 bed("component.panel.fill"),
@@ -2433,11 +2465,16 @@ decor.enabled    = false
                 bed("component.settings.rail_fill"),
             );
             assert!(
-                sub.l - page.l > 0.03 && rail.l - sub.l > 0.03,
-                "at {turn} deg the three columns stopped being three shades: {} {} {}",
+                (rail.l - sub.l).abs() < 1e-3,
+                "at {turn} deg the two navigation columns parted: {} vs {}",
+                rail.l,
+                sub.l
+            );
+            assert!(
+                sub.l - page.l > 0.03,
+                "at {turn} deg the navigation flattened onto the page: {} {}",
                 page.l,
-                sub.l,
-                rail.l
+                sub.l
             );
 
             // THE EXCEPTION. Severity is a rotation, not a flattening: the
