@@ -723,7 +723,18 @@ fn try_load(path: &Path) -> Option<Font> {
 // list, `dirs` is an `openat(..., O_DIRECTORY)`, `stats` is a `statx` and
 // `parses` is a font file read whole and decoded. Three of the four are
 // what a system trace of this program shows, so a measurement here and a
-// measurement out there are the same measurement.
+// measurement out there are largely the same measurement.
+//
+// LARGELY, and the exception is worth naming where the numbers are, not
+// only at the field: `stats` counts the stats this file ASKS for. On a
+// filesystem that does not carry an entry's kind in the directory entry
+// itself — NFS, some overlays — the standard library asks for us, once per
+// entry, and that call is invisible from here. So `stats` is a true count
+// of syscalls on a machine whose font directories carry the kind (which is
+// every local filesystem this program has been traced on), and a floor
+// rather than a count on one that does not. `walks`, `dirs` and `parses`
+// are exact everywhere, and the defect this meter was written for shows in
+// all four.
 //
 // Always compiled, never behind a test flag: a counter that only exists
 // under `cfg(test)` measures a different program than the one that ships,
@@ -900,13 +911,33 @@ fn font_index(dirs: &[PathBuf]) -> Arc<FontIndex> {
 /// Drops the index, so the next question reads the directories again.
 ///
 /// For the one thing the index cannot see: a font INSTALLED while the
-/// program runs. Nothing inside the toolkit calls this, because nothing
-/// inside the toolkit installs fonts; it is here so that a host which
-/// offers the user a "look again" can mean it. A theme swap is not such a
-/// moment and must never call this — re-reading the tree on every theme
+/// program runs. [`fresh_index`] below is the toolkit's own caller — the
+/// family lists a settings page shows — and this stays public for a host
+/// that offers a "look again" somewhere else. A theme swap is not such a
+/// moment and must never call this: re-reading the tree on every theme
 /// swap is the defect this index exists to remove.
 pub fn forget_font_index() {
     *INDEX.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// The index built again from the disk, whatever the old one held.
+///
+/// The one question that has to see the directories again is "what does
+/// this machine have RIGHT NOW", and there is exactly one asker: a person
+/// who installed a font and opened the settings page to pick it. Every
+/// other question — a theme swap, a weight change, a face slot resolving —
+/// asks which of the files that EXIST answers a pattern, and that cannot
+/// have changed without somebody putting a file on the disk.
+///
+/// So the family lists cost ONE traversal each, where before the index
+/// they cost one per curated name: twelve for the monospace list and
+/// nineteen for the interface one, thirty-one for the page. Two rather
+/// than one for the page as a whole, because the toolkit is asked two
+/// questions and cannot see that they are one moment — the host would have
+/// to say so, and no host API here says it.
+fn fresh_index() -> Arc<FontIndex> {
+    forget_font_index();
+    font_index(&font_dirs())
 }
 
 /// The file a pattern names, from the index of the font directories.
@@ -968,24 +999,33 @@ fn pattern_for(display: &str) -> Option<&'static str> {
         .map(|(_, pat)| *pat)
 }
 
-fn available_from(table: &[(&str, &str)]) -> Vec<String> {
-    let dirs = font_dirs();
+/// The curated names of `table` that this reading of the directories has a
+/// file for. Takes the index rather than fetching one, so that a caller
+/// asking two tables asks them of the SAME reading.
+fn available_from(index: &FontIndex, table: &[(&str, &str)]) -> Vec<String> {
     table
         .iter()
-        .filter(|(_, pat)| find_font(&dirs, &[pat]).is_some())
+        .filter(|(_, pat)| index.find(pat).is_some())
         .map(|(name, _)| name.to_string())
         .collect()
 }
 
 /// Monospace families actually available on this system (terminal font).
+///
+/// Reads the directories again — see [`fresh_index`]. This is the settings
+/// page's list, and a list of what is installed that cannot see a font
+/// installed since the program started is a list of the wrong thing.
 pub fn available_mono_families() -> Vec<String> {
-    available_from(&MONO_FAMILIES)
+    available_from(&fresh_index(), &MONO_FAMILIES)
 }
 
 /// Interface families available on this system (UI list first, then mono).
+///
+/// Reads the directories again, once, for both tables — see [`fresh_index`].
 pub fn available_ui_families() -> Vec<String> {
-    let mut out = available_from(&UI_FAMILIES);
-    out.extend(available_from(&MONO_FAMILIES));
+    let index = fresh_index();
+    let mut out = available_from(&index, &UI_FAMILIES);
+    out.extend(available_from(&index, &MONO_FAMILIES));
     out
 }
 
@@ -1518,20 +1558,47 @@ mod tests {
         );
     }
 
+    /// The DISK-READING three of the meter's four numbers.
+    ///
+    /// `parses` is dropped on purpose, and the reason is that the counters
+    /// are PROCESS-wide. Sixteen tests in this binary build a `FontSystem`
+    /// and every one of them parses a face, on whatever thread the harness
+    /// runs it on, so a `parses` read here is partly somebody else's work.
+    /// The other three cannot move under this test's feet: they only move
+    /// when the index is BUILT, a build happens under the index's own
+    /// mutex, and the only thing in the whole crate that discards a built
+    /// index is this test (`fresh_index` is reached from the family lists,
+    /// which nothing in this binary calls).
+    ///
+    /// Named for what it keeps rather than what it drops, because the
+    /// question the test asks is "were the directories read again".
+    fn scan_only(c: ScanCount) -> ScanCount {
+        ScanCount { parses: 0, ..c }
+    }
+
     /// The index is per DIRECTORY LIST, and only per directory list. A
     /// second question about the same list must not go back to the disk;
     /// a different list must.
     #[test]
     fn a_new_directory_list_is_the_one_thing_that_rebuilds() {
         let dirs = font_dirs();
-        let _ = font_index(&dirs);
+        let first = font_index(&dirs);
 
         let before = scan_count();
         for _ in 0..20 {
-            let _ = font_index(&dirs);
+            // Two assertions about the same call, and both are wanted. The
+            // pointer says a rebuild did not happen at all — a build puts a
+            // NEW allocation in the slot, so sameness here is not evidence
+            // about a counter but about identity. The counter below says it
+            // in the audit's own units.
+            assert!(
+                Arc::ptr_eq(&first, &font_index(&dirs)),
+                "the same directory list was answered with a different \
+                 index — the list is being read afresh per question"
+            );
         }
         assert_eq!(
-            scan_count(), before,
+            scan_only(scan_count()), scan_only(before),
             "twenty questions about the same directory list read the disk \
              again — the index is keyed on something that moves"
         );
@@ -1541,12 +1608,22 @@ mod tests {
         let mut other = dirs.clone();
         other.push(std::env::temp_dir().join("nacelle-no-such-font-dir"));
         let before = scan_count();
-        let _ = font_index(&other);
-        assert!(
-            scan_count().walks > before.walks,
+        let rebuilt = font_index(&other);
+        // What the index is FOR the new list, not merely that a walk
+        // happened somewhere: an index that kept the old list's files and
+        // answered anyway is exactly the failure being guarded, and only
+        // the key it carries can tell the two apart.
+        assert_eq!(
+            rebuilt.dirs.as_slice(), other.as_slice(),
             "a directory list this process had never seen was answered out \
              of the index built for another one — a font directory added at \
              runtime would stay invisible"
+        );
+        assert!(
+            scan_count().walks > before.walks,
+            "the index carries the new directory list but no traversal was \
+             counted for it — the meter and the index disagree, and the \
+             audit's numbers come from the meter"
         );
 
         // ...and the original list is a new list again now, which is the

@@ -37,6 +37,42 @@ fn scan_only(c: ScanCount) -> ScanCount {
     ScanCount { parses: 0, ..c }
 }
 
+/// The six face slots the master gives a family to. `icon` and `reserved`
+/// are the two it does not: they alias onto a slot that has one, which is
+/// why "six slots, one file" is the whole of the parse count below.
+const FAMILIED_SLOTS: [&str; 6] = ["ui", "mono", "ui_medium", "ui_bold", "display", "mono_bold"];
+
+/// A theme file that exists for as long as the test needs it and no
+/// longer.
+///
+/// A `Drop` guard rather than a line at the end of the test, because the
+/// interesting runs are the ones that end in a failed assertion — a test
+/// that only tidies up when it passes leaves its litter exactly on the
+/// days somebody is running it over and over.
+struct Fixture(std::path::PathBuf);
+
+impl Fixture {
+    fn write(name: &str, text: &str) -> Fixture {
+        // Cargo's own scratch directory for integration tests, under
+        // `target/`, and not the system's `/tmp`: a test writes into the
+        // build it belongs to, so `cargo clean` takes anything this guard
+        // somehow missed with it.
+        let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+        std::fs::write(&path, text).expect("the fixture theme must be writable");
+        Fixture(path)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 #[test]
 fn one_traversal_per_load_not_one_per_face() {
     // ------------------------------------------------ the first load
@@ -107,15 +143,25 @@ fn one_traversal_per_load_not_one_per_face() {
     // appends the monospace one, so thirty-one questions. Thirty-one full
     // traversals of /usr/share/fonts is what the owner saw as a stutter
     // the moment that page opened.
+    //
+    // ONE traversal per call, and not zero. This is the single question in
+    // the whole loader that has to see the disk again: it is a list of what
+    // is INSTALLED, shown to the person who may have installed something a
+    // minute ago, and answering it out of a reading taken at startup would
+    // hide the font they came to pick. Two rather than one for the page,
+    // because the host asks two questions and nothing in the API says they
+    // are one moment.
     let mark = font::scan_count();
     let mono = font::available_mono_families();
     let ui = font::available_ui_families();
     let listing = since(mark);
     assert_eq!(
-        listing,
-        ScanCount::default(),
-        "listing the available families cost {listing:?} — the settings \
-         page is walking the font tree once per family name"
+        listing.walks, 2,
+        "listing the available families traversed the font directories {} \
+         times ({listing:?}) — one per curated NAME is the stutter the trace \
+         caught, and zero would mean a font installed while the program runs \
+         cannot be picked until it restarts",
+        listing.walks
     );
     assert!(
         !mono.is_empty() || !ui.is_empty(),
@@ -147,15 +193,39 @@ fn one_traversal_per_load_not_one_per_face() {
     let mut fixture = String::from(
         "[meta]\nschema = 1\nname = \"One file for six slots\"\nbase = \"default\"\n\n",
     );
-    for id in ["ui", "mono", "ui_medium", "ui_bold", "display", "mono_bold"] {
+    for id in FAMILIED_SLOTS {
         fixture.push_str(&format!(
             "[face.{id}]\nfamily[0] = \"{family}\"\nweight = 400\n\n"
         ));
     }
-    let path =
-        std::env::temp_dir().join(format!("nacelle-font-scan-{}.theme", std::process::id()));
-    std::fs::write(&path, fixture).expect("the fixture theme must be writable");
-    let _ = theme::load_with(LoadRequest { path: Some(path), ..Default::default() });
+    let fixture_file =
+        Fixture::write(&format!("nacelle-font-scan-{}.theme", std::process::id()), &fixture);
+    let _ = theme::load_with(LoadRequest {
+        path: Some(fixture_file.path().to_path_buf()),
+        ..Default::default()
+    });
+
+    // The fixture has to be IN FORCE for the count below to mean what its
+    // name says. `theme::load_with` always succeeds — a theme it cannot
+    // read degrades to the master and says so in the diagnostics rather
+    // than refusing — so a fixture with a typo in it, or written against a
+    // syntax this file no longer speaks, would leave the master's own
+    // families in the slots and the assertion would go on passing while
+    // measuring a different theme. Six slots naming ONE family is the
+    // premise; this is where it is checked instead of assumed.
+    let live = theme::diagnostics();
+    for id in FAMILIED_SLOTS {
+        let token = format!("face.{id}.family[0]");
+        assert_eq!(
+            live.text(&token),
+            Some(family.as_str()),
+            "the fixture theme did not take: {token} reads {:?} and not \
+             {family:?}, so the parse count below is a count for whatever \
+             families the master happens to name — not for six slots on one \
+             file",
+            live.text(&token)
+        );
+    }
 
     let mark = font::scan_count();
     fonts.reload_faces(&FaceChoice::default());
