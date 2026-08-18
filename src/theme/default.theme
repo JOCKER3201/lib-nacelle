@@ -432,6 +432,9 @@ disabled = alpha(@text.disabled, 0.55)
 [border.edge]
 width         = @stroke.hair
                     # the global default edge width every container inherits · all · str, device px after stroke(x) · stroke.hair = 0.2x global u
+                    # THE BORDER'S OWN THICKNESS, and the one the theme editor's BORDER WIDTH writes (BASIC, 2026-08-18). A reference by default on purpose: a theme
+                    # that has said nothing about its frames follows the kerf, and only a file whose author moved that slider carries a literal here. THIS SECTION HAS
+                    # NO RADIUS — seven keys of geometry and not one of them is one; the only radius a border has is the REACH of its light, [glow] panel_edge.radius.
 style         = solid
                     # how the ring is drawn · 9 (brackets) · one of solid | segmented | brackets | none · literal enum
 dash          = 1.6u
@@ -562,13 +565,25 @@ data   = hue(@palette.data)           # hue of the data seed · image 5 splits t
 # a SOLID `.text` chip, which is image 5's SYSTEM LOCKDOWN button. Both forms
 # are needed and both are here.
 #
-# The `.text` values below are the CANONICAL severity hues. With the default
-# `severity.mode = hue` the engine pulls each of them toward the accent by
-# `severity.pull`, clamped to `severity.pull_clamp`, so a red theme's `ok`
+# The `.text` values below are the CANONICAL severity hues, each wrapped in
+# `toward(...)`: the canonical colour leans toward `@palette.accent` by
+# `severity.pull`, capped at `severity.pull_clamp`, so a red theme's `ok`
 # leans warm without ever becoming red. A THEME that writes its own
 # `severity.<r>.text` pins that role and the pull no longer touches it — that
 # is exactly image 4, everything red by derivation with an amber `contained`
-# written out on one line.
+# written out on one line — and it works BY CONSTRUCTION now, because writing
+# the token replaces the whole expression, `toward()` and all.
+#
+# UNTIL 2026-08-18 THE SENTENCE ABOVE WAS A PROMISE ABOUT A MACHINE THAT DID
+# NOT EXIST. `severity.pull` and `severity.pull_clamp` were read by nothing —
+# they sat on `theme::edit`'s DEAD_CONTROLS list "until someone writes their
+# reader" — so the roles were six frozen literals, and the theme editor's
+# BASIC page moved them the only way it could: by rotating each of them the
+# FULL distance the accent had moved. Measured on mint -> red (dh = -137.5
+# deg) that turned green `ok` to red (148 -> 10.5) and red `critical` to blue
+# (27 -> 249.5): the roles kept their spacing and lost their meaning. The
+# reader is `toward()` (expr.rs), it lives here in the file where the colour
+# is written, and the numbers stayed where they were.
 # =========================================================================
 [severity]
 
@@ -578,13 +593,24 @@ mode = hue
                     # one of hue | mono | mono_plus_warning | mono_strict;
                     # hue keeps canonical hues, mono separates roles by OKLab
                     # lightness alone (image 3), mono_plus_warning is image 4
+                    # NO READER (2026-08-18). `hue` is what the six `.text`
+                    # expressions below spell out for themselves; the three
+                    # mono words name GENERATIONS, which an expression cannot
+                    # select between, and no code chooses among them. Left
+                    # declared rather than deleted because the three modes are
+                    # a real request of 5.10's — see `theme::edit`'s
+                    # DEAD_CONTROLS, where this token stays until a generator
+                    # exists to read it
 pull = 0.20
                     # how far a canonical severity hue is dragged toward the
-                    # accent hue; images 1-6; f, 0.0 .. 1.0; 0 = never move
+                    # accent hue; images 1-6; f, 0.0 .. 1.0; 0 = never move;
+                    # read as the third argument of `toward()` on each of the
+                    # six chromatic `.text` values below
                     # (m3 M6: was 0.16 — the pull may lean harder now that the
                     # 7deg clamp below stops it from ever leaving the hue)
 pull_clamp = 7deg
-                    # HARD cap on that drag; -; deg, 0deg .. 60deg
+                    # HARD cap on that drag; -; deg, 0deg .. 60deg; read as
+                    # the fourth argument of `toward()`
                     # (m3 M6: was 14deg — 14 sends canonical red to orange in
                     # the green themes (#FC5C00) and pink in the cyan ones
                     # (#FE4F73), which cockpit and instrument each spent a
@@ -593,14 +619,20 @@ pull_clamp = 7deg
 chroma = 1.00
                     # global chroma scale for the mono modes; image 3 ships
                     # 0.92; f, 0.0 .. 2.0; 1.00 = canonical chroma
+                    # NO READER (2026-08-18), and it cannot have one before
+                    # `mode` does: this scale is declared to govern the MONO
+                    # generations, and `hue` — the one generation that exists
+                    # — leaves chroma alone on purpose. A role's chroma is its
+                    # author's
 
 # ---- ok — nominal, doing its job ----------------------------------------
 # `(Zakonczone)` green, `TRYB: PRACA (Optymalny)`, the green PROCESOR/PAMIEC
 # glyphs of the resource rows.
-ok.text = oklch(0.795, 0.170, 148)
+ok.text = toward(oklch(0.795, 0.170, 148), @palette.accent, @severity.pull, @severity.pull_clamp)
                     # the label, the value, the trailing status word;
                     # images 1, 7; OKLCh, canonical green;
-                    # pulled toward the accent by severity.pull when mode=hue
+                    # LEANING toward the accent by severity.pull, capped at
+                    # severity.pull_clamp - the canonical hue stays whose it is
                     # TODO(default): canonical L/C/H chosen here, spec silent
 ok.glyph = @severity.ok.text
                     # the leader-line dot / row glyph; images 1, 7; colour;
@@ -629,10 +661,11 @@ ok.pulse = false
 
 # ---- info — notable, not a problem --------------------------------------
 # `POWIADOMIENIA (4 NOWE)`, `(W toku, 72%)`, the blue half of `git diff`.
-info.text = oklch(0.740, 0.140, 233)
+info.text = toward(oklch(0.740, 0.140, 233), @palette.accent, @severity.pull, @severity.pull_clamp)
                     # the label, the value, the trailing status word;
                     # images 7, 9; OKLCh, canonical azure;
-                    # pulled toward the accent by severity.pull when mode=hue
+                    # LEANING toward the accent by severity.pull, capped at
+                    # severity.pull_clamp - the canonical hue stays whose it is
                     # TODO(default): canonical L/C/H chosen here, spec silent
 info.glyph = @severity.info.text
                     # the notification dot; image 7; colour
@@ -656,10 +689,11 @@ info.pulse = false
 # ---- warning — degraded, will become a problem --------------------------
 # Image 1's YELLOW lightning glyph on `ENERGIA: 85%`, and the amber half of
 # the top bar's alarm line.
-warning.text = oklch(0.800, 0.165, 75)
+warning.text = toward(oklch(0.800, 0.165, 75), @palette.accent, @severity.pull, @severity.pull_clamp)
                     # the label, the value, the amber alarm half of the top
                     # bar; images 1, 7; OKLCh, canonical amber;
-                    # pulled toward the accent by severity.pull when mode=hue
+                    # LEANING toward the accent by severity.pull, capped at
+                    # severity.pull_clamp - the canonical hue stays whose it is
                     # TODO(default): canonical L/C/H chosen here, spec silent
 warning.glyph = @severity.warning.text
                     # the lightning / temperature glyph; image 1; colour
@@ -683,10 +717,11 @@ warning.pulse = false
 # ---- critical — failed or failing, act now ------------------------------
 # `KRYTYCZNY ALARM`, `DAMAGE BREACH`, image 1/2/3's `CRITICAL` crew badges,
 # and the whole of image 4.
-critical.text = oklch(0.680, 0.210, 27)
+critical.text = toward(oklch(0.680, 0.210, 27), @palette.accent, @severity.pull, @severity.pull_clamp)
                     # the alarm line, the CRITICAL badge, the DAMAGE BREACH
                     # leader label; images 1-5; OKLCh, canonical red;
-                    # pulled toward the accent by severity.pull when mode=hue
+                    # LEANING toward the accent by severity.pull, capped at
+                    # severity.pull_clamp - the canonical hue stays whose it is
                     # TODO(default): canonical L/C/H chosen here, spec silent
 critical.glyph = @severity.critical.text
                     # the alarm triangle and the leader-line dot; images 1-5;
@@ -715,10 +750,11 @@ critical.pulse = true
 # Image 3's dimmer green `CONTAINED` beside a bright green `CRITICAL`;
 # image 4's AMBER `CONTAINED` inside an all-red screen. The role exists
 # because "handled, but do not forget it" is not the same as ok.
-contained.text = oklch(0.700, 0.105, 92)
+contained.text = toward(oklch(0.700, 0.105, 92), @palette.accent, @severity.pull, @severity.pull_clamp)
                     # the CONTAINED crew badge; images 3, 4; OKLCh, canonical
                     # dim amber, deliberately apart from warning's hue;
-                    # pulled toward the accent by severity.pull when mode=hue
+                    # LEANING toward the accent by severity.pull, capped at
+                    # severity.pull_clamp - the canonical hue stays whose it is
                     # (m3 M6: was oklch(0.760, 0.120, 88), which sat dE 0.068
                     # from warning — two indistinguishable ambers, under the
                     # engine's own 0.115 floor before any theme touched them.
@@ -775,11 +811,12 @@ offline.pulse = false
 # ---- unknown — a value we cannot classify -------------------------------
 # The ABI's safety valve: any severity index past the end of the enum lands
 # here rather than on `ok`, so a producer bug can never read as nominal.
-unknown.text = oklch(0.700, 0.140, 310)
+unknown.text = toward(oklch(0.700, 0.140, 310), @palette.accent, @severity.pull, @severity.pull_clamp)
                     # the label of an unreadable filesystem entry, a value
                     # with no classification; -; OKLCh, canonical violet —
                     # a hue no other role uses, so it cannot be misread;
-                    # pulled toward the accent by severity.pull when mode=hue
+                    # LEANING toward the accent by severity.pull, capped at
+                    # severity.pull_clamp - the canonical hue stays whose it is
                     # TODO(default): canonical L/C/H chosen here, spec silent
 unknown.glyph = @severity.unknown.text
                     # the dash mark; -; colour
@@ -1071,6 +1108,12 @@ panel_edge.color = element
 panel_edge.radius = 0u
                     # how far the glow reaches past the edge; images 1-6;
                     # u, 0u .. 4u; 0u is the `none` sentinel — draw nothing
+                    # The theme editor's GLOW REACH writes this (BASIC,
+                    # 2026-08-18) and the declared 0u..4u above is the
+                    # track's two ends — the wall is the FILE's, not the
+                    # editor's. A lit kind still lays 1.6u under a theme
+                    # that has never dressed its halo; a number a person
+                    # moved outranks that floor.
 panel_edge.falloff = gauss # enum: linear | quad | gauss | halo | tube
                     # how the light is spent across the radius; images 1-6,
                     # 7-10. `gauss` is the wide soft halo of images 7 and 10
@@ -4743,6 +4786,8 @@ chevron_stroke = @stroke.thin       # line weight of the chevron · - · str · 
 gap = @space.3                      # gap between chevron and value · - · len (u) · @space.3 = 1.5u = 8.1 px
 value_align = center                # where the value sits between the chevrons · - · enum: left | center | right · -
 border = @stroke.hair               # the cycler's ring · - · str · @stroke.hair
+corner = @button.corner             # the plate's corner radius · - · len (u) · @button.corner — a cycler is a plate on a settings row like the buttons above and below it, and the owner's report of 2026-08-18 was that this ONE row's corners differed from the whole page's. It was not a theme that differed: the drawing spelled a plain rect and no key here could say otherwise
+corner_style = @button.corner_style # which shape that radius is cut to · - · enum: square | round | chamfer · follows the button for the same reason the radius does, and by the same reference the segmented cell and the checkbox already use. Pointed at the button rather than at @corner.mode so that a theme pinning its buttons alone moves this row with them — which is what "the same corners as the rest" means on a page made of buttons
 
 # =========================================================================
 # segmented — a row of mutually exclusive cells.

@@ -186,6 +186,25 @@ pub fn style(t: &ResolvedTheme, mode: TokenId, idx: &'static OnceLock<Cuts>) -> 
     idx.get_or_init(|| Cuts::of(mode)).read(t, mode)
 }
 
+/// How finely a cut of `size` is tessellated: the theme's
+/// `corner.segments` is the ceiling and [`crate::draw::ring_segments`]'
+/// quarter-pixel chord-error rule (r1 §3.4) sits under it.
+///
+/// IT LIVES BESIDE THE CUT BECAUSE IT IS PART OF THE SAME ANSWER. A
+/// caller that has resolved a corner still cannot draw it without a
+/// segment count, and until 2026-08-18 the only statement of this rule
+/// was `object::window::corner_segments`, which is `pub(crate)` — so a
+/// drawing OUTSIDE this crate could reach the vocabulary and not the
+/// tessellation, and had to either spell the 0.25 tolerance itself or
+/// give up and draw a plain rectangle. `nacelle-desktop`'s cycler did
+/// the second for as long as it existed. A tolerance restated in another
+/// repository is the four-`match` defect this module was written to end,
+/// in the other half of the same sentence.
+pub fn segments(t: &ResolvedTheme, cell: &'static OnceLock<TokenId>, size: f32) -> u8 {
+    let ceiling = *cell.get_or_init(|| theme::id("corner.segments").unwrap_or(TokenId::MISSING));
+    crate::draw::ring_segments(size, 0.25, t.px(ceiling) as u8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

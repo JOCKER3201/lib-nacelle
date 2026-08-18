@@ -1143,9 +1143,9 @@ impl<'a> Cursor<'a> {
                     Expr::Call(f, args)
                 }
                 None => {
-                    // §4.2: names the function and lists the 14 legal names.
+                    // §4.2: names the function and lists the legal names.
                     let msg = format!(
-                        "unknown function \"{name}\" — the fourteen are: {}",
+                        "unknown function \"{name}\" — the fifteen are: {}",
                         Func::legal_names()
                     );
                     out.push(Diagnostic::warn(self.span_from(start), msg.clone()));
@@ -1494,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_function_lists_the_fourteen() {
+    fn unknown_function_lists_the_whole_closed_set() {
         let (e, d) = val("darken(@palette.accent, 0.2)");
         assert!(matches!(e, Expr::Bad(_)));
         assert!(d[0].message.contains("unknown function \"darken\""));
