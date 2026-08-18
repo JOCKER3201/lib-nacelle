@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  cyber-frame.svg — SOURCE GEOMETRY for the `cyber-frame` border kind.
+
+  Drawn by the owner (Inkscape) as `ramka_cyberpunk_geometria-v2.svg`, with an
+  industrial layer added and approved 2026-08-18. This file is the SHAPE, not
+  the palette: the colours below are PLACEHOLDERS for viewing. When the border
+  is implemented on the vector lane, each group maps to a theme token —
+
+      #metal   -> surface / chassis tokens        (@surface.*, chamfer @border.*)
+      #neon    -> the accent gradient              (magenta->cyan == base colour)
+      #detail  -> border/edge tokens               (bolts, seams: @border.default)
+
+  Groups are kept separate so the path->polyline extraction can colour each by
+  its token rather than reading anything out of this file. Corners and the
+  centre modules are their own objects, apart from the long straight runs, so
+  the frame can stretch to any widget size (corners rigid, runs elastic).
+  viewBox is 1920x1080; every number here is a design-space coordinate that
+  becomes a theme dimension token.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" width="1920" height="1080">
+  <defs>
+    <!-- PLACEHOLDER colours — replaced by theme tokens at bake time. -->
+    <linearGradient id="neonGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#E012FF"/><stop offset="30%" stop-color="#C000FF"/>
+      <stop offset="70%" stop-color="#00A2FF"/><stop offset="100%" stop-color="#00E5FF"/>
+    </linearGradient>
+    <linearGradient id="metalGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#181A24"/><stop offset="40%" stop-color="#0E1017"/>
+      <stop offset="60%" stop-color="#08090E"/><stop offset="100%" stop-color="#121624"/>
+    </linearGradient>
+    <linearGradient id="bevelGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#602080"/><stop offset="50%" stop-color="#1E2840"/>
+      <stop offset="100%" stop-color="#105070"/>
+    </linearGradient>
+    <filter id="glowOuter" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="b1"/><feGaussianBlur stdDeviation="3" result="b2"/>
+      <feMerge><feMergeNode in="b1"/><feMergeNode in="b2"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glowInner" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="12" result="b1"/><feGaussianBlur stdDeviation="4" result="b2"/>
+      <feMerge><feMergeNode in="b1"/><feMergeNode in="b2"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+
+    <!-- OUTER contour: rigid corners (45 deg / ~50px), side C-bays, top/bottom notches. -->
+    <path id="outer" d="M100,50 L820,50 L850,80 L1070,80 L1100,50 L1820,50 L1870,100 L1870,320 L1840,350 L1840,430 L1870,460 L1870,620 L1840,650 L1840,730 L1870,760 L1870,980 L1820,1030 L1100,1030 L1070,1000 L850,1000 L820,1030 L100,1030 L50,980 L50,760 L80,730 L80,650 L50,620 L50,460 L80,430 L80,350 L50,320 L50,100 Z"/>
+    <!-- INNER contour: same silhouette, offset inward. -->
+    <path id="inner" d="M140,110 L800,110 L830,140 L1090,140 L1120,110 L1780,110 L1810,140 L1810,300 L1780,330 L1780,450 L1810,480 L1810,600 L1780,630 L1780,750 L1810,780 L1810,940 L1780,970 L1120,970 L1090,940 L830,940 L800,970 L140,970 L110,940 L110,780 L140,750 L140,630 L110,600 L110,480 L140,450 L140,330 L110,300 L110,140 Z"/>
+    <g id="bolt"><circle r="6.5" fill="#0B0E16" stroke="#1E2840" stroke-width="1.5"/><circle r="2.6" fill="#05060C" stroke="#1E2840" stroke-width="0.8"/></g>
+  </defs>
+
+  <!-- ============ METAL: chassis, machine groove, plate seams, vent slots ============ -->
+  <g id="metal">
+    <path fill-rule="evenodd" fill="url(#metalGrad)" stroke="url(#bevelGrad)" stroke-width="2.5"
+          d="M100,50 L820,50 L850,80 L1070,80 L1100,50 L1820,50 L1870,100 L1870,320 L1840,350 L1840,430 L1870,460 L1870,620 L1840,650 L1840,730 L1870,760 L1870,980 L1820,1030 L1100,1030 L1070,1000 L850,1000 L820,1030 L100,1030 L50,980 L50,760 L80,730 L80,650 L50,620 L50,460 L80,430 L80,350 L50,320 L50,100 Z
+             M140,110 L800,110 L830,140 L1090,140 L1120,110 L1780,110 L1810,140 L1810,300 L1780,330 L1780,450 L1810,480 L1810,600 L1780,630 L1780,750 L1810,780 L1810,940 L1780,970 L1120,970 L1090,940 L830,940 L800,970 L140,970 L110,940 L110,780 L140,750 L140,630 L110,600 L110,480 L140,450 L140,330 L110,300 L110,140 Z"/>
+    <!-- machine groove running the chassis centreline -->
+    <path fill="none" stroke="#1E2840" stroke-width="2" opacity="0.85"
+          d="M120,80 L810,80 L840,110 L1080,110 L1110,80 L1800,80 L1840,120 L1840,310 L1810,340 L1810,440 L1840,470 L1840,610 L1810,640 L1810,740 L1840,770 L1840,960 L1800,1000 L1110,1000 L1080,970 L840,970 L810,1000 L120,1000 L80,960 L80,770 L110,740 L110,640 L80,610 L80,470 L110,440 L110,340 L80,310 L80,120 Z"/>
+    <!-- module plate seams -->
+    <g stroke="#05060C" stroke-width="2.5">
+      <path d="M180,52 V108 M470,52 V108 M680,52 V108 M1240,52 V108 M1450,52 V108 M1740,52 V108"/>
+      <path d="M180,972 V1028 M470,972 V1028 M680,972 V1028 M1240,972 V1028 M1450,972 V1028 M1740,972 V1028"/>
+      <path d="M52,180 H108 M52,900 H108 M1812,180 H1868 M1812,900 H1868"/>
+    </g>
+    <g stroke="#1E2840" stroke-width="1" opacity="0.6">
+      <path d="M183,52 V108 M473,52 V108 M683,52 V108 M1243,52 V108 M1453,52 V108 M1743,52 V108"/>
+      <path d="M183,972 V1028 M473,972 V1028 M683,972 V1028 M1243,972 V1028 M1453,972 V1028 M1743,972 V1028"/>
+      <path d="M52,183 H108 M52,903 H108 M1812,183 H1868 M1812,903 H1868"/>
+    </g>
+    <!-- vent slots (dark cuts) -->
+    <g fill="#05060C">
+      <rect x="340" y="66" width="5" height="28"/><rect x="352" y="66" width="5" height="28"/><rect x="364" y="66" width="5" height="28"/><rect x="376" y="66" width="5" height="28"/>
+      <rect x="1539" y="66" width="5" height="28"/><rect x="1551" y="66" width="5" height="28"/><rect x="1563" y="66" width="5" height="28"/><rect x="1575" y="66" width="5" height="28"/>
+      <rect x="340" y="986" width="5" height="28"/><rect x="352" y="986" width="5" height="28"/><rect x="364" y="986" width="5" height="28"/><rect x="376" y="986" width="5" height="28"/>
+      <rect x="1539" y="986" width="5" height="28"/><rect x="1551" y="986" width="5" height="28"/><rect x="1563" y="986" width="5" height="28"/><rect x="1575" y="986" width="5" height="28"/>
+      <rect x="62" y="516" width="28" height="5"/><rect x="62" y="528" width="28" height="5"/><rect x="62" y="540" width="28" height="5"/><rect x="62" y="552" width="28" height="5"/>
+      <rect x="1830" y="516" width="28" height="5"/><rect x="1830" y="528" width="28" height="5"/><rect x="1830" y="540" width="28" height="5"/><rect x="1830" y="552" width="28" height="5"/>
+    </g>
+  </g>
+
+  <!-- ============ NEON: contours, white core, vent underglow, chevrons, notches ============ -->
+  <g id="neon">
+    <use href="#outer" fill="none" stroke="url(#neonGrad)" stroke-width="4" filter="url(#glowOuter)"/>
+    <use href="#inner" fill="none" stroke="url(#neonGrad)" stroke-width="3.5" filter="url(#glowInner)"/>
+    <use href="#inner" fill="none" stroke="#FFFFFF" stroke-width="1.2" opacity="0.95"/>
+    <g stroke="url(#neonGrad)" stroke-width="2" opacity="0.5">
+      <path d="M336,97 H385 M1535,97 H1584 M336,983 H385 M1535,983 H1584"/>
+    </g>
+    <!-- side-bay chevrons -->
+    <g fill="none" stroke="url(#neonGrad)" stroke-width="2" opacity="0.8">
+      <path d="M102,362 l14,12 l-14,12 M102,387 l14,12 l-14,12 M102,412 l14,12 l-14,12"/>
+      <path d="M102,662 l14,12 l-14,12 M102,687 l14,12 l-14,12 M102,712 l14,12 l-14,12"/>
+      <path d="M1818,362 l-14,12 l14,12 M1818,387 l-14,12 l14,12 M1818,412 l-14,12 l14,12"/>
+      <path d="M1818,662 l-14,12 l14,12 M1818,687 l-14,12 l14,12 M1818,712 l-14,12 l14,12"/>
+    </g>
+    <!-- tech notches, top and bottom (mirrored) -->
+    <g fill="none" stroke="url(#neonGrad)" stroke-width="2" opacity="0.8">
+      <path d="M740,58 L760,72 M760,58 L780,72 M780,58 L800,72"/>
+      <path d="M1120,72 L1140,58 M1140,72 L1160,58 M1160,72 L1180,58"/>
+      <path d="M740,1022 L760,1008 M760,1022 L780,1008 M780,1022 L800,1008"/>
+      <path d="M1120,1008 L1140,1022 M1140,1008 L1160,1022 M1160,1008 L1180,1022"/>
+    </g>
+  </g>
+
+  <!-- ============ DETAIL: bolts ============ -->
+  <g id="detail">
+    <use href="#bolt" transform="translate(75,125)"/><use href="#bolt" transform="translate(125,75)"/>
+    <use href="#bolt" transform="translate(1845,125)"/><use href="#bolt" transform="translate(1795,75)"/>
+    <use href="#bolt" transform="translate(75,955)"/><use href="#bolt" transform="translate(125,1005)"/>
+    <use href="#bolt" transform="translate(1845,955)"/><use href="#bolt" transform="translate(1795,1005)"/>
+    <use href="#bolt" transform="translate(192,80)"/><use href="#bolt" transform="translate(692,80)"/>
+    <use href="#bolt" transform="translate(1228,80)"/><use href="#bolt" transform="translate(1728,80)"/>
+    <use href="#bolt" transform="translate(192,1000)"/><use href="#bolt" transform="translate(692,1000)"/>
+    <use href="#bolt" transform="translate(1228,1000)"/><use href="#bolt" transform="translate(1728,1000)"/>
+    <use href="#bolt" transform="translate(80,193)"/><use href="#bolt" transform="translate(80,887)"/>
+    <use href="#bolt" transform="translate(1840,193)"/><use href="#bolt" transform="translate(1840,887)"/>
+    <use href="#bolt" transform="translate(870,110)"/><use href="#bolt" transform="translate(1050,110)"/>
+    <use href="#bolt" transform="translate(870,970)"/><use href="#bolt" transform="translate(1050,970)"/>
+  </g>
+</svg>
