@@ -11,6 +11,18 @@
 //! current state), while a slider MOVES (to preview), and when SAVE writes.
 //! Three callers, one answer, or they drift.
 //!
+//! AND ALL THREE READ SILENCE THE SAME WAY: a token this module does not
+//! mention is a token left standing. That is what an overlay does by
+//! construction, and since 2026-08-18 it is what a save does too — `theme::
+//! save_theme` PATCHES the file where a value stands instead of generating
+//! it whole. The two used to disagree, and the disagreement was a bug the
+//! owner could see: the halo a theme dressed itself survived every preview
+//! and went out on the first SAVE, because withholding a value means "keep
+//! it" to a bake and "delete it" to a rewrite. One set cannot serve three
+//! callers who read its silences differently, so the file was taught to read
+//! silence like the others rather than this module taught to stop being
+//! silent.
+//!
 //! TWO PAGES, ONE MODEL. The sets above are the editor's ADVANCED page: one
 //! control per thing. The BASIC page at the bottom of this file is the same
 //! theme asked three questions — HUE, SATURATION, LIGHTNESS — and answers
@@ -87,9 +99,15 @@ pub enum Glass {
 ///
 /// The value is TEXT, not a parsed value, because it is going into a file that
 /// is patched byte by byte — a save replaces the bytes of a value span and
-/// leaves every comment and every other byte where it was. Handing a `Color`
-/// to the writer would mean the writer decides how a colour is spelled, and
-/// then two places know.
+/// leaves every comment and every other byte where it was
+/// (`theme::save_theme`, and `parse::code_len` is how it finds where the
+/// author's note begins). Handing a `Color` to the writer would mean the
+/// writer decides how a colour is spelled, and then two places know.
+///
+/// This paragraph described the intent for a year and the code for none of
+/// it: until 2026-08-18 the writer threw the file away and printed a new one
+/// from the set. Anything read here as a promise about the file is a promise
+/// the save now actually keeps.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Edit {
     pub token: &'static str,
@@ -149,8 +167,16 @@ pub fn border_colour_edit(scope: Scope, colour: Oklch) -> Edit {
 }
 
 /// `halo_dressed` answers "does the theme already draw a visible halo" —
-/// resolved radius AND alpha both above zero. The caller reads it off the
-/// live theme; this function stays pure so the tests need no engine.
+/// resolved radius AND alpha both above zero. The caller reads it ONCE, off
+/// the theme as the file has it, when the editor opens; this function stays
+/// pure so the tests need no engine.
+///
+/// The "once, off the file" half is not a detail. Asking the LIVE bake made
+/// this set an input to itself — the preview it produced was the answer the
+/// next call read — and the halo blinked five times a second while a slider
+/// moved (`.gap-program/usterka-edytor-suwaki-glow.md`, usterka 2). What is
+/// answered here has to be a fact about the THEME, never about the preview
+/// standing on it.
 pub fn border_edits(scope: Scope, kind: Border, colour: Oklch, halo_dressed: bool) -> Vec<Edit> {
     let mut out = vec![border_colour_edit(scope, colour)];
     match kind {
@@ -166,6 +192,24 @@ pub fn border_edits(scope: Scope, kind: Border, colour: Oklch, halo_dressed: boo
         // azure's 0.6u/0.16 to cockpit's 1.6u/0.34, and writing the seeds
         // over all five was the earlier shape's mistake, found in
         // verification; a user's theme deserves the same respect.
+        //
+        // KEEPING A DRESS IS SAYING NOTHING, and the save has to hear that
+        // the way a bake does. It does since 2026-08-18: the file is
+        // patched, so the author's `radius = 2.40u` is simply not one of
+        // the lines a save rewrites — and the file that is patched is THIS
+        // theme's, under whatever name the save lands (`theme::
+        // save_theme_as`). SAVE AS is a copy of the theme on screen, which
+        // is what makes that true for a new name and for a name that
+        // already carries someone else's file alike. The first draft of
+        // this comment claimed only a brand-new name could still cost the
+        // dress; saving over an EXISTING theme cost it too, and worse — the
+        // saved theme wore that file's halo and matched neither what was on
+        // screen nor what it was saved over.
+        //
+        // What is left is not a hole but the absence of a source: saved off
+        // the master, which is not a file, the set IS the whole theme and
+        // the halo is the seed below, because there was never a dress to
+        // keep.
         Border::Neon => {
             out.push(Edit::new("glow.panel_edge.enabled", "true"));
             if !halo_dressed {
@@ -590,6 +634,10 @@ pub fn focus_ring_edits(scope: Scope, enabled: bool, ring: &FocusRing) -> Vec<Ed
         if !ring.halo_dressed {
             // The same seed the border's NEON wears; one number, one place
             // to change it when the owner decides the halos should differ.
+            // And the same silence, safe for the same reason: a save patches
+            // the theme's own file, under any name it lands under, so a ring
+            // halo the theme dressed itself is a line no save touches (see
+            // NEON above).
             out.push(Edit::new("glow.focus_ring.radius", "1.6u"));
         }
     }

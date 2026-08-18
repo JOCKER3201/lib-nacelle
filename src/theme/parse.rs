@@ -1197,6 +1197,17 @@ pub fn parse_value(text: &str, span: Span, out: &mut Vec<Diagnostic>) -> Expr {
 
 // ---------------------------------------------------------------- lexer bits
 
+/// How many bytes of a line the parser reads before the comment starts.
+///
+/// For the theme SAVE, which patches a value where it stands and has to know
+/// where the author's note begins so it never writes over one. Answering with
+/// a length rather than a slice is the whole answer, because [`strip_comment`]
+/// returns a PREFIX of its input — an offset measured on the code is the same
+/// offset in the raw line.
+pub fn code_len(line: &str) -> usize {
+    strip_comment(line).len()
+}
+
 /// Strip a trailing `#` comment, but not a `#RRGGBB` colour and not a `#`
 /// inside a string. `accent = #FF2A35 # the one hue` has both on one line.
 fn strip_comment(line: &str) -> String {
