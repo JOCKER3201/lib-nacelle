@@ -53,7 +53,16 @@ fn saving_as_a_name_that_is_taken_writes_this_theme_not_a_hybrid() {
     let scratch = std::env::temp_dir().join(format!("nacelle-theme-as-{}", std::process::id()));
     let home = scratch.join("home");
     let data = scratch.join("data");
-    let dir = data.join("nacelle-desktop/themes");
+    // Both names, because this test was written before the search path
+    // learned the family folder and a save now lands in the NEW one.
+    // The old folder is still READ — that is the whole migration contract,
+    // "read both, move nothing" — so the source theme is put there, where
+    // a user's existing file would actually be, and the save is expected
+    // in the new one. A test that created only one folder would be a test
+    // of whichever name happened to win.
+    let old_dir = data.join("nacelle-desktop/themes");
+    let dir = data.join("nacelle/themes");
+    std::fs::create_dir_all(&old_dir).unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::create_dir_all(&home).unwrap();
     // SAFETY: one test in its own process, so nothing races the environment.
@@ -63,7 +72,7 @@ fn saving_as_a_name_that_is_taken_writes_this_theme_not_a_hybrid() {
         std::env::remove_var("NACELLE_THEME_DIR");
         std::env::remove_var("NACELLE_THEME_LOCAL");
     }
-    let source = dir.join("zrodlo.theme");
+    let source = old_dir.join("zrodlo.theme");
     let target = dir.join("docelowy.theme");
     std::fs::write(&source, SOURCE).unwrap();
     std::fs::write(&target, TARGET).unwrap();

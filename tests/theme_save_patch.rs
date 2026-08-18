@@ -54,7 +54,11 @@ glow.panel_edge.enabled = false       # the MOOD's own word, not the theme's
 fn a_dressed_theme_saved_by_the_editor_still_wears_its_dress() {
     let scratch =
         std::env::temp_dir().join(format!("nacelle-theme-patch-{}", std::process::id()));
-    let dir = scratch.join("nacelle-desktop/themes");
+    // The family folder. This test predates the search path learning it,
+    // and a save lands where the program is heading. The old folder stays
+    // readable — "read both, move nothing" — but nothing here needs it,
+    // because this theme is created for the test rather than found.
+    let dir = scratch.join("nacelle/themes");
     std::fs::create_dir_all(&dir).unwrap();
     // SAFETY: one test in its own process, so nothing races the environment.
     unsafe {

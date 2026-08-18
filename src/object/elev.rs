@@ -437,7 +437,7 @@ impl Level {
             // bloom are orthogonal — the gradient decides the ring's two
             // ends, the pulse decides how brightly the halo over it is
             // laid, and neither reads the other.
-            super::window::panel_edge_glow(dl, t, r, &c, seg, edge, now);
+            super::window::panel_edge_glow(dl, t, r, &c, seg, edge, width, now);
         }
         (c, seg)
     }

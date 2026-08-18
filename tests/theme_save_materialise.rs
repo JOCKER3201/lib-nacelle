@@ -48,9 +48,14 @@ fn a_theme_found_outside_the_user_directory_is_copied_there_whole() {
     let edits = [Edit { token: "glow.panel_edge.enabled", value: "true".to_string() }];
     let saved = theme::save_theme("przyniesiony", &edits).expect("the save refused");
 
+    // The FAMILY folder, not the program's own: the search path learned
+    // `nacelle/themes` the same day this test was written, and a save
+    // materialises where the program is heading, not where it has been.
+    // The old folder is still read — that is the migration contract — so
+    // the theme this test brings in is found there and lands here.
     assert_eq!(
         saved,
-        data.join("nacelle-desktop/themes/przyniesiony.theme"),
+        data.join("nacelle/themes/przyniesiony.theme"),
         "a save landed outside the user's own theme directory"
     );
     let after = std::fs::read_to_string(&saved).unwrap();
