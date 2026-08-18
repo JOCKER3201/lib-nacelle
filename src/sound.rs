@@ -21,7 +21,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Something the interface did that a theme may attach a sound to.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -463,6 +464,100 @@ impl Mixer {
 
         self.voices.retain(|v| v.pos < v.clip.len());
     }
+
+    /// Whether a clip that will END is still being rendered.
+    ///
+    /// The ambient bed does not count, and that is the whole point of
+    /// the question: it loops for as long as the program runs, so an
+    /// answer that included it would never become false and anyone
+    /// waiting on it would wait forever. What this answers is "has
+    /// everything that was going to finish finished", which is what
+    /// the farewell sound at shutdown needs to know.
+    pub fn playing(&self) -> bool {
+        !self.voices.is_empty()
+    }
+}
+
+// -------------------------------------------------- the mixer, shared
+
+/// A [`Mixer`] plus the signal that says the last finite voice has just
+/// finished — the pair a device thread and the rest of the program hold
+/// between them.
+///
+/// The signal could have been a bare `Condvar` beside the mutex at every
+/// call site, but then raising it would be the obligation of whoever
+/// calls [`Mixer::fill`], and the cost of forgetting is invisible:
+/// nothing breaks, every wait simply runs to its timeout instead of
+/// ending when the sound does. Filling THROUGH this type is what makes
+/// the edge impossible to miss.
+pub struct SharedMixer {
+    mixer: Mutex<Mixer>,
+    /// Raised on the playing -> silent EDGE only. Signalling on every
+    /// period instead would spend a wake syscall per audio buffer —
+    /// ~190 a second, for the whole session — on behalf of a waiter
+    /// that exists twice in a run.
+    drained: Condvar,
+}
+
+impl Default for SharedMixer {
+    fn default() -> Self {
+        SharedMixer::new()
+    }
+}
+
+impl SharedMixer {
+    pub fn new() -> SharedMixer {
+        SharedMixer {
+            mixer: Mutex::new(Mixer::new()),
+            drained: Condvar::new(),
+        }
+    }
+
+    /// The mixer itself, for the callers that only set something.
+    ///
+    /// A panic elsewhere must not silence the desktop for the rest of
+    /// the session, so a poisoned lock is taken anyway: the worst a
+    /// half-written `Mixer` holds is a voice at a wrong position, which
+    /// is one wrong buffer of sound, and the alternative is no sound at
+    /// all ever again.
+    pub fn lock(&self) -> MutexGuard<'_, Mixer> {
+        self.mixer.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Renders one output buffer and raises the drained edge if this was
+    /// the buffer that emptied the mixer. The device thread's one call.
+    pub fn fill(&self, out: &mut [f32], channels: usize) {
+        let mut m = self.lock();
+        let was = m.playing();
+        m.fill(out, channels);
+        if was && !m.playing() {
+            self.drained.notify_all();
+        }
+    }
+
+    /// Waits until nothing finite is playing any more, or until `cap`
+    /// runs out; true means the sound finished, false that the cap did.
+    ///
+    /// The predicate is tested BEFORE the first wait, so a clip that
+    /// finishes between being started and being waited on cannot lose
+    /// its edge — a missed wakeup here would look exactly like the
+    /// fixed-length sleep this replaced.
+    pub fn wait_drained(&self, cap: Duration) -> bool {
+        let deadline = Instant::now() + cap;
+        let mut m = self.lock();
+        while m.playing() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            let (guard, _) = self
+                .drained
+                .wait_timeout(m, left)
+                .unwrap_or_else(|e| e.into_inner());
+            m = guard;
+        }
+        true
+    }
 }
 
 #[cfg(test)]
@@ -568,5 +663,91 @@ mod tests {
         assert_eq!(got, vec![Event::Click, Event::Save]);
         drain(&mut got);
         assert!(got.is_empty());
+    }
+
+    /// A stand-in for the device thread: renders the shared mixer in
+    /// period-sized buffers until it is asked to stop, exactly like the
+    /// ALSA writer in the desktop does, and at no particular speed —
+    /// the whole point of the mechanism under test is that the waiter
+    /// does not care how fast the card runs.
+    fn spin_device(
+        mixer: Arc<SharedMixer>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        period: usize,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let mut buf = vec![0.0f32; period * 2];
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                mixer.fill(&mut buf, 2);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        })
+    }
+
+    /// THE EVENT ENDS THE WAIT, NOT THE CLOCK. The cap here is minutes;
+    /// the clip is a few hundred frames. If the wait were a sleep of any
+    /// fixed length derived from the cap, this test would sit here for
+    /// that long and then fail on the elapsed assertion.
+    #[test]
+    fn waiting_for_the_farewell_ends_when_the_sound_does() {
+        let mixer = Arc::new(SharedMixer::new());
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dev = spin_device(mixer.clone(), stop.clone(), 64);
+
+        mixer.lock().play(Arc::new(vec![0.5f32; 256]), 1.0);
+        let t0 = Instant::now();
+        let drained = mixer.wait_drained(Duration::from_secs(120));
+        let waited = t0.elapsed();
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        dev.join().unwrap();
+
+        assert!(drained, "the wait must end on the sound, not on the cap");
+        assert!(
+            waited < Duration::from_secs(5),
+            "waited {waited:?} for a clip the device drains in milliseconds"
+        );
+        assert!(!mixer.lock().playing());
+    }
+
+    /// The other half of the contract: a device that never renders must
+    /// not be able to hold the exit open. The cap is what bounds it, and
+    /// the answer says which of the two ended the wait.
+    #[test]
+    fn a_silent_device_cannot_hold_the_exit_open() {
+        let mixer = Arc::new(SharedMixer::new());
+        mixer.lock().play(Arc::new(vec![0.5f32; 48_000]), 1.0);
+
+        let t0 = Instant::now();
+        let drained = mixer.wait_drained(Duration::from_millis(60));
+        let waited = t0.elapsed();
+
+        assert!(!drained, "nothing rendered, so nothing can have drained");
+        assert!(waited >= Duration::from_millis(60));
+        assert!(
+            waited < Duration::from_secs(5),
+            "the cap must end the wait promptly, waited {waited:?}"
+        );
+    }
+
+    /// The ambient bed loops for the life of the program. Counting it as
+    /// "playing" would mean every exit with sound enabled paid the full
+    /// cap instead of the length of the farewell — the failure mode is
+    /// silent, so it gets a test of its own.
+    #[test]
+    fn the_looping_bed_does_not_count_as_playing() {
+        let mixer = Arc::new(SharedMixer::new());
+        mixer.lock().set_ambient(Some(Arc::new(vec![0.25f32; 64])));
+
+        let t0 = Instant::now();
+        assert!(mixer.wait_drained(Duration::from_secs(30)));
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "an endless bed must not be waited on"
+        );
+        // And it really is still running: this is not "no sound at all".
+        let mut out = vec![0.0f32; 8];
+        mixer.fill(&mut out, 2);
+        assert!(out.iter().all(|s| (*s - 0.25).abs() < 0.001));
     }
 }
