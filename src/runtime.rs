@@ -667,6 +667,26 @@ pub struct HostApi {
     /// half-present mechanism is worse than an absent one, because the
     /// absent one degrades where it is stated to.
     pub settings_epoch: extern "C" fn() -> u32,
+    /// A TEXT token's value, written into `buf` as UTF-8; returns the
+    /// bytes written — `min(text, cap)`, so a short buffer gets a prefix
+    /// exactly like [`HostApi::theme_enum_word`] — and 0 for a token that
+    /// is not of this kind, is absent, or holds nothing.
+    ///
+    /// The kind [`HostApi::theme_px`], `theme_color`, `theme_flag` and
+    /// `theme_enum` between them could not reach: a text token is a
+    /// STRING the theme states, not a member of a list and not a number.
+    /// Two keys are of it today and one of them, `type.ellipsis`, is why
+    /// this entry exists — every widget that trims a name to its tile
+    /// appended `"…"` out of its own source, so a console theme asking
+    /// for `>` got the character it did not ask for from four places at
+    /// once, in two processes' worth of code that had no road to the key.
+    ///
+    /// Init-time, like [`HostApi::theme_token`] and
+    /// [`HostApi::theme_enum_word`]: call at widget init, cache,
+    /// invalidate on [`HostApi::theme_epoch`]. A text token is found on
+    /// the host by a scan of every text key the theme declares — cheap
+    /// once per theme, wrong once per frame.
+    pub theme_text: extern "C" fn(ctx: *mut c_void, id: u32, buf: *mut u8, cap: u32) -> u32,
 }
 
 /// The longest topic name the channel accepts. A name is a constant in
@@ -778,6 +798,10 @@ pub const HOST_API_HAS_CHANNEL: usize =
 pub const HOST_API_HAS_SETTINGS: usize =
     std::mem::offset_of!(HostApi, settings_epoch) + std::mem::size_of::<usize>();
 
+/// The prefix that includes `theme_text`.
+pub const HOST_API_HAS_THEME_TEXT: usize =
+    std::mem::offset_of!(HostApi, theme_text) + std::mem::size_of::<usize>();
+
 /// [`HostApi::mask_quad`]: blend additively — the quad adds light, the
 /// way the host's own glow does. Without it the quad covers, the way its
 /// shadows do.
@@ -833,6 +857,34 @@ impl HostApi {
     /// blank panel.
     pub fn has_settings(&self) -> bool {
         self.api_size as usize >= HOST_API_HAS_SETTINGS
+    }
+
+    /// Whether this host answers text tokens. Absent: the caller reads
+    /// the empty string, which is the SAME answer a theme that declares
+    /// no such key gives — a widget must not be able to tell an old host
+    /// from a quiet theme, or it would grow a fallback for one of them.
+    pub fn has_theme_text(&self) -> bool {
+        self.api_size as usize >= HOST_API_HAS_THEME_TEXT
+    }
+
+    /// A text token by NAME, resolved and copied out — the plugin-side
+    /// shorthand for [`HostApi::theme_token`] + [`HostApi::theme_text`].
+    ///
+    /// Here rather than in each widget because the two that trim names
+    /// to tiles wrote the ellipsis out of their own source, and a helper
+    /// each would be the same duplication one layer down. Init-time:
+    /// cache the answer against [`HostApi::theme_epoch`].
+    pub fn theme_text_of(&self, ctx: *mut c_void, name: &str) -> String {
+        if !self.has_theme_text() {
+            return String::new();
+        }
+        let id = (self.theme_token)(name.as_ptr(), name.len() as u32);
+        // Longer than any trim marker or figure set a theme states; a
+        // longer one arrives cut rather than growing a buffer for a key
+        // nobody writes.
+        let mut buf = [0u8; 64];
+        let n = (self.theme_text)(ctx, id, buf.as_mut_ptr(), buf.len() as u32);
+        String::from_utf8_lossy(&buf[..(n as usize).min(buf.len())]).into_owned()
     }
 }
 

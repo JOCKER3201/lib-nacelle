@@ -165,13 +165,22 @@ pub fn draw(ctx: &mut Ctx, r: Rect, label: &str, st: ButtonState) {
     // beside them. A role that asks for no figures answers `Figures::NONE`
     // and this is the proportional run it has always been.
     let fig = role.figures(ctx.fonts, font, px);
+    // WHETHER THIS CAP SHOUTS is the role's to say, like its size, its
+    // face and its tracking. It was the one member of that ladder the
+    // button could not read, so every caller in the program settled the
+    // question in its own source — `"SAVE"`, `"ADD WIDGET"`, two hundred
+    // and fifty-odd literals — and a theme setting `type.button.case`
+    // moved nothing at all. Asking here does not change a single one of
+    // those strings under the shipped master, which says `upper`; it
+    // makes a master that says `none` mean something.
+    let cap = role.cased(label);
     ctx.dl.text_center_fig(
         ctx.fonts,
         font,
         px,
         r.cx(),
         r.y + (r.h - px * leading) / 2.0,
-        label,
+        &cap,
         col(style.text),
         track,
         &fig,
@@ -625,5 +634,49 @@ mod tests {
             width(&mut fonts, &eights, EIGHTS),
             "a boxed cap measured 1111 and 8888 at different widths"
         );
+    }
+
+    // ------------------------------------------------------------ case
+    //
+    // WHETHER A BUTTON SHOUTS is the theme's to say. Twelve of the
+    // master's twenty-five roles ask for `upper` or `smallcaps` and no
+    // control outside the two title bands honoured any of them, so the
+    // interface answered the question in its own source instead.
+
+    /// The one text run a cap made, as the register recorded it.
+    fn cap_text(label: &str) -> String {
+        let mut fonts = FontSystem::new();
+        let mut dl = DrawList::recording();
+        draw(&mut ctx(&mut dl, &mut fonts), BOX, label, ButtonState::default());
+        dl.cmds()
+            .iter()
+            .find_map(|c| match c {
+                DrawCmd::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .expect("a cap draws exactly one text run")
+    }
+
+    #[test]
+    fn a_theme_that_asks_for_no_case_gets_no_capitals_on_a_cap() {
+        crate::draw::arm_cmds();
+        // The shipped master says `type.button.case = upper`, so a cap
+        // written in mixed case reaches the screen shouting — which is
+        // the whole reason two hundred and fifty-seven labels in the
+        // desktop are spelled in capitals: until now the token could not
+        // do it for them.
+        assert_eq!(cap_text("Save"), "SAVE");
+        // A theme that asks for none gets none. Not "gets the string the
+        // caller happened to write" — the caller wrote the same string
+        // both times, and only the theme moved.
+        crate::ui::seed_theme_word("type.button.case", "none");
+        assert_eq!(cap_text("Save"), "Save");
+        // ...and a theme with a TYPO in that key gets no transform
+        // either, where the five hand-rolled `match`es this replaced all
+        // ended on `_ => to_uppercase()`.
+        crate::ui::seed_theme_word("type.button.case", "uper");
+        assert_eq!(cap_text("Save"), "Save");
+        crate::ui::seed_theme_word("type.button.case", "lower");
+        assert_eq!(cap_text("Save"), "save");
     }
 }

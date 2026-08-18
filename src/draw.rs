@@ -3844,10 +3844,14 @@ pub(crate) fn fit_tail(
     if fs.measure(font, px, text, spacing) <= max_w {
         return text.to_string();
     }
+    // `type.ellipsis`, read once the run is known not to fit — the same
+    // key the other three trimmers now end on, so a console theme asking
+    // for `>` gets it everywhere or nowhere.
+    let cut = crate::ui::ellipsis();
     let chars: Vec<char> = text.chars().collect();
     let mut n = chars.len().saturating_sub(1);
     while n > 0 {
-        let cand: String = chars[..n].iter().collect::<String>() + "\u{2026}";
+        let cand: String = chars[..n].iter().collect::<String>() + cut.as_ref();
         if fs.measure(font, px, &cand, spacing) <= max_w {
             return cand;
         }

@@ -307,6 +307,33 @@ pub trait Surface {
     /// stripe must read as background rather than as a grey slab.
     fn bed(&mut self, name: &str) -> Color;
     fn flag(&mut self, name: &str) -> bool;
+    /// A TEXT token — the theme's own string, not a word out of a closed
+    /// list ([`Surface::word`]) and not a length.
+    ///
+    /// Two keys are of this kind today, `num.tabular_set` and
+    /// `type.ellipsis`, and the second is why this entry exists: every
+    /// trimming function in the toolkit and in the widgets appended
+    /// `"…"` out of its own source while the master declared the
+    /// character and named those very call sites in its comment.
+    ///
+    /// Absent or unanswerable: the empty string, which every caller has
+    /// to read as "the theme said nothing" and never as "use mine". A
+    /// host too old to answer it is the same case as a theme that
+    /// declares no key, and the two must not be told apart here.
+    ///
+    /// Named `theme_text` and not `text` because [`Surface::text`] is
+    /// how a run is DRAWN; this one only fetches a string the theme
+    /// states.
+    ///
+    /// The default is that empty answer, stated once. A surface that
+    /// cannot reach text tokens is in exactly the position of a host too
+    /// old to carry [`crate::runtime::HostApi::theme_text`], and the two
+    /// have to look the same from the calling side or a caller would
+    /// grow a fallback for one of them.
+    fn theme_text(&mut self, name: &str) -> String {
+        let _ = name;
+        String::new()
+    }
     /// The word an enum token currently resolves to.
     fn word(&mut self, name: &str) -> String;
     /// Whether an enum token stands at `word`. Written in terms of
@@ -609,6 +636,14 @@ impl Surface for CtxSurface<'_, '_> {
         theme::resolved().flag(token_id(name))
     }
 
+    /// Through [`crate::ui`]'s memo, not straight at the diagnostics: a
+    /// text token is found by a linear scan of every text key the theme
+    /// declares, so the scan happens once per theme here and the call
+    /// costs a copy of a two-byte string.
+    fn theme_text(&mut self, name: &str) -> String {
+        crate::ui::theme_text_named(name).to_string()
+    }
+
     fn word(&mut self, name: &str) -> String {
         crate::ui::theme_word(token_id(name))
     }
@@ -881,6 +916,14 @@ impl Surface for AbiSurface<'_> {
         (self.api.theme_flag)(self.ctx, id) != 0
     }
 
+    /// A host too old to answer text tokens reads as a theme that states
+    /// none: the empty string, and no marker on a trimmed run. That is
+    /// the degradation [`HostApi::theme_text`] states, and stating it
+    /// here in the widget's own words would be a second answer.
+    fn theme_text(&mut self, name: &str) -> String {
+        self.api.theme_text_of(self.ctx, name)
+    }
+
     fn word(&mut self, name: &str) -> String {
         if !self.api.has_theme_enum_word() {
             return String::new();
@@ -1018,6 +1061,11 @@ pub(crate) mod tests {
         /// answer for a token no test declared — it is what a master
         /// missing the key says too.
         pub words: HashMap<String, String>,
+        /// The value each TEXT token holds. Empty is the honest answer
+        /// for a key no test declared — it is what a master missing the
+        /// key says too, and what a trimming view must read as "the
+        /// theme states no marker".
+        pub texts_by_token: HashMap<String, String>,
         /// The fill every class rung answers with. `StateInk::raw` is
         /// transparent and a plate with no colour is never drawn, so a
         /// test about a plate's SHAPE has to hand it one.
@@ -1041,6 +1089,7 @@ pub(crate) mod tests {
                 can_clip: true,
                 tokens: HashMap::new(),
                 words: HashMap::new(),
+                texts_by_token: HashMap::new(),
                 plate: None,
                 mouse: (-1.0, -1.0),
             }
@@ -1058,6 +1107,12 @@ pub(crate) mod tests {
         /// style, anything the view compares by name.
         pub fn word_at(mut self, name: &str, word: &str) -> FakeSurface {
             self.words.insert(name.to_string(), word.to_string());
+            self
+        }
+
+        /// Declares a TEXT token — `type.ellipsis`, `num.tabular_set`.
+        pub fn text_at(mut self, name: &str, v: &str) -> FakeSurface {
+            self.texts_by_token.insert(name.to_string(), v.to_string());
             self
         }
 
@@ -1121,6 +1176,9 @@ pub(crate) mod tests {
         }
         fn bed(&mut self, _name: &str) -> Color {
             Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }
+        }
+        fn theme_text(&mut self, name: &str) -> String {
+            self.texts_by_token.get(name).cloned().unwrap_or_default()
         }
         fn flag(&mut self, _name: &str) -> bool {
             false

@@ -333,20 +333,17 @@ fn draw_band(
     // is runtime state, so it multiplies here, and a collapsed band caps the
     // size so the text never overruns the band it was shrunk to keep.
     let role = ui::bound_role(&ROLE, "panel.title.role");
-    // Two keys of the role that `Role` does not carry. They hang off the
-    // role's NAME, which the binding states in a word, so they are spelled
-    // from that word rather than pinned to `title.panel` here. The case is
-    // compared as a WORD: each role declares its own enum list, so an index
-    // memoised across roles would name a different transform in each. The
-    // px floor is NOT among them any more — `Role::px` applies the role's
-    // own, so a floor spelled again here would be a second answer.
-    let (case, alpha) = {
+    // One key of the role that `Role` still does not carry. It hangs off
+    // the role's NAME, which the binding states in a word, so it is
+    // spelled from that word rather than pinned to `title.panel` here.
+    // The px floor is NOT among them any more — `Role::px` applies the
+    // role's own, so a floor spelled again here would be a second answer;
+    // and neither is the CASE, which `Role::case` now carries with the
+    // rest of the role instead of being re-spelled beside it.
+    let alpha = {
         let mut sf = CtxSurface::new(ctx);
         let word = sf.word("panel.title.role");
-        (
-            sf.word(&format!("type.{word}.case")),
-            sf.px(&format!("type.{word}.alpha")).clamp(0.0, 1.0),
-        )
+        sf.px(&format!("type.{word}.alpha")).clamp(0.0, 1.0)
     };
     let mut px = role.px(ctx, 1.0);
     let leading = role.leading();
@@ -364,13 +361,12 @@ fn draw_band(
     let face = role.font();
     let fig = role.figures(ctx.fonts, face, px);
 
-    // `smallcaps` is approximated as upper until FontSystem can set true
-    // small caps (§5.16 owes it the face work).
-    let cased = |s: &str| match case.as_str() {
-        "none" => s.to_string(),
-        "lower" => s.to_lowercase(),
-        _ => s.to_uppercase(),
-    };
+    // The role's own transform, through the toolkit's one applier. This
+    // was a fourth copy of the same `match`, and like the other three it
+    // ended on `_ => to_uppercase()`: a theme with a typo in its `case`
+    // key got a shouting title band and no word about why.
+    let case = role.case();
+    let cased = |s: &str| ui::recase(case, s).into_owned();
 
     let inset = t.px(tok(&INSET_X, "panel.title.inset_x")).max(0.0);
     let gap = t.px(tok(&GAP, "panel.title.gap")).max(0.0);
@@ -483,11 +479,13 @@ fn fit_lead(
     if ctx.fonts.measure_fig(face, px, text, spacing, fig) <= max_w {
         return text.to_string();
     }
+    // `type.ellipsis`, the same key the trailing trimmers read — a marker
+    // is a marker whichever end of the run it hangs off.
+    let cut = ui::ellipsis();
     let chars: Vec<char> = text.chars().collect();
     let mut start = 1;
     while start < chars.len() {
-        let cand: String =
-            std::iter::once('\u{2026}').chain(chars[start..].iter().copied()).collect();
+        let cand: String = cut.chars().chain(chars[start..].iter().copied()).collect();
         if ctx.fonts.measure_fig(face, px, &cand, spacing, fig) <= max_w {
             return cand;
         }
@@ -735,6 +733,67 @@ pub(crate) mod tests {
             drawn[1].1
         );
         report(&role_word("panel.title.role"), want, &drawn);
+    }
+
+    // ---------------------------------------------------- the trim marker
+    //
+    // `type.ellipsis` has been in the master since it was written, and its
+    // comment names the very call sites that ignored it: "a console theme
+    // may prefer `...` or `>`". Four trimmers in this library appended
+    // `"\u{2026}"` out of their own source instead, so a theme could ask
+    // and get nothing. They are exercised together because the failure
+    // that matters is not "one of them ignores the key" but "they do not
+    // agree" — one trim marker in a list and another in the band above it
+    // is the state this test exists to make impossible.
+
+    /// What each of the four trims makes of one overlong string.
+    fn four_trims(ctx: &mut Ctx) -> [String; 4] {
+        use crate::font::FONT_UI;
+        const LONG: &str = "/var/home/michael/.git/nacelle/src/object/panel.rs";
+        // Narrow enough that all four have to cut, wide enough that all
+        // four keep something besides the marker.
+        const ROOM: f32 = 90.0;
+        const PX: f32 = 14.0;
+        [
+            crate::view::paint::fit_end_tab(&mut CtxSurface::new(ctx), FONT_UI, PX, LONG, ROOM, 0.0, false),
+            crate::base::fit_end(ctx, PX, LONG, ROOM),
+            crate::draw::fit_tail(ctx.fonts, FONT_UI, PX, LONG, 0.0, ROOM),
+            fit_lead(ctx, FONT_UI, PX, LONG, 0.0, ROOM, &Figures::NONE),
+        ]
+    }
+
+    fn trims() -> [String; 4] {
+        let mut got: Option<[String; 4]> = None;
+        drawn_runs(|ctx| got = Some(four_trims(ctx)));
+        got.expect("the harness ran the closure")
+    }
+
+    #[test]
+    fn every_trim_in_the_toolkit_ends_on_the_character_the_theme_states() {
+        let names = ["view::paint::fit_end_tab", "base::fit_end", "draw::fit_tail", "fit_lead"];
+        // The shipped master states the ellipsis, so that is what all
+        // four cut with — three at the tail, the band's own at the head.
+        let cut = trims();
+        for (i, got) in cut.iter().enumerate() {
+            assert!(got.len() > 1, "{} kept nothing but a marker: {got:?}", names[i]);
+            let marked = if i == 3 { got.starts_with('\u{2026}') } else { got.ends_with('\u{2026}') };
+            assert!(marked, "{} did not mark its cut: {got:?}", names[i]);
+        }
+        // Now the theme says a comma — one key, and every one of the four
+        // has to follow it. This is the assertion that fails on the code
+        // this test was written against, where the character was in the
+        // Rust and no theme could reach it.
+        crate::ui::seed_theme_text("type.ellipsis", ",");
+        let cut = trims();
+        for (i, got) in cut.iter().enumerate() {
+            let marked = if i == 3 { got.starts_with(',') } else { got.ends_with(',') };
+            assert!(marked, "{} kept its own marker over the theme's: {got:?}", names[i]);
+            assert!(
+                !got.contains('\u{2026}'),
+                "{} answered the theme AND its own character: {got:?}",
+                names[i]
+            );
+        }
     }
 
     /// A tall panel keeps the full container: band, padding, and a

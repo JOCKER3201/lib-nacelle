@@ -307,6 +307,23 @@ extern "C" fn h_theme_enum_word(_p: *mut c_void, id: u32, buf: *mut u8, cap: u32
     n as u32
 }
 
+/// A TEXT token's value, out to a plugin. The token id is resolved on
+/// the plugin's side by `theme_token`, exactly as every other theme entry
+/// takes it, and the NAME is recovered here because a text token is
+/// stored by name in the diagnostics rather than in the baked table — the
+/// same cold path `ui::ellipsis` reads, and the reason this call is
+/// documented as init-time.
+extern "C" fn h_theme_text(_p: *mut c_void, id: u32, buf: *mut u8, cap: u32) -> u32 {
+    if buf.is_null() || cap == 0 {
+        return 0;
+    }
+    let Some(name) = crate::theme::name_of(tid(id)) else { return 0 };
+    let text = crate::ui::theme_text_named(&name);
+    let n = text.len().min(cap as usize);
+    unsafe { std::ptr::copy_nonoverlapping(text.as_ptr(), buf, n) };
+    n as u32
+}
+
 /// The plugin half of the sprite glow/shadow path: four corners, four
 /// sprite-space texcoords, one colour. The mapping into the atlas's mask
 /// band happens in [`DrawList::mask_quad`](crate::draw::DrawList::mask_quad),
@@ -836,6 +853,7 @@ pub fn host_api() -> &'static HostApi {
         channel_read: h_channel_read,
         settings_read: h_settings_read,
         settings_epoch: h_settings_epoch,
+        theme_text: h_theme_text,
     };
     &API
 }
@@ -1398,6 +1416,57 @@ mod tests {
         assert_eq!(h_theme_enum_word(std::ptr::null_mut(), u32::MAX, buf.as_mut_ptr(), 64), 0);
     }
 
+    /// A TEXT token crosses the same way, and this is the road every
+    /// compiled widget's trim marker now takes: the launcher's tile
+    /// captions and the file browser's names both call
+    /// `HostApi::theme_text_of` and appended `"\u{2026}"` out of their
+    /// own source before it existed.
+    #[test]
+    fn a_text_token_crosses_as_bytes() {
+        let _ = crate::theme::resolved();
+        let name = b"type.ellipsis";
+        let id = h_theme_token(name.as_ptr(), name.len() as u32);
+        assert_ne!(id, u32::MAX, "the master must declare type.ellipsis");
+        let expect = crate::theme::diagnostics()
+            .text("type.ellipsis")
+            .expect("the master states a trim marker")
+            .to_string();
+        assert!(!expect.is_empty());
+
+        let mut buf = [0u8; 64];
+        let n = h_theme_text(std::ptr::null_mut(), id, buf.as_mut_ptr(), 64) as usize;
+        assert_eq!(&buf[..n], expect.as_bytes());
+
+        // The plugin-side shorthand answers the same string by NAME,
+        // which is the only form a widget ever writes.
+        let api = host_api();
+        assert_eq!(api.theme_text_of(std::ptr::null_mut(), "type.ellipsis"), expect);
+        // ...and a host from before the entry answers the empty string —
+        // the same answer a theme that declares no marker gives, so a
+        // widget cannot tell the two apart and grow a fallback for one.
+        let old = HostApi {
+            api_size: crate::runtime::HOST_API_HAS_SETTINGS as u32,
+            ..*api
+        };
+        assert_eq!(old.theme_text_of(std::ptr::null_mut(), "type.ellipsis"), "");
+
+        // An ENUM token is not a text token and answers nothing rather
+        // than its word: the two kinds are asked for separately because
+        // they are separate questions.
+        let e = b"type.title.window.case";
+        let eid = h_theme_token(e.as_ptr(), e.len() as u32);
+        assert_eq!(h_theme_text(std::ptr::null_mut(), eid, buf.as_mut_ptr(), 64), 0);
+
+        // A short buffer gets a prefix; null buffer, no room and an
+        // unknown id all answer 0 rather than crashing.
+        let mut small = [0u8; 1];
+        let n = h_theme_text(std::ptr::null_mut(), id, small.as_mut_ptr(), 1) as usize;
+        assert_eq!(n, expect.len().min(1));
+        assert_eq!(h_theme_text(std::ptr::null_mut(), id, std::ptr::null_mut(), 64), 0);
+        assert_eq!(h_theme_text(std::ptr::null_mut(), id, buf.as_mut_ptr(), 0), 0);
+        assert_eq!(h_theme_text(std::ptr::null_mut(), u32::MAX, buf.as_mut_ptr(), 64), 0);
+    }
+
     /// The host table grows at the END only, and its `api_size` is what
     /// says how far it reaches — the version-6 growth contract, from the
     /// side that fills the table.
@@ -1406,7 +1475,7 @@ mod tests {
         use crate::runtime::{
             HOST_API_HAS_CHANNEL, HOST_API_HAS_CLIP, HOST_API_HAS_ENUM_WORD,
             HOST_API_HAS_MASK_QUAD, HOST_API_HAS_RING, HOST_API_HAS_SETTINGS,
-            HOST_API_HAS_TOOLTIP, HOST_API_SIZE_MIN,
+            HOST_API_HAS_THEME_TEXT, HOST_API_HAS_TOOLTIP, HOST_API_SIZE_MIN,
         };
         let api = host_api();
         assert_eq!(api.api_size as usize, std::mem::size_of::<HostApi>());
@@ -1417,8 +1486,9 @@ mod tests {
         assert!(api.has_tooltip());
         assert!(api.has_channel());
         assert!(api.has_settings());
+        assert!(api.has_theme_text());
         // The appended entries sit past the mandatory prefix, in order,
-        // with the settings pair the current end of the table.
+        // with the text-token entry the current end of the table.
         assert!(HOST_API_SIZE_MIN < HOST_API_HAS_ENUM_WORD);
         assert!(HOST_API_HAS_ENUM_WORD < HOST_API_HAS_MASK_QUAD);
         assert!(HOST_API_HAS_MASK_QUAD < HOST_API_HAS_CLIP);
@@ -1426,7 +1496,8 @@ mod tests {
         assert!(HOST_API_HAS_RING < HOST_API_HAS_TOOLTIP);
         assert!(HOST_API_HAS_TOOLTIP < HOST_API_HAS_CHANNEL);
         assert!(HOST_API_HAS_CHANNEL < HOST_API_HAS_SETTINGS);
-        assert_eq!(HOST_API_HAS_SETTINGS, std::mem::size_of::<HostApi>());
+        assert!(HOST_API_HAS_SETTINGS < HOST_API_HAS_THEME_TEXT);
+        assert_eq!(HOST_API_HAS_THEME_TEXT, std::mem::size_of::<HostApi>());
         // A host that stopped at the version-6 minimum answers none of
         // them, which is what a plugin's `has_*` gate is for.
         let old = HostApi { api_size: HOST_API_SIZE_MIN as u32, ..*api };
@@ -1437,6 +1508,7 @@ mod tests {
         assert!(!old.has_tooltip());
         assert!(!old.has_channel());
         assert!(!old.has_settings());
+        assert!(!old.has_theme_text());
         // And a host from before the ring pair keeps the clips.
         let pre_ring = HostApi { api_size: HOST_API_HAS_CLIP as u32, ..*api };
         assert!(pre_ring.has_clip());
@@ -1445,6 +1517,11 @@ mod tests {
         // the rings, and none of the four holes it closes. This is the
         // old table a shipped plugin measured, and every new gate must
         // answer false for it or that plugin reads past the end.
+        // The table as it stood before the TEXT entry — a plugin built
+        // against it must read the empty string rather than past the end.
+        let pre_text = HostApi { api_size: HOST_API_HAS_SETTINGS as u32, ..*api };
+        assert!(pre_text.has_settings());
+        assert!(!pre_text.has_theme_text());
         let pre_growth = HostApi { api_size: HOST_API_HAS_RING as u32, ..*api };
         assert!(pre_growth.has_theme_enum_word());
         assert!(pre_growth.has_mask_quad());

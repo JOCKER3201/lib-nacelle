@@ -455,6 +455,20 @@ pub fn enum_index(token: TokenId, word: &str) -> Option<u16> {
 /// role, not a member of a closed enum, so the consumer wants the word itself
 /// rather than an index to compare. The resolved index is taken before the
 /// engine lock: [`resolved`] may itself load on first use.
+/// The NAME a token id stands for — [`id`] read backwards.
+///
+/// The one caller is the plugin boundary: a TEXT token is stored by name
+/// in [`diagnostics`] rather than in the baked table, so answering
+/// `theme_text` for an id means finding the name that id was interned
+/// under. Nothing on the host needs it — every host reader already holds
+/// the name it asked with.
+pub fn name_of(token: TokenId) -> Option<String> {
+    let e = ENGINE.get()?;
+    let g = e.lock().ok()?;
+    let name = g.schema.name(token);
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 pub fn enum_word_of(token: TokenId) -> Option<String> {
     let i = resolved().enum_of(token);
     let e = ENGINE.get()?;

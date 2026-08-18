@@ -94,6 +94,13 @@ impl Surface for Probe {
     fn word(&mut self, name: &str) -> String {
         theme::id(name).and_then(theme::enum_word_of).unwrap_or_default()
     }
+    /// The real theme's answer, like every other kind above. A probe that
+    /// answered nothing here would say "this theme states no trim
+    /// marker", which is a case worth its own test and not the state a
+    /// probe of the SHIPPED master should be in.
+    fn theme_text(&mut self, name: &str) -> String {
+        theme::diagnostics().text(name).unwrap_or_default().to_string()
+    }
     fn class_state(&mut self, class: &str, state: State) -> StateInk {
         match theme::class_id(class) {
             Some(c) => StateInk::from(theme::resolved().class_state(c, state)),
@@ -273,8 +280,12 @@ fn a_crowded_strip_trims_its_labels_and_floors_the_tabs() {
     // The floor is a floor: with ten of them the strip is wider than the
     // box, and says so rather than pretending.
     assert!(cells[9].right() > narrow.right());
-    // Every label was trimmed to what its tab could hold.
-    assert!(sf.texts.iter().all(|t| t.2.ends_with('\u{2026}')), "{:?}", sf.texts);
+    // Every label was trimmed to what its tab could hold, and marked
+    // with the character `type.ellipsis` states — the master's, read
+    // through the probe, not one this file chose.
+    let cut = theme::diagnostics().text("type.ellipsis").unwrap_or_default().to_string();
+    assert!(!cut.is_empty(), "the master states a trim marker");
+    assert!(sf.texts.iter().all(|t| t.2.ends_with(&cut)), "{:?}", sf.texts);
 }
 
 #[test]
