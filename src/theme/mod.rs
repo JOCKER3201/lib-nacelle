@@ -2810,20 +2810,23 @@ decor.enabled    = false
     /// it is under this line on purpose.
     const NOT_BLACK: f32 = 1.15;
 
-    /// ŻYCZENIE 1, RE-ARGUED TWICE FROM TWO SCREENSHOTS. The settings
-    /// window's two NAVIGATION columns are ONE bed at ONE colour, standing
-    /// one step off the window body the page keeps — and no band of it is
+    /// ŻYCZENIE 1, RE-ARGUED THREE TIMES FROM TWO SCREENSHOTS AND A
+    /// MOCK-UP. The settings window's NAVIGATION is ONE bed standing one
+    /// step off the window body the page keeps — and neither of them is
     /// black.
     ///
-    /// WHAT CHANGED ON 2026-08-18, and what did not. The owner looked at the
-    /// three-shade staircase this test used to demand and rejected it: "mają
-    /// być po całości i obie w jednakowym kolorze, tym w środkowej
+    /// WHAT CHANGED ON 2026-08-18, in two moves. First the owner looked at
+    /// the three-shade staircase this test used to demand and rejected it:
+    /// "mają być po całości i obie w jednakowym kolorze, tym w środkowej
     /// kolumnie". Two adjacent strips of one navigation at two shades read
-    /// as a seam through one object. So the STEP GATE between the rail and
-    /// the sub-page column is gone and its opposite stands in its place —
-    /// the two must be the SAME COLOUR, compared as colours and not as token
-    /// names. Everything else this test was built for is untouched, and the
-    /// black floor most of all.
+    /// as a seam through one object, so the step gate between the rail and
+    /// the sub-page column became its opposite — the SAME COLOUR, compared
+    /// as colours and not as token names. Then the two columns became ONE:
+    /// a section's pages unfold under it, indented, and
+    /// `component.settings.sub_fill` went with the column it bedded. What
+    /// this test asserts about that is that the name is GONE and not merely
+    /// unused — an equal-colour claim about a column nothing draws is a
+    /// claim that cannot fail, and a token nothing can paint reads as a knob.
     ///
     /// WHAT THE OWNER SAW THE DAY BEFORE, and what this test could not see
     /// before that. The two navigation columns were pointed at
@@ -2842,8 +2845,8 @@ decor.enabled    = false
     /// fault was exactly this: the page followed the BACKGROUND sliders and
     /// the two pinned columns did not.
     ///
-    /// THE PAGE'S NAME IS DECLARED AND IS THE SENTINEL. All three columns
-    /// are named so a theme may bed any one of them; the master leaves the
+    /// THE PAGE'S NAME IS DECLARED AND IS THE SENTINEL. Both columns are
+    /// named so a theme may bed either of them; the master leaves the
     /// page's at `none`, because the body is already standing there and
     /// `panel.fill` is translucent — a second coat composes its alpha twice.
     ///
@@ -2851,13 +2854,20 @@ decor.enabled    = false
     /// nothing to bed, and the interior is the body — the bed the page was
     /// on all along.
     #[test]
-    fn the_two_navigation_bands_are_one_bed_over_the_body() {
+    fn the_navigation_band_is_one_bed_over_the_body() {
         let (schema, _, t) = baked("");
         let raw = |n: &str| t.color(schema.id(n).expect(n));
         let band = |n: &str| lch(raw(n));
         let rail = band("component.settings.rail_fill");
-        let sub = band("component.settings.sub_fill");
         let page = band("component.panel.fill");
+
+        // THE SECOND COLUMN'S BED IS NOT MERELY UNUSED, IT IS GONE. The
+        // window has one navigation column since 2026-08-18, so a theme
+        // that set this would be turning a knob attached to nothing.
+        assert!(
+            schema.id("component.settings.sub_fill").is_none(),
+            "`component.settings.sub_fill` still has a name and no column to bed"
+        );
 
         // THE PAGE'S BED IS NAMED, and what it is set to is the sentinel:
         // the token exists so a theme may bed the page, and the master
@@ -2873,9 +2883,11 @@ decor.enabled    = false
             "the master bedded the page a second time; the body's `panel.fill` is it"
         );
 
-        // ONE HUE — the three sit on @surface.hue, which is @hue.accent.
+        // ONE HUE — both sit on @surface.hue, which is @hue.accent, and so
+        // does the line that brackets an unfolded section's pages.
         let accent = lch(t.color(schema.id("palette.accent").unwrap()));
-        for (name, c) in [("rail", rail), ("sub", sub), ("page", page)] {
+        let guide = band("component.settings.rail_guide");
+        for (name, c) in [("rail", rail), ("page", page), ("guide", guide)] {
             assert!(
                 hue_gap(c.h, accent.h) < 2.0,
                 "the {name} band left the interface's hue: {} vs {}",
@@ -2884,39 +2896,39 @@ decor.enabled    = false
             );
         }
 
-        // ONE BED FOR THE NAVIGATION. Not "two shades close enough" — the
-        // SAME COLOUR, read off what the two tokens actually resolve to,
-        // channel for channel and alpha included. A test that compared the
-        // two token EXPRESSIONS would pass on `rail_fill = @surface.void`
-        // the moment somebody wrote it as a reference to the same word.
-        let (r_raw, s_raw) =
-            (raw("component.settings.rail_fill"), raw("component.settings.sub_fill"));
-        for (ch, a, b) in [
-            ("r", r_raw.r, s_raw.r),
-            ("g", r_raw.g, s_raw.g),
-            ("b", r_raw.b, s_raw.b),
-            ("a", r_raw.a, s_raw.a),
-        ] {
-            assert!(
-                (a - b).abs() < 1e-6,
-                "the two navigation columns part on {ch}: {a} vs {b} — the owner asked \
-                 for one colour across both"
-            );
-        }
         // AND THE NAVIGATION STANDS OFF THE PAGE. One step, not none: a bed
         // the eye cannot find is the same fault as a seam through it.
-        assert!(page.l < sub.l, "the navigation did not climb off the body: {} {}", page.l, sub.l);
         assert!(
-            sub.l - page.l > 0.03,
+            page.l < rail.l,
+            "the navigation did not climb off the body: {} {}",
+            page.l,
+            rail.l
+        );
+        assert!(
+            rail.l - page.l > 0.03,
             "the navigation and the page are too close to tell apart: {}",
-            sub.l - page.l
+            rail.l - page.l
         );
 
-        // AND NOT ONE OF THEM IS BLACK. This is the assertion the owner's
+        // THE GUIDE IS A MARK ON THAT BED AND NOT A SECOND BED. It has to
+        // be visible against the rail it is drawn on — a bracket nobody can
+        // see brackets nothing — and it has to be a LINE colour, which here
+        // means it carries alpha of its own rather than the body's: a
+        // hairline that inherited the window's translucency would disappear
+        // exactly where the window is most glass.
+        let g_raw = raw("component.settings.rail_guide");
+        assert!(
+            (guide.l - rail.l).abs() > 0.05,
+            "the guide and the rail it is drawn on are one shade: {} vs {}",
+            guide.l,
+            rail.l
+        );
+        assert!(g_raw.a > 0.0, "the guide is invisible: alpha {}", g_raw.a);
+
+        // AND NEITHER OF THEM IS BLACK. This is the assertion the owner's
         // screenshot is about, and the one the old master fails.
         for (name, c) in [
             ("rail", raw("component.settings.rail_fill")),
-            ("sub", raw("component.settings.sub_fill")),
             ("page", raw("component.panel.fill")),
         ] {
             assert!(
@@ -2938,70 +2950,52 @@ decor.enabled    = false
 
         // THE BODY'S RUNG IS TRANSLUCENT, which is why the page's own name
         // stays at the sentinel: two coats of it are not one coat. It is
-        // also what carries a blurred or translucent window ACROSS all
-        // three columns — the two painted bands inherit this alpha through
-        // `lum()`.
+        // also what carries a blurred or translucent window ACROSS both
+        // columns — the painted band inherits this alpha through `lum()`.
         assert!(raw("component.panel.fill").a < 1.0, "the body's rung went opaque");
-        for name in ["component.settings.rail_fill", "component.settings.sub_fill"] {
-            assert!(
-                (raw(name).a - raw("component.panel.fill").a).abs() < 1e-4,
-                "`{name}` stopped carrying the body's alpha; a translucent window \
-                 would go opaque under its own navigation"
-            );
-        }
+        assert!(
+            (raw("component.settings.rail_fill").a - raw("component.panel.fill").a).abs()
+                < 1e-4,
+            "the rail stopped carrying the body's alpha; a translucent window would go \
+             opaque under its own navigation"
+        );
 
-        // And a theme moves them: the seed alone re-skins all three...
+        // And a theme moves them: the seed alone re-skins both...
         let (s2, _, t2) = baked("[palette]\naccent = #FF2A35\n");
         let red = ThemeColor::from_hex("#FF2A35").unwrap().to_linear().to_oklch().h;
-        for name in [
-            "component.settings.rail_fill",
-            "component.settings.sub_fill",
-            "component.panel.fill",
-        ] {
+        for name in ["component.settings.rail_fill", "component.panel.fill"] {
             let c = lch(t2.color(s2.id(name).unwrap()));
             assert!(hue_gap(c.h, red) < 3.0, "{name} did not follow the seed: {}", c.h);
         }
-        // ...and one band can be re-pointed on its own, which is the whole
-        // reason these are named tokens instead of three rungs named in Rust.
+        // ...and the rail can be re-pointed on its own, which is the whole
+        // reason these are named tokens instead of two rungs named in Rust.
         let (s3, _, t3) = baked("[component]\nsettings.rail_fill = @surface.raised\n");
         let one = lch(t3.color(s3.id("component.settings.rail_fill").unwrap()));
-        let other = lch(t3.color(s3.id("component.settings.sub_fill").unwrap()));
-        assert!(one.l > other.l, "the theme could not lift one band alone");
+        let other = lch(t3.color(s3.id("component.panel.fill").unwrap()));
+        assert!(one.l > other.l, "the theme could not lift the navigation alone");
 
-        // ONE ANCHOR: MOVE THE BODY AND ALL THREE FOLLOW. This is the
-        // editor's own case written as a theme — `edit::glass_edits`'
-        // SOLID writes `component.panel.fill` as exactly such a literal —
-        // and it is the divergence the owner photographed: the page went
-        // with the sliders and the two columns stayed behind.
+        // ONE ANCHOR: MOVE THE BODY AND BOTH FOLLOW. This is the editor's
+        // own case written as a theme — `edit::glass_edits`' SOLID writes
+        // `component.panel.fill` as exactly such a literal — and it is the
+        // divergence the owner photographed: the page went with the sliders
+        // and the navigation stayed behind.
         let (s5, _, t5) =
             baked("[component]\npanel.fill = oklch(0.4200, 0.0400, 292.00 / 0.820)\n");
         let moved = |n: &str| t5.color(s5.id(n).expect(n));
         let body = lch(moved("component.panel.fill"));
         assert!((body.l - 0.42).abs() < 0.01, "the body did not take the literal: {}", body.l);
-        let (r5, u5) = (
-            lch(moved("component.settings.rail_fill")),
-            lch(moved("component.settings.sub_fill")),
-        );
-        for (name, c) in [("rail", r5), ("sub", u5)] {
-            assert!(
-                hue_gap(c.h, body.h) < 2.0,
-                "the {name} band kept the theme's old hue while the body took a new one: \
-                 {} vs {}",
-                c.h,
-                body.h
-            );
-        }
+        let r5 = lch(moved("component.settings.rail_fill"));
         assert!(
-            (r5.l - u5.l).abs() < 1e-3,
-            "the moved body parted the two navigation columns: {} vs {}",
-            r5.l,
-            u5.l
+            hue_gap(r5.h, body.h) < 2.0,
+            "the rail kept the theme's old hue while the body took a new one: {} vs {}",
+            r5.h,
+            body.h
         );
         assert!(
-            u5.l - body.l > 0.03,
+            r5.l - body.l > 0.03,
             "the navigation collapsed onto the body it follows: {} {}",
             body.l,
-            u5.l
+            r5.l
         );
 
         // ONE NUMBER STATES THE STEP — its size AND its direction. At 1.0
@@ -3011,26 +3005,19 @@ decor.enabled    = false
         // of tokens.
         let (s6, _, t6) = baked("[settings]\nband_lift = 1.0\n");
         let flat = |n: &str| lch(t6.color(s6.id(n).expect(n)));
-        let (fr, fs, fp) = (
-            flat("component.settings.rail_fill"),
-            flat("component.settings.sub_fill"),
-            flat("component.panel.fill"),
-        );
+        let (fr, fp) =
+            (flat("component.settings.rail_fill"), flat("component.panel.fill"));
         assert!(
-            (fr.l - fp.l).abs() < 1e-3 && (fs.l - fp.l).abs() < 1e-3,
-            "band_lift = 1.0 left a step behind: {} {} {}",
+            (fr.l - fp.l).abs() < 1e-3,
+            "band_lift = 1.0 left a step behind: {} {}",
             fp.l,
-            fs.l,
             fr.l
         );
         let (s7, _, t7) = baked("[settings]\nband_lift = 0.85\n");
         let down = |n: &str| lch(t7.color(s7.id(n).expect(n)));
         assert!(
-            (down("component.settings.rail_fill").l - down("component.settings.sub_fill").l)
-                .abs()
-                < 1e-3
-                && down("component.settings.sub_fill").l < down("component.panel.fill").l,
-            "a lift under 1.0 did not put the one navigation bed under the page"
+            down("component.settings.rail_fill").l < down("component.panel.fill").l,
+            "a lift under 1.0 did not put the navigation bed under the page"
         );
 
         // AND THE PAGE CAN BE BEDDED AFTER ALL, by the theme that wants it:
@@ -3074,8 +3061,8 @@ decor.enabled    = false
             ));
             let (schema, r, t) = baked(&file);
 
-            // The CONTAINER: a settings column's bed.
-            let container = lch(t.color(schema.id("component.settings.sub_fill").unwrap()));
+            // The CONTAINER: the settings navigation's bed.
+            let container = lch(t.color(schema.id("component.settings.rail_fill").unwrap()));
             // The PLATE: what the renderer actually lays under a button —
             // the class ladder's idle fill, whose colour is the button's
             // class base (`class.button = @accent.primary`).
@@ -3115,12 +3102,12 @@ decor.enabled    = false
                 container.h
             );
 
-            // AND NOT ONE OF THE THREE COLUMNS IS BLACK, at any position of
-            // the wheel. A HUE move is a rotation and rotations do not
-            // darken, so a band that comes out black here came out black
-            // from the master — which is the owner's screenshot, and which
-            // this test used to walk straight past because a ROTATION check
-            // cannot see a lightness.
+            // AND NEITHER COLUMN IS BLACK, at any position of the wheel. A
+            // HUE move is a rotation and rotations do not darken, so a band
+            // that comes out black here came out black from the master —
+            // which is the owner's screenshot, and which this test used to
+            // walk straight past because a ROTATION check cannot see a
+            // lightness.
             //
             // GATED ON THE LIGHTNESS SLIDER STANDING STILL, which it does
             // here (`Tone::NEUTRAL` but for the hue). Dragged to its floor
@@ -3128,11 +3115,7 @@ decor.enabled    = false
             // theme, and a black theme's beds are allowed to be black —
             // "not black when the theme is not black" is the claim, not
             // "never black".
-            for name in [
-                "component.settings.rail_fill",
-                "component.settings.sub_fill",
-                "component.panel.fill",
-            ] {
+            for name in ["component.settings.rail_fill", "component.panel.fill"] {
                 let bed = t.color(schema.id(name).unwrap());
                 assert!(
                     off_black(bed) >= NOT_BLACK,
@@ -3141,27 +3124,17 @@ decor.enabled    = false
                     off_black(bed)
                 );
             }
-            // Still ONE bed for the navigation and still one step off the
-            // page, wherever the wheel stopped: both come out of one
-            // expression off one anchor, so a turn can neither part them
-            // nor flatten them onto the page.
+            // Still one step off the page, wherever the wheel stopped: the
+            // navigation's bed comes out of one expression off the body's
+            // own anchor, so a turn cannot flatten it onto the page.
             let bed = |n: &str| lch(t.color(schema.id(n).unwrap()));
-            let (page, sub, rail) = (
-                bed("component.panel.fill"),
-                bed("component.settings.sub_fill"),
-                bed("component.settings.rail_fill"),
-            );
+            let (page, rail) =
+                (bed("component.panel.fill"), bed("component.settings.rail_fill"));
             assert!(
-                (rail.l - sub.l).abs() < 1e-3,
-                "at {turn} deg the two navigation columns parted: {} vs {}",
-                rail.l,
-                sub.l
-            );
-            assert!(
-                sub.l - page.l > 0.03,
+                rail.l - page.l > 0.03,
                 "at {turn} deg the navigation flattened onto the page: {} {}",
                 page.l,
-                sub.l
+                rail.l
             );
 
             // THE EXCEPTION. Severity is a rotation, not a flattening: the

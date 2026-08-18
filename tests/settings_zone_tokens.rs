@@ -68,19 +68,61 @@ fn the_zone_tokens_of_the_settings_window_bake_to_the_specs_numbers() {
         px("settings.rail_w_min_min_px")
     );
 
-    // The subpage column of the three-panel layout (ANEKS): a fraction,
-    // wider than the rail (it carries subpage names, not group headers),
-    // and the two together leave the content panel its majority.
-    let subrail = px("settings.subrail_w_frac");
+    // …and it leaves the page the majority on its own. The second
+    // navigation column it used to share the window with is gone
+    // (2026-08-18): a section's pages unfold UNDER it now, so
+    // `settings.subrail_w_frac` describes nothing and is not declared.
+    assert!(rail < 0.5, "the rail must leave the page the majority, got {rail}");
     assert!(
-        subrail > 0.0 && subrail < 1.0,
-        "subrail_w_frac must bake to a 0..1 fraction, got {subrail}"
+        theme::id("settings.subrail_w_frac").is_none(),
+        "`settings.subrail_w_frac` is still declared, and the column it sized no \
+         longer exists — a knob that turns nothing reads as a knob"
     );
-    assert!(subrail >= rail, "the subrail must not be narrower than the rail");
+
+    // THE RAIL'S OWN RHYTHM. A navigation column is a dense list of
+    // names, not a run of controls, so its break is its own and is
+    // TIGHTER than the form's — and it has to be, because the rail
+    // carries the open section's pages as well and has no scroll to put
+    // the overflow in.
+    let rail_gap = px("settings.rail_row_gap");
+    assert!(near(rail_gap, 5.4), "rail_row_gap: {rail_gap}");
+    assert!(rail_gap > 0.0, "entries with no break at all are one entry");
     assert!(
-        rail + subrail < 0.5,
-        "rail + subrail must leave the content panel the majority, got {}",
-        rail + subrail
+        rail_gap < px("modal.row_gap"),
+        "the rail's break ({rail_gap}) is not under the form's ({}) — the column \
+         that has to hold every section AND the open one's pages is spending a \
+         page's rhythm",
+        px("modal.row_gap")
+    );
+
+    // THE UNFOLDED SECTION. Its pages stand `rail_indent` in from it,
+    // propped against a hairline standing `rail_guide_x` of the way
+    // across that step. All three are the theme's, because all three are
+    // the whole of what the second column used to say by standing
+    // somewhere else.
+    let indent = px("settings.rail_indent");
+    assert!(near(indent, 16.2), "rail_indent: {indent}");
+    // A step the eye can read, and one the rail can afford: a section's
+    // own pages are buttons with words on them, so an indent that ate
+    // the column would leave them unreadable rather than nested.
+    assert!(indent > 0.0, "an indent of nothing is not an indent");
+    assert!(
+        indent < px("settings.rail_w_min") / 2.0,
+        "the indent ({indent}) takes more than half the narrowest rail ({}) — its \
+         pages would have less room than the step that marks them",
+        px("settings.rail_w_min")
+    );
+    let guide = px("settings.rail_guide_w");
+    assert!(guide > 0.0, "a guide of no width is a guide nobody sees: {guide}");
+    assert!(
+        guide < indent,
+        "the guide ({guide}) is as wide as the step it stands in ({indent}) — that \
+         is a second column's edge, which is the shape the one rail replaced"
+    );
+    let at = px("settings.rail_guide_x");
+    assert!(
+        (0.0..=1.0).contains(&at),
+        "rail_guide_x must bake to a 0..1 fraction of the indent, got {at}"
     );
 
     // The air a navigation column's bed keeps around what stands on it
