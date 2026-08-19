@@ -34,8 +34,8 @@ enabled = false                       # the editor is about to turn this on
 radius  = 2.40u                       # the author's own halo - not the editor's seed
 alpha   = 0.500                       # ditto
 
-[elev.panel]
-edge.color = oklch(0.5000, 0.0500, 200.00)   # a note that sits after a value
+[border]
+default = oklch(0.5000, 0.0500, 200.00)   # a note that sits after a value
 
 [palette]
 accent = oklch(0.6000, 0.1000, 300.00)
@@ -176,7 +176,10 @@ fn a_dressed_theme_saved_by_the_editor_still_wears_its_dress() {
         switch.contains("# the editor is about to turn this on"),
         "the value was rewritten and took the note beside it with it: {switch}"
     );
-    let colour = line_with("edge.color =");
+    // The colour lands on the shared root `border.default` now, not the
+    // `elev.panel` leaf — one edit that moves every frame, the settings
+    // window and each widget alike (`edit::border_colour_edit`).
+    let colour = line_with("default =");
     assert!(
         colour.contains("oklch(0.7000, 0.1200, 40.00)"),
         "the border colour the sliders set never reached the file: {colour}"

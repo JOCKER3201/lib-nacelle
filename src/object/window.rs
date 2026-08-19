@@ -1082,6 +1082,7 @@ mod tests {
         let dump = |kind: Border| {
             let mut glow = String::new();
             let mut elev = String::new();
+            let mut border = String::new();
             for e in border_edits(Scope::Theme, kind, colour, false) {
                 // The falloff carries its declaration back, for the same
                 // reason `a_tube_theme` does: an overlay re-declares the
@@ -1095,11 +1096,20 @@ mod tests {
                     glow.push_str(&format!("{k} = {}{tail}\n", e.value));
                 } else if let Some(k) = e.token.strip_prefix("elev.panel.") {
                     elev.push_str(&format!("{k} = {}\n", e.value));
+                } else if let Some(k) = e.token.strip_prefix("border.") {
+                    // The colour now lands on the shared root `border.default`
+                    // (a `[border]` token), not the `elev.panel` leaf. It
+                    // does not reach this picture — `panel_edge_glow` takes
+                    // its `edge` as a parameter — but the overlay must still
+                    // bake the whole edit set the kind wrote.
+                    border.push_str(&format!("{k} = {}\n", e.value));
                 } else {
                     panic!("a border kind wrote {}, which this proof cannot bake", e.token);
                 }
             }
-            let t = theme::bake_over_master(&format!("[elev.panel]\n{elev}[glow]\n{glow}"));
+            let t = theme::bake_over_master(&format!(
+                "[border]\n{border}[elev.panel]\n{elev}[glow]\n{glow}"
+            ));
             let mut dl = DrawList::recording();
             panel_edge_glow(&mut dl, &t, box_(), &c, 6, edge, A_BORDER, AT_REST);
             (

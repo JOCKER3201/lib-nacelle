@@ -189,9 +189,21 @@ pub fn oklch_literal(c: Oklch) -> String {
 /// colour alone. (Verified finding, 2026-08-16: the earlier shape mapped
 /// "no choice" to LINE and a colour drag switched five themes' halos off
 /// as a side effect.)
+///
+/// IT WRITES THE SHARED ROOT `border.default`, NOT `elev.panel.edge.color`.
+/// The leaf is what `elev::Level` reads for the window's own ring, but it is
+/// only ONE frame: every rung takes its `edge.color` from
+/// `@component.panel.border -> @border.default`, and the [`class`] ladder
+/// gives `panel`, `window` and `dialog` — a plugin widget's frame among
+/// them — a base of `@border.default` too. Writing the leaf moved the
+/// settings window's edge and left every widget and every other rung on the
+/// theme's own colour, so the frames stopped matching and a widget's ring
+/// did not follow the picker. Writing the root moves them together, which is
+/// what "one model of a window" asks for and is symmetric with
+/// [`border_width_edit`], which has always written the root `border.edge.width`.
 pub fn border_colour_edit(scope: Scope, colour: Oklch) -> Edit {
     let Scope::Theme = scope;
-    Edit::new("elev.panel.edge.color", oklch_literal(colour))
+    Edit::new("border.default", oklch_literal(colour))
 }
 
 /// `halo_dressed` answers "does the theme already draw a visible halo" —
@@ -1389,14 +1401,20 @@ mod tests {
         // a second colour here would be a value that changes nothing. If a
         // reader is ever added, THIS test is where the second write belongs.
         let neon = border_edits(Scope::Theme, Border::Neon, c(0.7, 0.15, 200.0, 1.0), false);
-        let colours: Vec<_> = neon.iter().filter(|e| e.token.ends_with("color")).collect();
+        // The border's colour is the shared root `border.default` (the leaf
+        // `elev.panel.edge.color` and every rung reach it by reference); the
+        // halo writes no colour of its own.
+        let colours: Vec<_> = neon
+            .iter()
+            .filter(|e| e.token.ends_with("color") || e.token == "border.default")
+            .collect();
         assert_eq!(
             colours.len(),
             1,
             "the border wrote {} colours; the halo has none of its own",
             colours.len()
         );
-        assert_eq!(colours[0].token, "elev.panel.edge.color");
+        assert_eq!(colours[0].token, "border.default");
     }
 
     #[test]
