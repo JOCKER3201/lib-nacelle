@@ -272,7 +272,18 @@ fn rung() -> elev::Level {
                 return *level;
             }
         }
-        let level = elev::Level::of(&format!("elev.{}", ui::theme_word(id)));
+        let word_str = ui::theme_word(id);
+        let mut level = elev::Level::of(&format!("elev.{word_str}"));
+        // ONE MODEL OF A WINDOW (rule 11): a widget's panel is the settings
+        // window's own surface, so its ring reads the SAME border the frame
+        // does — `component.panel.border`, the shared root the editor writes
+        // — not the rung's raw `edge.color`, which an older save could have
+        // pinned to a literal while the window moved on. Colour only, and
+        // only on `elev.panel`: a widget lifted to another rung draws that
+        // rung's own ring.
+        if word_str == "panel" {
+            level = level.with_edge_color("component.panel.border");
+        }
         *c = Some((epoch, word, level));
         level
     })

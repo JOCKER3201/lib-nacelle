@@ -169,6 +169,24 @@ impl Level {
         self
     }
 
+    /// Override JUST the ring's COLOUR token, leaving the fill, the shape
+    /// and the width on the rung.
+    ///
+    /// ONE MODEL OF A WINDOW (rule 11): a widget's own panel and the
+    /// settings window frame are the same surface, so a widget's ring must
+    /// read the SAME border the frame does — `component.panel.border`, the
+    /// shared root the theme editor writes — and not the rung's raw
+    /// `elev.panel.edge.color`. The two are one value on a clean theme
+    /// (`elev.panel.edge.color = @component.panel.border`), but an older
+    /// border-colour save PINNED the leaf to a literal, and after it a
+    /// widget's ring sat on a colour the window — reading the root — had
+    /// already left. This is the narrow half of `worn_as`: only the colour
+    /// moves, because only the colour ever diverged.
+    pub(crate) fn with_edge_color(mut self, token: &str) -> Level {
+        self.edge_color = theme::id(token).unwrap_or(TokenId::MISSING);
+        self
+    }
+
     /// The `shape.*` preset that gets the LAST WORD on this rung's four
     /// corners, one corner at a time (f3 K6).
     ///
@@ -503,6 +521,37 @@ pub(crate) mod tests {
         if bw > 0.0 {
             dl.ring(r, &c, seg, bw, col(t.color(id(edge))));
         }
+    }
+
+    /// A WIDGET'S PANEL WEARS THE SHARED BORDER ROOT, like the window frame.
+    ///
+    /// `panel::draw`'s rung passes `component.panel.border` through
+    /// [`Level::with_edge_color`], so a widget's ring reads the same token
+    /// the settings window frame wears — not the rung's own
+    /// `elev.panel.edge.color`, which an older border-colour save could pin
+    /// to a literal, stranding the widget on a colour the window has left.
+    /// The two are one value on a clean theme; the point is that they need
+    /// not be, and the widget follows the root either way. Only the colour
+    /// moves — fill, shape and width stay the rung's.
+    #[test]
+    fn a_widget_panel_wears_the_shared_border_root() {
+        theme::resolved();
+        let base = Level::of("elev.panel");
+        let worn = base.with_edge_color("component.panel.border");
+        assert_eq!(
+            worn.edge_color,
+            theme::id("component.panel.border").unwrap(),
+            "the widget ring must read the root the window frame wears"
+        );
+        assert_eq!(
+            base.edge_color,
+            theme::id("elev.panel.edge.color").unwrap(),
+            "the rung's own leaf is what an old save could pin to a literal"
+        );
+        assert_ne!(worn.edge_color, base.edge_color, "the ring colour did not move to the root");
+        assert_eq!(worn.fill, base.fill, "with_edge_color moved the fill");
+        assert_eq!(worn.corner, base.corner, "with_edge_color moved the corner");
+        assert_eq!(worn.edge_width, base.edge_width, "with_edge_color moved the width");
     }
 
     /// Two lists that are the same picture, checked the way the frame
