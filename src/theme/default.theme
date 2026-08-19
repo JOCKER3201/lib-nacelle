@@ -2950,7 +2950,7 @@ border_style          = solid                 # how the ring is stroked · 9 · 
 border_width          = @border.edge.width    # stroke weight of the ring · 9 · str (device px, never panel-scaled) or same_as_parent · @border.edge.width -> @stroke.hair, i.e. the "solid 1x" of 5.18's table
 border_color          = @border.default       # colour of the ring · 9 · colour or same_as_parent · -> @border.default -> alpha(@accent.primary, 0.78)
 border_alpha          = 1.0                   # alpha multiplier on border_color · 9 · frac, 0..1 · opaque
-fill                  = @surface.raised       # the interior · 9 · colour, none, or same_as_parent · 5.18's table
+fill                  = @component.button.fill # the interior · 9 · colour, none, or same_as_parent · @component.button.fill, the ONE dedicated button colour every button reads instead of the surface ladder it sits on
 fill_alpha            = 1.0                   # alpha multiplier on fill · 9 · frac, 0..1 · opaque
 fill_to               = @shape.button.fill    # the far stop of the interior gradient · 9 · colour · == fill, so the fill is flat
 fill_angle            = 90deg                 # direction of the interior gradient · 9 · deg, 0..360 · ignored while fill_to == fill
@@ -2978,7 +2978,7 @@ border_style          = solid                 # how the ring is stroked · 9 · 
 border_width          = @border.edge.width    # stroke weight of the ring · 9 · str (device px, never panel-scaled) or same_as_parent · @border.edge.width -> @stroke.hair, i.e. the "solid 1x" of 5.18's table
 border_color          = @border.default       # colour of the ring · 9 · colour or same_as_parent · -> @border.default -> alpha(@accent.primary, 0.78)
 border_alpha          = 1.0                   # alpha multiplier on border_color · 9 · frac, 0..1 · opaque
-fill                  = @surface.raised       # the interior · 9 · colour, none, or same_as_parent · 5.18's table
+fill                  = @component.button.fill # the interior · 9 · colour, none, or same_as_parent · @component.button.fill, the ONE dedicated button colour every button reads instead of the surface ladder it sits on
 fill_alpha            = 1.0                   # alpha multiplier on fill · 9 · frac, 0..1 · opaque
 fill_to               = @shape.button_alt.fill
                                               # the far stop of the interior gradient · 9 · colour · == fill, so the fill is flat
@@ -5648,6 +5648,7 @@ launcher.active_border = @accent.warm    # that tile's ring · image 8 · col ·
 menu.fill = @surface.raised         # the opaque bed of a drop-down or window menu · images 1,7 · col · @surface.raised; [menu] carries geometry only, so a menu could not take a material distinct from the panel behind it
 menu.border = @elev.panel.edge.color # the menu's chamfered ring · images 1,7 · col · reads the SAME edge colour the settings window frame wears (elev.panel.edge.color -> @component.panel.border -> @border.default), so BASIC's border-colour control (which writes the shared root border.default) moves the menu ring with every other frame; [menu].border is a stroke WIDTH
 menu.hint = @text.muted             # a row's shortcut hint ink · - · col · @text.muted; secondary to the row label by design
+button.fill = @surface.raised       # the ONE button interior, worn by every button in every window regardless of the elevation or bed beneath it · images 1,7 · col · @surface.raised; a dedicated token so a theme sets the button colour ONCE (shape.button.fill reads this), and no window's own surface can shade its buttons differently
 checkbox.tick = @accent.primary     # the filled mark inside a checked box · - · col · @accent.primary; [checkbox] sets the mark's shape and inset and never its colour
 
 # ---------------------------------------------------------------- field
