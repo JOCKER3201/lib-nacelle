@@ -607,9 +607,22 @@ pub fn surface_edits(scope: Scope, hue: SurfaceHue, lift: f32, chroma: f32) -> V
 /// `term.fg = @text.primary`), panel titles (`panel.rs:305`), menu hints
 /// (`menu.rs:458`), tooltip text (`tooltip.rs:273`), toasts
 /// (`toaster.rs:234-235`) and badge text (`view/paint.rs:548`).
-pub fn text_edits(scope: Scope, lift: f32, chroma: f32) -> Vec<Edit> {
+pub fn text_edits(scope: Scope, hue: SurfaceHue, lift: f32, chroma: f32) -> Vec<Edit> {
     let Scope::Theme = scope;
     vec![
+        // `text.hue` is the text ladder's hue seed, symmetric with
+        // `surface.hue`: FollowAccent restores the master's own reference
+        // so a later accent drag keeps moving the text with it; Own cuts
+        // the text loose so the FONT picker can lead a colour of its own.
+        // (`SurfaceHue` is the shared "follow the accent or an own degree"
+        // seed; the name is the surface's only by history.)
+        Edit::new(
+            "text.hue",
+            match hue {
+                SurfaceHue::FollowAccent => "@hue.accent".to_string(),
+                SurfaceHue::Own(deg) => format!("{:.2}", deg.rem_euclid(360.0)),
+            },
+        ),
         Edit::new("text.lift", format!("{:.4}", lift.clamp(-0.10, 0.10))),
         Edit::new("text.chroma", format!("{:.3}", chroma.clamp(0.0, 3.0))),
     ]
@@ -1810,6 +1823,7 @@ mod tests {
         ("surface.hue", "the six level exprs (default.theme:317-331); levels read at deco.rs:33, winframe.rs:414"),
         ("surface.lift", "theme/bake.rs:519"),
         ("surface.chroma", "theme/bake.rs:520"),
+        ("text.hue", "the six text role exprs (default.theme:382-395); roles reach the screen at view/paint.rs:157"),
         ("text.lift", "theme/bake.rs:525"),
         ("text.chroma", "theme/bake.rs:526"),
         ("severity.ok.text", "view/paint.rs:42; ui.rs:147"),
@@ -1896,7 +1910,7 @@ mod tests {
         for hue in [SurfaceHue::FollowAccent, SurfaceHue::Own(210.0)] {
             all.extend(surface_edits(Scope::Theme, hue, 0.02, 1.2));
         }
-        all.extend(text_edits(Scope::Theme, -0.03, 0.8));
+        all.extend(text_edits(Scope::Theme, SurfaceHue::Own(210.0), -0.03, 0.8));
         for role in [
             SeverityRole::Ok,
             SeverityRole::Info,
@@ -2025,9 +2039,15 @@ mod tests {
         let wild = surface_edits(Scope::Theme, SurfaceHue::FollowAccent, 0.5, 9.0);
         assert_eq!(wild[1].value, "0.0900");
         assert_eq!(wild[2].value, "4.000");
-        let text = text_edits(Scope::Theme, -0.5, 9.0);
-        assert_eq!(text[0].value, "-0.1000");
-        assert_eq!(text[1].value, "3.000");
+        let text = text_edits(Scope::Theme, SurfaceHue::Own(410.0), -0.5, 9.0);
+        assert_eq!(text[0].value, "50.00", "text hue is written on the circle, 410 = 50");
+        assert_eq!(text[1].value, "-0.1000");
+        assert_eq!(text[2].value, "3.000");
+        // FollowAccent restores the master's reference, so a font that has
+        // not been cut loose keeps moving with the accent.
+        let follow = text_edits(Scope::Theme, SurfaceHue::FollowAccent, 0.0, 1.0);
+        assert_eq!(follow[0].token, "text.hue");
+        assert_eq!(follow[0].value, "@hue.accent");
     }
 
     #[test]

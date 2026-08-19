@@ -377,21 +377,22 @@ scrim  = alpha(@palette.black, 0.66)
 # and lifted in OKLab L at constant hue when a11y.contrast_floor = true.
 # =========================================================================
 [text]
+hue    = @hue.accent                # the hue every text role sits on · 1-10 · deg · reads @hue.accent (written as a reference so the kind settles to a number and a theme — or the editor's FONT picker — may override it with plain degrees); symmetric with surface.hue, so a font colour leads its whole ladder the way the accent leads the beds
 lift   = 0.0                        # OKLab L added to the ladder roles · 3 · f, -0.10 .. 0.10 · 0 = as derived; image 3's look needs -0.07 to put text.title on its own green
 chroma = 1.00                       # scale over the text roles' chroma coefficients · 3,4 · f, 0.0 .. 3.0 · 1 = as derived; seven of the eight original seeds resolved text.primary to the same near-white without this
-title      = oklch(0.870, 0.55x@chroma.accent, @hue.accent)
+title      = oklch(0.870, 0.55x@chroma.accent, @text.hue)
                     # panel titles: small caps, wide tracking (every panel heading in the images) · 1-10 · OKLCh, L fixed by the ladder in 5.6 · floor 4.5 on surface.panel (4.4); resolves 11.90 for the mint seed
-primary    = oklch(0.905, 0.15x@chroma.accent, @hue.accent)
+primary    = oklch(0.905, 0.15x@chroma.accent, @text.hue)
                     # the value half of key:value, and terminal output: `74%`, `21:57:30` · all · OKLCh · floor 7.0 AAA — this program is a terminal (4.4); resolves 12.96
-secondary  = oklch(0.755, 0.24x@chroma.accent, @hue.accent)
+secondary  = oklch(0.755, 0.24x@chroma.accent, @text.hue)
                     # the key half of key:value — `PROCESOR:` before `74%` · 1, 7 · OKLCh · floor 4.5 (4.4); resolves 7.93
-muted      = oklch(0.590, 0.30x@chroma.accent, @hue.accent)
+muted      = oklch(0.590, 0.30x@chroma.accent, @text.hue)
                     # dim captions, axis labels, legends, leader labels and photo captions · 1, 2 · OKLCh · floor 3.0 for non-essential text (4.4); resolves 4.24
-disabled   = oklch(0.435, 0.22x@chroma.accent, @hue.accent)
+disabled   = oklch(0.435, 0.22x@chroma.accent, @text.hue)
                     # inert controls · settings · OKLCh · no floor — being unreadable is the message; resolves 2.19
 inverse    = contrast_on(@accent.primary, @surface.void, @text.primary)
                     # text ON a filled accent or severity chip (`SYSTEM LOCKDOWN`) · 5 · colour · whichever of surface.void / text.primary contrasts better against accent.primary; >= 4.5 vs the fill
-instrument = oklch(0.372, 0.34x@chroma.accent, @hue.accent)
+instrument = oklch(0.372, 0.34x@chroma.accent, @text.hue)
                     # hex and coordinate dumps in image 9's margins and image 1's panel footer. CARRIES NO INFORMATION · 1, 9 · OKLCh · exempt from every contrast floor by rule (4.4); resolves 1.87
 
 
