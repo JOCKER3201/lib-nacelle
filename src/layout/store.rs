@@ -143,8 +143,13 @@ impl LayautStore {
         std::fs::write(dir.join(format!("{name}.layaut")), layaut::write_file(def))
     }
 
-    /// SAVE AS: a new base for the (possibly new) file; the per-screen
-    /// sections and the boards it carries survive the rewrite.
+    /// SAVE: the whole edited layout becomes the one arrangement every
+    /// screen shares. The complete placement set is written as the base,
+    /// scaled to each monitor's own pixels when it is read, so a second
+    /// monitor can no longer hold half of one arrangement and half of
+    /// another. NO per-screen `[WxH@D]` section is written — the old
+    /// ones, and the divergence they caused, are dropped. The boards the
+    /// file carries survive the rewrite.
     pub fn save_full(
         &self,
         name: &str,
@@ -155,7 +160,6 @@ impl LayautStore {
         def.materialize();
         let old = self.read_def(name);
         let mut out = layaut::serialize_base(&def.instances, key);
-        layaut::serialize_sections(&mut out, &old.overrides, &def.instances);
         layaut::serialize_boards(&mut out, &old.boards, &def.instances);
         std::fs::write(dir.join(format!("{name}.layaut")), out)
     }
