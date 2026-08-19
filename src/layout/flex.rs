@@ -382,9 +382,18 @@ fn stack_heights(
             })
             .collect()
     } else if asked > 0.0 && grow_sum <= 0.0 {
-        // Every panel measured itself: they share the column in the
-        // proportions they asked for, shrunk together if they do not fit.
-        let k = (content_span / asked).min(1.0);
+        // Every panel measured itself and NONE of them grows — so they
+        // share the WHOLE column in the proportions they asked for: shrunk
+        // together when they do not fit, and STRETCHED together when they
+        // fit with room to spare. The stretch is the fix for a column the
+        // responsive reflow left with no grower to absorb the slack (a
+        // second monitor that pushed the growing panel to another column):
+        // capping `k` at 1 kept the panels at their content size and left
+        // the rest of the column empty — the gaps the owner saw moving the
+        // desktop to a wider screen. `k = content_span / asked` fills the
+        // column exactly, up or down, and the min pass below still holds
+        // every panel above its floor.
+        let k = content_span / asked;
         wants
             .iter()
             .enumerate()
@@ -861,6 +870,24 @@ mod tests {
         // A widget that named no share of its column asked to be as
         // tall as it says it is.
         assert_eq!(fl.columns[0].panels[0].weight, 4.5);
+    }
+
+    /// A COLUMN WITH NO GROWER STILL FILLS. When the reflow leaves a column
+    /// of content-sized panels and no growing one to take the slack — a
+    /// second monitor that pushed the growing panel into another column —
+    /// they stretch together to fill it, instead of keeping their content
+    /// size and leaving the rest of the column empty. That empty rest was
+    /// the gaps the owner saw moving the desktop to a wider screen.
+    #[test]
+    fn a_column_of_content_panels_fills_with_no_grower() {
+        let weights = [1.0, 1.0, 1.0];
+        let mins = [10.0, 10.0, 10.0];
+        let wants = [Some(50.0), Some(50.0), Some(50.0)]; // 150 asked
+        let span = 600.0; // the column is far taller than the content
+        let (hs, gap_px) = stack_heights(&weights, &mins, &wants, 0.0, span);
+        let filled: f32 = hs.iter().sum::<f32>() + gap_px * (hs.len() as f32 - 1.0);
+        assert!((filled - span).abs() < 0.5, "the column left {} px empty", span - filled);
+        assert!(hs[0] > 50.0, "the panel kept its content size and left a gap: {}", hs[0]);
     }
 
     /// The pinned edges are the addons' request, not the engine's
